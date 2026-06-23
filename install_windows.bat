@@ -6,6 +6,8 @@ echo ║  Video Editor — Установка (Windows)  ║
 echo ╚══════════════════════════════════════╝
 echo.
 
+cd /d "%~dp0"
+
 :: Check Python
 python --version >nul 2>&1
 if %errorlevel% neq 0 (
@@ -23,12 +25,6 @@ ffmpeg -version >nul 2>&1
 if %errorlevel% neq 0 (
     echo ► ffmpeg не найден. Устанавливаем через winget...
     winget install --id Gyan.FFmpeg -e --silent
-    if %errorlevel% neq 0 (
-        echo   Не удалось автоустановить ffmpeg.
-        echo   Скачай вручную: https://ffmpeg.org/download.html
-        echo   Распакуй и добавь bin/ в PATH
-        pause
-    )
 ) else (
     echo ✓ ffmpeg уже установлен
 )
@@ -37,15 +33,28 @@ if %errorlevel% neq 0 (
 echo ► Устанавливаем Python библиотеки...
 pip install --quiet google-auth google-auth-oauthlib google-api-python-client anthropic httplib2 PySocks
 
+:: Auto-update app.py from GitHub
+echo ► Проверяем обновления...
+curl -fsSL "https://raw.githubusercontent.com/Rodenom/videoeditor-panel/main/app.py" -o "%TEMP%\app_new.py" 2>nul
+if exist "%TEMP%\app_new.py" (
+    fc /b "%TEMP%\app_new.py" "app.py" >nul 2>&1
+    if errorlevel 1 (
+        copy /y "%TEMP%\app_new.py" "app.py" >nul
+        echo ✓ Обновление установлено
+    ) else (
+        echo ✓ Уже последняя версия
+    )
+) else (
+    echo ⚠ Не удалось проверить обновления
+)
+
 echo.
 echo ╔══════════════════════════════════════╗
-echo ║       Установка завершена!           ║
+echo ║       Запускаем панель...            ║
 echo ╚══════════════════════════════════════╝
 echo.
-echo ► Запускаем панель...
-echo   Открой браузер и зайди на http://localhost:7777
+echo   Открой браузер: http://localhost:7777
 echo.
 
-cd /d "%~dp0"
 python app.py
 pause

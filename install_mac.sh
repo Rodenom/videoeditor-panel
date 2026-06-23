@@ -5,6 +5,8 @@ echo "║   Video Editor — Установка (Mac)     ║"
 echo "╚══════════════════════════════════════╝"
 echo ""
 
+cd "$(dirname "$0")"
+
 # Check Homebrew
 if ! command -v brew &>/dev/null; then
   echo "► Устанавливаем Homebrew..."
@@ -41,13 +43,27 @@ if [ -n "$PY_CERT" ]; then
   bash "$PY_CERT" &>/dev/null
 fi
 
+# Auto-update app.py from GitHub
+echo "► Проверяем обновления..."
+UPDATE_URL="https://raw.githubusercontent.com/Rodenom/videoeditor-panel/main/app.py"
+TMP_FILE="/tmp/app_new.py"
+if curl -fsSL "$UPDATE_URL" -o "$TMP_FILE" 2>/dev/null; then
+  if ! cmp -s "$TMP_FILE" "app.py" 2>/dev/null; then
+    cp "$TMP_FILE" "app.py"
+    echo "✓ Обновление установлено"
+  else
+    echo "✓ Уже последняя версия"
+  fi
+else
+  echo "⚠ Не удалось проверить обновления (нет интернета?)"
+fi
+
 echo ""
 echo "╔══════════════════════════════════════╗"
-echo "║        Установка завершена!          ║"
+echo "║        Запускаем панель...           ║"
 echo "╚══════════════════════════════════════╝"
 echo ""
-echo "► Запускаем панель..."
+echo "  Открой браузер: http://localhost:7777"
 echo ""
 
-cd "$(dirname "$0")"
 python3 app.py
