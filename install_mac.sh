@@ -45,9 +45,9 @@ fi
 
 # Auto-update app.py from GitHub
 echo "► Проверяем обновления..."
-UPDATE_URL="https://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@raw.githubusercontent.com/Rodenom/videoeditor-panel/main/app.py"
+UPDATE_URL="https://raw.githubusercontent.com/Rodenom/videoeditor-panel/main/app.py"
 TMP_FILE="/tmp/app_new.py"
-if curl -fsSL "$UPDATE_URL" -o "$TMP_FILE" 2>/dev/null; then
+if curl -fsSL -H "Authorization: token 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" "$UPDATE_URL" -o "$TMP_FILE" 2>/dev/null; then
   if ! cmp -s "$TMP_FILE" "app.py" 2>/dev/null; then
     cp "$TMP_FILE" "app.py"
     echo "✓ Обновление установлено"

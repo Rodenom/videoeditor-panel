@@ -35,7 +35,7 @@ pip install --quiet google-auth google-auth-oauthlib google-api-python-client an
 
 :: Auto-update app.py from GitHub
 echo ► Проверяем обновления...
-curl -fsSL "https://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@raw.githubusercontent.com/Rodenom/videoeditor-panel/main/app.py" -o "%TEMP%\app_new.py" 2>nul
+curl -fsSL -H "Authorization: token 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" "https://raw.githubusercontent.com/Rodenom/videoeditor-panel/main/app.py" -o "%TEMP%\app_new.py" 2>nul
 if exist "%TEMP%\app_new.py" (
     fc /b "%TEMP%\app_new.py" "app.py" >nul 2>&1
     if errorlevel 1 (
