@@ -267,10 +267,13 @@ def increment_project_upload(user, proj_id):
     save_project_uploads(user, uploads)
 
 def get_proj_id_for_secret(secret_file, user):
-    """Find project_id by its secret file path."""
-    for pid, pinfo in load_projects(user).items():
+    projects = load_projects(user)
+    for pid, pinfo in projects.items():
         if pinfo.get('file') == secret_file:
             return pid
+    # fallback: first available project
+    if projects:
+        return next(iter(projects))
     return None
 
 def get_best_channel(user='pavel'):
@@ -2251,7 +2254,7 @@ async function loadChannels(){
     const projName = ch.project_id ? (projects.find(p=>p.id===ch.project_id)||{name:'?'}).name : null;
     const projLabel = projName
       ? `<span style="font-size:10px;background:#ede9fe;color:#6d28d9;border-radius:4px;padding:1px 6px;margin-left:6px;">🔑 ${projName}</span>`
-      : `<button onclick="assignProject('${ch.id}')" style="font-size:10px;background:#fef3c7;color:#92400e;border:none;border-radius:4px;padding:2px 7px;margin-left:6px;cursor:pointer;">⚠ Привязать проект</button>`;
+      : '';
     const html = `<div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:var(--surface2,#f9f9f9);border-radius:8px;border:1px solid var(--border,#e5e5e5);">
       <div>
         <div style="font-size:13px;font-weight:600;">📺 ${ch.name}${proxyLabel}${projLabel}</div>
