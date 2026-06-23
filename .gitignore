@@ -1,0 +1,16 @@
+*.json
+*.log
+token_*.json
+channels_*.json
+projects_*.json
+sessions.json
+users.json
+uploads_today*.json
+proj_uploads_*.json
+client_secret*.json
+anthropic_key.txt
+VideoEditor_uploads/
+VideoEditor_output/
+__pycache__/
+*.pyc
+.DS_Store
