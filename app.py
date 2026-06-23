@@ -727,6 +727,102 @@ def upload_to_youtube(upload_job_id, files, title, description, privacy, channel
         UPLOAD_JOBS[upload_job_id]['status'] = 'error'
         UPLOAD_JOBS[upload_job_id]['log'].append(f'❌ Ошибка: {str(e)}')
 
+def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user):
+    from googleapiclient.http import MediaFileUpload
+    job = MASS_UPLOAD_JOBS[job_id]
+    job['status'] = 'running'
+    log = job['log']
+    try:
+        tmp_dir = os.path.join(OUTPUT_DIR, job_id, 'tmp')
+        os.makedirs(tmp_dir, exist_ok=True)
+        formats = [('9:16', 9/16, 'Shorts'), ('1:1', 1.0, 'Feed'), ('16:9', 16/9, 'YouTube')]
+        converted = {}
+
+        log.append('⏳ Конвертируем в 3 формата...')
+        def even(n): return n if n % 2 == 0 else n + 1
+        for fmt_name, ratio, label in formats:
+            if ratio < 1:
+                cw, ch = even(int(640 * ratio)), 640
+            elif ratio == 1:
+                cw, ch = 640, 640
+            else:
+                cw, ch = 640, even(int(640 / ratio))
+            vf = (f'scale={cw}:{ch}:force_original_aspect_ratio=decrease,'
+                  f'pad={cw}:{ch}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1')
+            out = os.path.join(tmp_dir, f'{fmt_name.replace(":","x")}.mp4')
+            run_ff(['ffmpeg','-y','-i',src_video,'-vf',vf,
+                    '-c:v','libx264','-profile:v','baseline','-crf','22','-preset','fast',
+                    '-pix_fmt','yuv420p','-c:a','aac','-b:a','128k', out], job_id)
+            converted[fmt_name] = out
+            log.append(f'  ✅ {fmt_name} ({label}) готов')
+
+        total = n_sets * 3
+        job['total'] = total
+        job['done'] = 0
+
+        for i in range(n_sets):
+            ch_id, ch_info = get_best_channel(user)
+            if not ch_id:
+                raise Exception('Нет доступных каналов (все лимиты исчерпаны)')
+            ch_proxy = ch_info.get('proxy', '')
+            log.append(f'📦 Набор {i+1}/{n_sets} → канал: {ch_info["name"]}' + (' 🔒 прокси' if ch_proxy else ''))
+            yt = get_youtube_service(ch_info['token_file'], proxy=ch_proxy)
+            if not ch_proxy:
+                os.environ.pop('HTTPS_PROXY', None)
+                os.environ.pop('HTTP_PROXY', None)
+
+            # Generate unique title via AI
+            unique_title = f'{category} — видео {i+1}'
+            try:
+                import anthropic as _ant
+                key_file = os.path.join(BASE_DIR, 'anthropic_key.txt')
+                if os.path.exists(key_file):
+                    with open(key_file) as _f: _key = _f.read().strip()
+                    _client = _ant.Anthropic(api_key=_key)
+                    _msg = _client.messages.create(
+                        model='claude-haiku-4-5-20251001', max_tokens=80,
+                        messages=[{'role':'user','content':f'Напиши 1 цепляющий заголовок для YouTube видео на тему "{category}". Только заголовок, без кавычек, до 80 символов.'}]
+                    )
+                    unique_title = _msg.content[0].text.strip()
+            except Exception:
+                pass
+
+            set_links = []
+            today_data = load_uploads_today()
+            for fmt_name, _, label in formats:
+                fpath = converted[fmt_name]
+                log.append(f'  ⏳ Загружаем {fmt_name}...')
+                body = {
+                    'snippet': {'title': unique_title, 'description': '', 'tags': [], 'categoryId': '22'},
+                    'status': {'privacyStatus': privacy}
+                }
+                media = MediaFileUpload(fpath, mimetype='video/mp4', resumable=True, chunksize=1024*1024*5)
+                req = yt.videos().insert(part='snippet,status', body=body, media_body=media)
+                response = None
+                while response is None:
+                    status_obj, response = req.next_chunk()
+                    if status_obj:
+                        pct = int(status_obj.progress() * 100)
+                        log[-1] = f'  ⏳ {fmt_name} — {pct}%...'
+                vid_id = response['id']
+                link = f'https://youtu.be/{vid_id}'
+                set_links.append({'fmt': fmt_name, 'link': link})
+                log[-1] = f'  ✅ {fmt_name} → {link}'
+                today_data['counts'][ch_id] = today_data['counts'].get(ch_id, 0) + 1
+                save_uploads_today(today_data)
+                proj_id = ch_info.get('project_id')
+                if proj_id:
+                    increment_project_upload(user, proj_id)
+                job['done'] += 1
+            job['sets'].append({'set_idx': i+1, 'channel': ch_info['name'], 'links': set_links})
+
+        job['status'] = 'done'
+        log.append(f'🎉 Готово! {n_sets} аккаунтов × 3 формата = {total} видео загружено!')
+    except Exception as e:
+        job['status'] = 'error'
+        log.append(f'❌ Ошибка: {str(e)}')
+
+
 def mass_upload_to_youtube(job_id, files, n_sets, title, description, privacy, user):
     from googleapiclient.http import MediaFileUpload
     job = MASS_UPLOAD_JOBS[job_id]
@@ -1268,111 +1364,66 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
   </style>
   <div class="up-wrap">
 
-    <!-- Массовая загрузка -->
+    <!-- Загрузить на YouTube -->
     <div class="up-section">
-      <div class="up-section-title">🚀 Массовая загрузка</div>
-      <div class="up-fmt-grid">
-        <label class="up-fmt-drop" id="mass-drop-916" onclick="document.getElementById('mass-file-916').click()">
-          <input type="file" id="mass-file-916" accept="video/mp4,.mp4" onchange="massFileSelected(this,'916')">
-          <div class="up-fmt-label">Формат</div>
-          <div class="up-fmt-ratio">9:16</div>
-          <div class="up-fmt-sub" id="mass-sub-916">Stories / Shorts</div>
-        </label>
-        <label class="up-fmt-drop" id="mass-drop-11" onclick="document.getElementById('mass-file-11').click()">
-          <input type="file" id="mass-file-11" accept="video/mp4,.mp4" onchange="massFileSelected(this,'11')">
-          <div class="up-fmt-label">Формат</div>
-          <div class="up-fmt-ratio">1:1</div>
-          <div class="up-fmt-sub" id="mass-sub-11">Feed / Reels</div>
-        </label>
-        <label class="up-fmt-drop" id="mass-drop-169" onclick="document.getElementById('mass-file-169').click()">
-          <input type="file" id="mass-file-169" accept="video/mp4,.mp4" onchange="massFileSelected(this,'169')">
-          <div class="up-fmt-label">Формат</div>
-          <div class="up-fmt-ratio">16:9</div>
-          <div class="up-fmt-sub" id="mass-sub-169">YouTube</div>
-        </label>
+      <div class="up-section-title">🚀 Загрузить на YouTube</div>
+
+      <!-- Video file -->
+      <div class="up-field">
+        <label>Видео файл</label>
+        <input type="file" id="auto-video-input" accept="video/mp4,.mp4" style="display:none;" onchange="autoVideoSelected(this)">
+        <button id="auto-video-btn" onclick="document.getElementById('auto-video-input').click()" style="width:100%;padding:12px;font-size:13px;font-weight:600;border:2px dashed var(--border2,#d1d5db);border-radius:10px;background:var(--surface2);cursor:pointer;color:var(--text3);">📂 Выбрать видео (.mp4)</button>
+        <div id="auto-video-name" style="font-size:12px;color:#16a34a;margin-top:6px;"></div>
       </div>
+
+      <!-- Category -->
+      <div class="up-field">
+        <label>Тематика <span style="font-size:11px;color:var(--text3);font-weight:400;">(AI сгенерирует уникальный заголовок для каждого аккаунта)</span></label>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;" id="auto-cat-grid">
+          <button class="lang-btn" onclick="setAutoCat(this)" data-cat="Суставы">🦴 Суставы</button>
+          <button class="lang-btn" onclick="setAutoCat(this)" data-cat="Диабет">🩸 Диабет</button>
+          <button class="lang-btn" onclick="setAutoCat(this)" data-cat="Гипертония">🫀 Гипертония</button>
+          <button class="lang-btn" onclick="setAutoCat(this)" data-cat="Похудение">⚖️ Похудение</button>
+          <button class="lang-btn" onclick="setAutoCat(this)" data-cat="Паразиты">🦠 Паразиты</button>
+          <button class="lang-btn" onclick="setAutoCat(this)" data-cat="Простатит">💊 Простатит</button>
+          <button class="lang-btn" onclick="setAutoCat(this)" data-cat="Потенция">💪 Потенция</button>
+          <button class="lang-btn" onclick="setAutoCat(this)" data-cat="Цистит">💧 Цистит</button>
+          <button class="lang-btn" onclick="setAutoCat(this)" data-cat="Зрение">👁️ Зрение</button>
+          <button class="lang-btn" onclick="setAutoCat(this)" data-cat="Память">🧠 Память</button>
+        </div>
+        <div id="auto-cat-selected" style="font-size:12px;color:#4f46e5;margin-top:6px;"></div>
+      </div>
+
+      <!-- N accounts -->
       <div class="up-n-row">
         <label>Кол-во аккаунтов:</label>
-        <input type="number" class="up-n-input" id="mass-n" value="5" min="1" max="50" oninput="updateMassInfo()">
-        <span class="up-n-info" id="mass-n-info">= 15 загрузок (3 формата × 5)</span>
+        <input type="number" class="up-n-input" id="auto-n" value="3" min="1" max="50" oninput="updateAutoInfo()">
+        <span class="up-n-info" id="auto-n-info">= 9 видео (3 формата × 3)</span>
       </div>
-      <div class="up-field"><label>Название</label><input type="text" id="mass-title" placeholder="Название для YouTube..."></div>
-      <div class="up-field"><label>Описание</label><textarea id="mass-desc" placeholder="Описание..."></textarea></div>
-      <div style="margin-bottom:12px;">
+
+      <!-- Privacy -->
+      <div style="margin-bottom:16px;">
         <div style="font-size:11px;color:var(--text3);font-weight:700;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">Приватность</div>
         <div class="privacy-row" style="margin:0;">
-          <div class="privacy-btn" id="mass-priv-public" onclick="setMassPrivacy('public')">Публичное</div>
-          <div class="privacy-btn on" id="mass-priv-unlisted" onclick="setMassPrivacy('unlisted')">По ссылке</div>
-          <div class="privacy-btn" id="mass-priv-private" onclick="setMassPrivacy('private')">Приватное</div>
+          <div class="privacy-btn" id="auto-priv-public" onclick="setAutoPrivacy('public')">Публичное</div>
+          <div class="privacy-btn on" id="auto-priv-unlisted" onclick="setAutoPrivacy('unlisted')">По ссылке</div>
+          <div class="privacy-btn" id="auto-priv-private" onclick="setAutoPrivacy('private')">Приватное</div>
         </div>
       </div>
-      <button class="btn" id="mass-run-btn" onclick="startMassUpload()" style="background:linear-gradient(135deg,#4f46e5,#7c3aed);width:100%;font-size:15px;padding:13px;" disabled>🚀 Запустить массовую загрузку</button>
-      <div id="mass-progress-wrap" style="display:none;">
-        <div class="up-progress-bar"><div class="up-progress-fill" id="mass-progress-fill" style="width:0%"></div></div>
-        <div style="font-size:12px;color:var(--text3);text-align:center;" id="mass-progress-text">0 / 0</div>
+
+      <button class="btn" id="auto-run-btn" onclick="startAutoUpload()" style="background:linear-gradient(135deg,#4f46e5,#7c3aed);width:100%;font-size:15px;padding:13px;" disabled>🚀 Запустить загрузку</button>
+
+      <div id="auto-progress-wrap" style="display:none;margin-top:12px;">
+        <div class="up-progress-bar"><div class="up-progress-fill" id="auto-progress-fill" style="width:0%"></div></div>
+        <div style="font-size:12px;color:var(--text3);text-align:center;margin-top:4px;" id="auto-progress-text">0 / 0</div>
       </div>
-      <div id="mass-log" style="display:none;background:#0d0d1a;color:#7eff7e;border-radius:10px;padding:10px;font-size:11px;font-family:monospace;max-height:130px;overflow-y:auto;white-space:pre-wrap;margin-top:10px;"></div>
-      <div id="mass-result" style="margin-top:12px;display:none;">
+      <div id="auto-log" style="display:none;background:#0d0d1a;color:#7eff7e;border-radius:10px;padding:10px;font-size:11px;font-family:monospace;max-height:160px;overflow-y:auto;white-space:pre-wrap;margin-top:10px;"></div>
+      <div id="auto-result" style="margin-top:12px;display:none;">
         <div style="font-size:13px;font-weight:800;color:var(--text);margin-bottom:8px;">📋 Результаты:</div>
-        <table class="mass-result-table" id="mass-result-table">
+        <table class="mass-result-table" id="auto-result-table">
           <thead><tr><th>#</th><th>Канал</th><th>9:16</th><th>1:1</th><th>16:9</th></tr></thead>
-          <tbody id="mass-result-body"></tbody>
+          <tbody id="auto-result-body"></tbody>
         </table>
-      </div>
-    </div>
-
-    <!-- Одиночная загрузка -->
-    <div class="up-section">
-      <div class="up-section-title">📤 Одиночная загрузка</div>
-      <div class="up-field">
-        <label>Видео файлы</label>
-        <input type="file" id="upload-files-input" accept="video/mp4,video/quicktime,.mp4,.mov" multiple style="display:none;" onchange="handleUploadFiles(this)">
-        <button onclick="document.getElementById('upload-files-input').click()" style="width:100%;padding:10px;font-size:13px;font-weight:600;border:2px dashed var(--border2,#d1d5db);border-radius:10px;background:var(--surface2);cursor:pointer;color:var(--text3);">📂 Выбрать mp4 файлы</button>
-        <div id="upload-files-list" style="font-size:12px;color:#16a34a;margin-top:6px;"></div>
-      </div>
-      <div class="up-field"><label>Название</label><input type="text" id="upload-title" placeholder="Название для YouTube..."></div>
-      <div class="up-field"><label>Описание</label><textarea id="upload-desc" placeholder="Описание..."></textarea></div>
-      <div style="margin-bottom:12px;">
-        <div style="font-size:11px;color:var(--text3);font-weight:700;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">Приватность</div>
-        <div class="privacy-row" style="margin:0;">
-          <div class="privacy-btn" id="up-priv-public" onclick="setUploadPrivacy('public')">Публичное</div>
-          <div class="privacy-btn on" id="up-priv-unlisted" onclick="setUploadPrivacy('unlisted')">По ссылке</div>
-          <div class="privacy-btn" id="up-priv-private" onclick="setUploadPrivacy('private')">Приватное</div>
-        </div>
-      </div>
-      <div class="up-field">
-        <label>Канал</label>
-        <select id="upload-channel-select" style="width:100%;padding:9px 12px;border:1.5px solid var(--border2,#d1d5db);border-radius:10px;font-size:13px;font-weight:600;background:var(--input-bg);color:var(--text);">
-          <option value="auto">🔄 Авто (канал с наименьшей нагрузкой)</option>
-        </select>
-      </div>
-      <button class="btn" id="upload-yt-btn" onclick="startDirectUpload()" style="background:#ff0000;width:100%;font-size:14px;padding:11px;" disabled>▶ Загрузить на YouTube</button>
-      <div id="upload-yt-log" style="display:none;background:#0d0d1a;color:#7eff7e;border-radius:10px;padding:10px;font-size:11px;font-family:monospace;max-height:130px;overflow-y:auto;white-space:pre-wrap;margin-top:10px;"></div>
-      <div id="upload-yt-links" style="margin-top:10px;"></div>
-    </div>
-
-    <!-- AI мета -->
-    <div class="up-section">
-      <div class="up-section-title">🤖 AI — название и описание</div>
-      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;" id="upload-cat-grid">
-        <button class="lang-btn" onclick="setUploadCat(this)" data-cat="Суставы">🦴 Суставы</button>
-        <button class="lang-btn" onclick="setUploadCat(this)" data-cat="Диабет">🩸 Диабет</button>
-        <button class="lang-btn" onclick="setUploadCat(this)" data-cat="Гипертония">🫀 Гипертония</button>
-        <button class="lang-btn" onclick="setUploadCat(this)" data-cat="Похудение">⚖️ Похудение</button>
-        <button class="lang-btn" onclick="setUploadCat(this)" data-cat="Паразиты">🦠 Паразиты</button>
-        <button class="lang-btn" onclick="setUploadCat(this)" data-cat="Простатит">💊 Простатит</button>
-        <button class="lang-btn" onclick="setUploadCat(this)" data-cat="Потенция">💪 Потенция</button>
-        <button class="lang-btn" onclick="setUploadCat(this)" data-cat="Цистит">💧 Цистит</button>
-        <button class="lang-btn" onclick="setUploadCat(this)" data-cat="Зрение">👁️ Зрение</button>
-        <button class="lang-btn" onclick="setUploadCat(this)" data-cat="Память">🧠 Память</button>
-      </div>
-      <button class="btn-ai" id="upload-gen-btn" onclick="generateUploadMeta()">✨ Сгенерировать название и описание</button>
-      <div class="ai-result" id="upload-ai-result" style="margin-top:10px;">
-        <div class="ai-result-label">📌 Название:</div>
-        <div class="ai-result-text" id="upload-ai-title"></div>
-        <div class="ai-result-label" style="margin-top:8px;">📝 Описание:</div>
-        <div class="ai-result-text" id="upload-ai-desc"></div>
-        <button class="btn-ai" onclick="applyUploadMeta()" style="background:#16a34a;margin-top:8px;">✅ Применить</button>
       </div>
     </div>
 
@@ -2203,15 +2254,31 @@ async function addChannel(){
   document.body.appendChild(modal);
   const log = document.getElementById('add-ch-modal-log');
 
-  // Ask for proxy before starting
-  const proxyVal = prompt('Прокси канала (необязательно):\nФормат: socks5://user:pass@host:port\nили http://user:pass@host:port\n\nОставь пустым если без прокси:', '');
-  const proxyStr = (proxyVal || '').trim();
-  const useOcto = confirm('Авторизоваться через Окто Browser?\n\nОК = Окто (скопируй ссылку в Окто)\nОтмена = локальный браузер (автоматически)');
-  let loginHint = '';
-  if (useOcto) {
-    const emailVal = prompt('Email аккаунта (необязательно, помогает избежать ошибок 400):\nНапример: farmaccount@gmail.com\n\nОставь пустым если не знаешь:', '');
-    loginHint = (emailVal || '').trim();
-  }
+  // Show input form in modal
+  log.innerHTML = `
+    <div style="font-family:sans-serif;color:#fff;">
+      <div style="margin-bottom:12px;">
+        <label style="font-size:12px;color:#aaa;display:block;margin-bottom:4px;">EMAIL АККАУНТА <span style="color:#ff6b6b;">*</span></label>
+        <input id="ch-email-inp" type="email" placeholder="farmaccount@gmail.com" style="width:100%;padding:8px 10px;border-radius:8px;border:1.5px solid #444;background:#222;color:#fff;font-size:13px;outline:none;" />
+      </div>
+      <div style="margin-bottom:16px;">
+        <label style="font-size:12px;color:#aaa;display:block;margin-bottom:4px;">ПРОКСИ КАНАЛА <span style="color:#ff6b6b;">*</span></label>
+        <input id="ch-proxy-inp" type="text" placeholder="socks5://user:pass@host:port" style="width:100%;padding:8px 10px;border-radius:8px;border:1.5px solid #444;background:#222;color:#fff;font-size:13px;outline:none;" />
+        <div style="font-size:11px;color:#666;margin-top:4px;">Формат: socks5://user:pass@host:port</div>
+      </div>
+      <button id="ch-start-btn" style="width:100%;padding:10px;background:#4f46e5;color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:600;cursor:pointer;">Продолжить →</button>
+    </div>`;
+
+  const {proxyStr, loginHint, useOcto} = await new Promise(resolve => {
+    document.getElementById('ch-start-btn').onclick = () => {
+      const email = document.getElementById('ch-email-inp').value.trim();
+      const proxy = document.getElementById('ch-proxy-inp').value.trim();
+      if(!email){ document.getElementById('ch-email-inp').style.borderColor='#ff6b6b'; document.getElementById('ch-email-inp').focus(); return; }
+      if(!proxy){ document.getElementById('ch-proxy-inp').style.borderColor='#ff6b6b'; document.getElementById('ch-proxy-inp').focus(); return; }
+      log.textContent = '⏳ Запускаем...';
+      resolve({proxyStr: proxy, loginHint: email, useOcto: true});
+    };
+  });
 
   const resp = await fetch('/add_channel', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({proxy: proxyStr, force_manual: useOcto, login_hint: loginHint})});
   const data = await resp.json();
@@ -4023,6 +4090,85 @@ async function startMassUpload(){
   },1500);
 }
 
+// ── Auto upload (1 video → 3 formats → N accounts) ──
+let autoVideoPath = null, autoCat = '', autoPrivacy = 'unlisted', autoJobId = null, autoPollTimer = null;
+
+function autoVideoSelected(input){
+  const file = input.files[0];
+  if(!file) return;
+  const fd = new FormData();
+  fd.append('file', file);
+  document.getElementById('auto-video-name').textContent = '⏳ Загружаем файл...';
+  fetch('/upload',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
+    autoVideoPath = d.path;
+    document.getElementById('auto-video-name').textContent = '✅ ' + file.name;
+    document.getElementById('auto-video-btn').style.borderColor = '#16a34a';
+    updateAutoRunBtn();
+  });
+}
+
+function setAutoCat(btn){
+  document.querySelectorAll('#auto-cat-grid .lang-btn').forEach(b=>b.classList.remove('on'));
+  btn.classList.add('on');
+  autoCat = btn.dataset.cat;
+  document.getElementById('auto-cat-selected').textContent = 'Выбрано: ' + autoCat;
+  updateAutoRunBtn();
+}
+
+function setAutoPrivacy(p){
+  autoPrivacy = p;
+  ['public','unlisted','private'].forEach(x=>{
+    document.getElementById('auto-priv-'+x).classList.toggle('on', x===p);
+  });
+}
+
+function updateAutoInfo(){
+  const n = parseInt(document.getElementById('auto-n').value)||1;
+  document.getElementById('auto-n-info').textContent = `= ${n*3} видео (3 формата × ${n})`;
+  updateAutoRunBtn();
+}
+
+function updateAutoRunBtn(){
+  document.getElementById('auto-run-btn').disabled = !(autoVideoPath && autoCat);
+}
+
+async function startAutoUpload(){
+  const n = parseInt(document.getElementById('auto-n').value)||1;
+  const btn = document.getElementById('auto-run-btn');
+  btn.disabled = true;
+  document.getElementById('auto-log').style.display = 'block';
+  document.getElementById('auto-log').textContent = '';
+  document.getElementById('auto-progress-wrap').style.display = 'block';
+  document.getElementById('auto-result').style.display = 'none';
+  document.getElementById('auto-result-body').innerHTML = '';
+
+  const res = await fetch('/auto_upload',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({src_video:autoVideoPath, n_sets:n, category:autoCat, privacy:autoPrivacy})});
+  const data = await res.json();
+  autoJobId = data.job_id;
+
+  let logLen=0, lastSetCount=0;
+  autoPollTimer = setInterval(()=>{
+    fetch('/mass_yt_status/'+autoJobId).then(r=>r.json()).then(d=>{
+      const newLogs=d.log.slice(logLen); logLen=d.log.length;
+      const lb=document.getElementById('auto-log');
+      newLogs.forEach(l=>{lb.textContent+=l+'\n';}); lb.scrollTop=lb.scrollHeight;
+      const pct = d.total>0 ? Math.round(d.done/d.total*100) : 0;
+      document.getElementById('auto-progress-fill').style.width=pct+'%';
+      document.getElementById('auto-progress-text').textContent=`${d.done} / ${d.total}`;
+      if(d.sets.length > lastSetCount){
+        renderMassSets(d.sets.slice(lastSetCount),'auto-result-body');
+        document.getElementById('auto-result').style.display='block';
+        lastSetCount=d.sets.length;
+      }
+      if(d.status==='done'||d.status==='error'){
+        clearInterval(autoPollTimer);
+        btn.disabled=false;
+      }
+    });
+  },1500);
+}
+
 // ── Mass upload from build tab ──
 let buildMassJobId=null, buildMassPollTimer=null;
 function updateBuildMassInfo(){
@@ -5052,6 +5198,17 @@ class Handler(BaseHTTPRequestHandler):
             t = threading.Thread(target=mass_upload_to_youtube, args=(
                 job_id, params['files'], params['n_sets'], params['title'],
                 params.get('description',''), params.get('privacy','unlisted'), user
+            ), daemon=True)
+            t.start()
+            self.json({'job_id': job_id})
+        elif path == '/auto_upload':
+            length = int(self.headers.get('Content-Length',0))
+            params = json.loads(self.rfile.read(length))
+            job_id = uuid.uuid4().hex[:8]
+            MASS_UPLOAD_JOBS[job_id] = {'status':'pending','log':[],'sets':[],'total':0,'done':0}
+            t = threading.Thread(target=auto_convert_and_upload, args=(
+                job_id, params['src_video'], params['n_sets'],
+                params.get('category','Видео'), params.get('privacy','unlisted'), user
             ), daemon=True)
             t.start()
             self.json({'job_id': job_id})
