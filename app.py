@@ -354,7 +354,7 @@ def process_video(job_id, params):
                 '-filter_complex',
                 f'[0:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[a0];'
                 f'[1:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,volume={vol:.3f}[a1];'
-                f'[a0][a1]amix=inputs=2:duration=first:dropout_transition=0[aout]',
+                f'[a0][a1]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]',
                 '-map','0:v','-map','[aout]','-c:v','copy','-c:a','aac','-b:a','128k', voiced], job_id)
             work = voiced
             log.append('✅ Белый голос добавлен')
@@ -398,15 +398,17 @@ def process_video(job_id, params):
             log.append(f'⏳ Создаём хвост ({tail_min} мин)...')
             tail_v = os.path.join(tmp, 'tail_v.mp4')
             if tail_is_video:
-                # Видео хвост с белым голосом на полную громкость
                 if use_voice and audio and os.path.exists(str(audio)):
+                    # Видео хвост: смешиваем аудио видео + белый голос параллельно
                     run_ff(['ffmpeg','-y','-stream_loop','-1','-i',tail_img,
-                        '-i',audio,
+                        '-stream_loop','-1','-i',audio,
                         '-filter_complex',
                         f'[0:v]scale={src_w}:{src_h}:force_original_aspect_ratio=decrease,'
                         f'pad={src_w}:{src_h}:(ow-iw)/2:(oh-ih)/2:color=black,fps=25,setsar=1[v];'
-                        f'[1:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,volume={tail_vol:.3f}[a]',
-                        '-map','[v]','-map','[a]',
+                        f'[0:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[va];'
+                        f'[1:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,volume={tail_vol:.3f}[wa];'
+                        f'[va][wa]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]',
+                        '-map','[v]','-map','[aout]',
                         '-t',str(tail_min*60),
                         '-c:v','libx264','-profile:v','baseline','-crf','28','-preset','fast','-pix_fmt','yuv420p',
                         '-c:a','aac','-b:a','128k','-ar','44100','-ac','2', tail_v], job_id)
@@ -422,11 +424,12 @@ def process_video(job_id, params):
                 tail_jpg = os.path.join(tmp, 'tail.jpg')
                 run_ff(['ffmpeg','-y','-i',tail_img, tail_jpg], job_id)
                 if use_voice and audio and os.path.exists(str(audio)):
+                    # Фото хвост: белый голос идёт параллельно (фото без своего аудио — просто берём голос)
                     run_ff(['ffmpeg','-y','-loop','1','-i',tail_jpg,
-                        '-i',audio,
+                        '-stream_loop','-1','-i',audio,
                         '-filter_complex',
-                        f'[1:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,volume={tail_vol:.3f}[a]',
-                        '-map','0:v','-map','[a]',
+                        f'[1:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,volume={tail_vol:.3f}[aout]',
+                        '-map','0:v','-map','[aout]',
                         '-t',str(tail_min*60),
                         '-vf',f'scale={src_w}:{src_h}:force_original_aspect_ratio=decrease,'
                               f'pad={src_w}:{src_h}:(ow-iw)/2:(oh-ih)/2:color=black,fps=25,setsar=1',
@@ -958,7 +961,10 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
       <h1>🎬 Video Editor</h1>
       <p class="sub">Белый голос · Субтитры · Хвост · 3 формата · YouTube</p>
     </div>
-    <button class="theme-btn" onclick="toggleTheme()" id="theme-btn">🌙 Тёмная</button>
+    <div style="display:flex;gap:8px;align-items:center;">
+      <button id="update-btn" onclick="checkUpdate()" style="padding:6px 14px;font-size:12px;font-weight:600;border:1.5px solid #10b981;border-radius:10px;background:transparent;cursor:pointer;color:#10b981;">🔄 Обновить</button>
+      <button class="theme-btn" onclick="toggleTheme()" id="theme-btn">🌙 Тёмная</button>
+    </div>
   </div>
   <div class="tabs" style="display:flex;align-items:center;gap:4px;">
     <button class="tab-btn active" onclick="switchTab('editor')">🎬 Редактор</button>
@@ -4134,6 +4140,29 @@ function showYtLinks(links){
 }
 
 // Theme toggle
+async function checkUpdate(){
+  const btn = document.getElementById('update-btn');
+  btn.textContent = '⏳ Проверяем...';
+  btn.disabled = true;
+  try {
+    const r = await fetch('/update');
+    const d = await r.json();
+    if(d.status === 'latest'){
+      btn.textContent = '✓ Последняя версия';
+      setTimeout(()=>{btn.textContent='🔄 Обновить';btn.disabled=false;}, 3000);
+    } else if(d.status === 'updated'){
+      btn.textContent = '✅ Обновлено! Перезапуск...';
+      setTimeout(()=>location.reload(), 3000);
+    } else {
+      btn.textContent = '❌ Ошибка';
+      btn.disabled = false;
+    }
+  } catch(e){
+    btn.textContent = '❌ Ошибка';
+    btn.disabled = false;
+  }
+}
+
 function toggleTheme(){
   const html=document.documentElement;
   const isDark=html.getAttribute('data-theme')==='dark';
@@ -4226,6 +4255,24 @@ class Handler(BaseHTTPRequestHandler):
             if user != 'pavel':
                 self.json({'ok': False}); return
             self.json({'ok': True, 'users': list(USERS.keys())})
+            return
+        elif path == '/update':
+            import urllib.request as _ur
+            try:
+                update_url = 'https://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@raw.githubusercontent.com/Rodenom/videoeditor-panel/main/app.py'
+                new_code = _ur.urlopen(update_url, timeout=10).read()
+                current_file = os.path.abspath(__file__)
+                with open(current_file, 'rb') as f:
+                    current_code = f.read()
+                if new_code == current_code:
+                    self.json({'ok': True, 'status': 'latest'})
+                else:
+                    with open(current_file, 'wb') as f:
+                        f.write(new_code)
+                    self.json({'ok': True, 'status': 'updated'})
+                    threading.Thread(target=lambda: (time.sleep(1.5), os.execv(sys.executable, [sys.executable] + sys.argv)), daemon=True).start()
+            except Exception as e:
+                self.json({'ok': False, 'error': str(e)})
             return
         elif path == '/':
             self.send_response(200)
