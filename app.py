@@ -750,9 +750,13 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user):
             vf = (f'scale={cw}:{ch}:force_original_aspect_ratio=decrease,'
                   f'pad={cw}:{ch}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1')
             out = os.path.join(tmp_dir, f'{fmt_name.replace(":","x")}.mp4')
-            run_ff(['ffmpeg','-y','-i',src_video,'-vf',vf,
+            import subprocess as _sp
+            r = _sp.run(['ffmpeg','-y','-i',src_video,'-vf',vf,
                     '-c:v','libx264','-profile:v','baseline','-crf','22','-preset','fast',
-                    '-pix_fmt','yuv420p','-c:a','aac','-b:a','128k', out], job_id)
+                    '-pix_fmt','yuv420p','-c:a','aac','-b:a','128k', out],
+                    capture_output=True, text=True)
+            if r.returncode != 0:
+                raise Exception(f'ffmpeg ошибка для {fmt_name}: {r.stderr[-500:]}')
             converted[fmt_name] = out
             log.append(f'  ✅ {fmt_name} ({label}) готов')
 
@@ -771,21 +775,39 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user):
                 os.environ.pop('HTTPS_PROXY', None)
                 os.environ.pop('HTTP_PROXY', None)
 
-            # Generate unique title via AI
+            # Generate unique title+description via AI (same as /ai_generate)
             unique_title = f'{category} — видео {i+1}'
+            unique_desc = ''
             try:
-                import anthropic as _ant
+                import urllib.request as _ur2, json as _json2, random as _r2
+                _seed2 = _r2.randint(10000, 99999)
+                _prompt2 = (
+                    f"You are a YouTube video expert for nutra/health offers. Session: {_seed2}.\n"
+                    f"Generate a catchy YouTube title and description IN ENGLISH ONLY for a video about: {category}\n\n"
+                    "Rules:\n"
+                    "- MUST be in English language only\n"
+                    "- Title: max 70 chars, intriguing, benefit-focused, curiosity-gap\n"
+                    "- Description: 2-3 sentences, engaging, include call to action\n\n"
+                    "Respond EXACTLY in this format:\n"
+                    "TITLE: [English title here]\n"
+                    "DESCRIPTION: [English description here]"
+                )
                 key_file = os.path.join(BASE_DIR, 'anthropic_key.txt')
                 if os.path.exists(key_file):
-                    with open(key_file) as _f: _key = _f.read().strip()
-                    _client = _ant.Anthropic(api_key=_key)
-                    _msg = _client.messages.create(
-                        model='claude-haiku-4-5-20251001', max_tokens=80,
-                        messages=[{'role':'user','content':f'Напиши 1 цепляющий заголовок для YouTube видео на тему "{category}". Только заголовок, без кавычек, до 80 символов.'}]
-                    )
-                    unique_title = _msg.content[0].text.strip()
-            except Exception:
-                pass
+                    with open(key_file) as _kf: _key2 = _kf.read().strip()
+                    _body2 = _json2.dumps({'model':'claude-haiku-4-5','max_tokens':300,
+                        'messages':[{'role':'user','content':_prompt2}]}).encode()
+                    _req2 = _ur2.Request('https://api.anthropic.com/v1/messages', data=_body2, headers={
+                        'Content-Type':'application/json','x-api-key':_key2,'anthropic-version':'2023-06-01'})
+                    with _ur2.urlopen(_req2, timeout=15) as _r3:
+                        _resp2 = _json2.loads(_r3.read())
+                    _text2 = _resp2['content'][0]['text']
+                    _tm = __import__('re').search(r'TITLE:\s*(.+)', _text2)
+                    _dm = __import__('re').search(r'DESCRIPTION:\s*([\s\S]+)', _text2)
+                    if _tm: unique_title = _tm.group(1).strip()
+                    if _dm: unique_desc = _dm.group(1).strip()
+            except Exception as _e2:
+                log.append(f'  ⚠ AI заголовок: {_e2}')
 
             set_links = []
             today_data = load_uploads_today()
@@ -793,7 +815,7 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user):
                 fpath = converted[fmt_name]
                 log.append(f'  ⏳ Загружаем {fmt_name}...')
                 body = {
-                    'snippet': {'title': unique_title, 'description': '', 'tags': [], 'categoryId': '22'},
+                    'snippet': {'title': unique_title, 'description': unique_desc, 'tags': [], 'categoryId': '22'},
                     'status': {'privacyStatus': privacy}
                 }
                 media = MediaFileUpload(fpath, mimetype='video/mp4', resumable=True, chunksize=1024*1024*5)
@@ -1371,7 +1393,7 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
       <!-- Video file -->
       <div class="up-field">
         <label>Видео файл</label>
-        <input type="file" id="auto-video-input" accept="video/mp4,.mp4" style="display:none;" onchange="autoVideoSelected(this)">
+        <input type="file" id="auto-video-input" accept="video/mp4,video/quicktime,.mp4,.mov" style="display:none;" onchange="autoVideoSelected(this)">
         <button id="auto-video-btn" onclick="document.getElementById('auto-video-input').click()" style="width:100%;padding:12px;font-size:13px;font-weight:600;border:2px dashed var(--border2,#d1d5db);border-radius:10px;background:var(--surface2);cursor:pointer;color:var(--text3);">📂 Выбрать видео (.mp4)</button>
         <div id="auto-video-name" style="font-size:12px;color:#16a34a;margin-top:6px;"></div>
       </div>
