@@ -2243,13 +2243,18 @@ async function loadChannels(){
     targets.forEach(l => l.innerHTML = '<div style="font-size:13px;color:#999;padding:6px 0;">Нет добавленных каналов</div>');
     return;
   }
+  const projects = (await fetch('/projects').then(r=>r.json())).projects || [];
   data.channels.forEach(ch => {
     const color = ch.available ? '#16a34a' : '#dc2626';
     const status = ch.available ? `${ch.uploads_today}/10 сегодня` : '❌ Лимит исчерпан';
     const proxyLabel = ch.proxy ? `<span style="font-size:10px;background:#d1fae5;color:#065f46;border-radius:4px;padding:1px 6px;margin-left:6px;">🔒 прокси</span>` : '';
+    const projName = ch.project_id ? (projects.find(p=>p.id===ch.project_id)||{name:'?'}).name : null;
+    const projLabel = projName
+      ? `<span style="font-size:10px;background:#ede9fe;color:#6d28d9;border-radius:4px;padding:1px 6px;margin-left:6px;">🔑 ${projName}</span>`
+      : `<button onclick="assignProject('${ch.id}')" style="font-size:10px;background:#fef3c7;color:#92400e;border:none;border-radius:4px;padding:2px 7px;margin-left:6px;cursor:pointer;">⚠ Привязать проект</button>`;
     const html = `<div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:var(--surface2,#f9f9f9);border-radius:8px;border:1px solid var(--border,#e5e5e5);">
       <div>
-        <div style="font-size:13px;font-weight:600;">📺 ${ch.name}${proxyLabel}</div>
+        <div style="font-size:13px;font-weight:600;">📺 ${ch.name}${proxyLabel}${projLabel}</div>
         <div style="font-size:11px;color:${color};margin-top:2px;">${status}</div>
       </div>
       <button onclick="deleteChannel('${ch.id}')" style="padding:4px 10px;font-size:11px;border:1px solid #fca5a5;border-radius:6px;background:transparent;color:#dc2626;cursor:pointer;">Удалить</button>
@@ -2262,6 +2267,21 @@ async function loadChannels(){
 async function deleteChannel(chId){
   if(!confirm('Удалить канал?')) return;
   await fetch('/delete_channel/'+chId);
+  loadChannels();
+}
+
+async function assignProject(chId){
+  const data = await fetch('/projects').then(r=>r.json());
+  const projects = data.projects || [];
+  if(!projects.length){ alert('Сначала добавь проект API!'); return; }
+  const opts = projects.map((p,i)=>`${i+1}. ${p.name}`).join('\n');
+  const choice = prompt(`Выбери проект для канала:\n${opts}\n\nВведи номер:`, '1');
+  if(!choice) return;
+  const idx = parseInt(choice)-1;
+  if(idx<0||idx>=projects.length){ alert('Неверный номер'); return; }
+  const projId = projects[idx].id;
+  await fetch('/assign_project',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({channel_id:chId, project_id:projId})});
   loadChannels();
 }
 
@@ -5223,6 +5243,18 @@ class Handler(BaseHTTPRequestHandler):
             ), daemon=True)
             t.start()
             self.json({'job_id': job_id})
+        elif path == '/assign_project':
+            length = int(self.headers.get('Content-Length',0))
+            params = json.loads(self.rfile.read(length))
+            ch_id = params['channel_id']
+            proj_id = params['project_id']
+            channels = load_channels(user)
+            if ch_id in channels:
+                channels[ch_id]['project_id'] = proj_id
+                save_channels(user, channels)
+                self.json({'ok': True})
+            else:
+                self.json({'ok': False, 'error': 'Канал не найден'})
         elif path == '/auto_upload':
             length = int(self.headers.get('Content-Length',0))
             params = json.loads(self.rfile.read(length))
