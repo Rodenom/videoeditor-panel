@@ -735,7 +735,7 @@ def upload_to_youtube(upload_job_id, files, title, description, privacy, channel
         UPLOAD_JOBS[upload_job_id]['status'] = 'error'
         UPLOAD_JOBS[upload_job_id]['log'].append(f'❌ Ошибка: {str(e)}')
 
-def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user):
+def auto_convert_and_upload(job_id, src_video, channel_ids, category, privacy, user):
     from googleapiclient.http import MediaFileUpload
     job = MASS_UPLOAD_JOBS[job_id]
     job['status'] = 'running'
@@ -768,14 +768,18 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user):
             converted[fmt_name] = out
             log.append(f'  ✅ {fmt_name} ({label}) готов')
 
+        # Build ordered list of channels to use
+        all_channels = load_channels(user)
+        if channel_ids:
+            ordered = [(cid, all_channels[cid]) for cid in channel_ids if cid in all_channels]
+        else:
+            ordered = list(all_channels.items())
+        n_sets = len(ordered)
         total = n_sets * 3
         job['total'] = total
         job['done'] = 0
 
-        for i in range(n_sets):
-            ch_id, ch_info = get_best_channel(user)
-            if not ch_id:
-                raise Exception('Нет доступных каналов (все лимиты исчерпаны)')
+        for i, (ch_id, ch_info) in enumerate(ordered):
             ch_proxy = ch_info.get('proxy', '')
             log.append(f'📦 Набор {i+1}/{n_sets} → канал: {ch_info["name"]}' + (' 🔒 прокси' if ch_proxy else ''))
             yt = get_youtube_service(ch_info['token_file'], proxy=ch_proxy)
@@ -1424,11 +1428,11 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
         <div id="auto-cat-selected" style="font-size:12px;color:#4f46e5;margin-top:6px;"></div>
       </div>
 
-      <!-- N accounts -->
-      <div class="up-n-row">
-        <label>Кол-во аккаунтов:</label>
-        <input type="number" class="up-n-input" id="auto-n" value="3" min="1" max="50" oninput="updateAutoInfo()">
-        <span class="up-n-info" id="auto-n-info">= 9 видео (3 формата × 3)</span>
+      <!-- Account selector -->
+      <div style="margin-bottom:16px;">
+        <div style="font-size:11px;color:var(--text3);font-weight:700;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;">Аккаунты для загрузки</div>
+        <div id="auto-channel-select-list" style="display:flex;flex-direction:column;gap:6px;"></div>
+        <div style="font-size:12px;color:var(--text3);margin-top:6px;" id="auto-n-info">Выбрано: 0 аккаунтов = 0 видео</div>
       </div>
 
       <!-- Privacy -->
@@ -2244,11 +2248,14 @@ async function loadChannels(){
   const listTop = document.getElementById('channels-list-top');
   const targets = [list, listTop].filter(Boolean);
   targets.forEach(l => l.innerHTML = '');
+  const autoSelectList = document.getElementById('auto-channel-select-list');
+  if(autoSelectList) autoSelectList.innerHTML = '';
   // Rebuild channel select
   const sel = document.getElementById('upload-channel-select');
   if(sel){ sel.innerHTML = '<option value="auto">🔄 Авто (наименее загруженный)</option>'; }
   if(!data.channels || data.channels.length === 0){
     targets.forEach(l => l.innerHTML = '<div style="font-size:13px;color:#999;padding:6px 0;">Нет добавленных каналов</div>');
+    if(autoSelectList) autoSelectList.innerHTML = '<div style="font-size:13px;color:#999;">Нет каналов</div>';
     return;
   }
   const projects = (await fetch('/projects').then(r=>r.json())).projects || [];
@@ -2269,7 +2276,19 @@ async function loadChannels(){
     </div>`;
     targets.forEach(l => l.innerHTML += html);
     if(sel){ const opt=document.createElement('option'); opt.value=ch.id; opt.textContent=`📺 ${ch.name}`; sel.appendChild(opt); }
+    // Checkbox for auto-upload selector
+    if(autoSelectList){
+      const row = document.createElement('label');
+      row.style.cssText = 'display:flex;align-items:center;gap:10px;padding:8px 12px;background:var(--surface2,#f9f9f9);border-radius:8px;border:1px solid var(--border,#e5e5e5);cursor:pointer;';
+      row.innerHTML = `<input type="checkbox" class="auto-ch-cb" data-id="${ch.id}" ${ch.available ? 'checked' : 'disabled'} onchange="updateAutoInfo()" style="width:16px;height:16px;accent-color:#4f46e5;cursor:pointer;">
+        <div>
+          <div style="font-size:13px;font-weight:600;">📺 ${ch.name}${proxyLabel}</div>
+          <div style="font-size:11px;color:${color};">${status}</div>
+        </div>`;
+      autoSelectList.appendChild(row);
+    }
   });
+  updateAutoInfo();
 }
 
 async function deleteChannel(chId){
@@ -4172,18 +4191,25 @@ function setAutoPrivacy(p){
   });
 }
 
+function getSelectedChannelIds(){
+  return Array.from(document.querySelectorAll('.auto-ch-cb:checked')).map(cb=>cb.dataset.id);
+}
+
 function updateAutoInfo(){
-  const n = parseInt(document.getElementById('auto-n').value)||1;
-  document.getElementById('auto-n-info').textContent = `= ${n*3} видео (3 формата × ${n})`;
+  const ids = getSelectedChannelIds();
+  const n = ids.length;
+  document.getElementById('auto-n-info').textContent = `Выбрано: ${n} аккаунт${n===1?'':'ов'} = ${n*3} видео`;
   updateAutoRunBtn();
 }
 
 function updateAutoRunBtn(){
-  document.getElementById('auto-run-btn').disabled = !(autoVideoPath && autoCat);
+  const ids = getSelectedChannelIds();
+  document.getElementById('auto-run-btn').disabled = !(autoVideoPath && autoCat && ids.length > 0);
 }
 
 async function startAutoUpload(){
-  const n = parseInt(document.getElementById('auto-n').value)||1;
+  const channel_ids = getSelectedChannelIds();
+  if(!channel_ids.length){ alert('Выбери хотя бы один канал'); return; }
   const btn = document.getElementById('auto-run-btn');
   btn.disabled = true;
   document.getElementById('auto-log').style.display = 'block';
@@ -4193,7 +4219,7 @@ async function startAutoUpload(){
   document.getElementById('auto-result-body').innerHTML = '';
 
   const res = await fetch('/auto_upload',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({src_video:autoVideoPath, n_sets:n, category:autoCat, privacy:autoPrivacy})});
+    body:JSON.stringify({src_video:autoVideoPath, channel_ids, category:autoCat, privacy:autoPrivacy})});
   const data = await res.json();
   autoJobId = data.job_id;
 
@@ -5269,7 +5295,7 @@ class Handler(BaseHTTPRequestHandler):
             job_id = uuid.uuid4().hex[:8]
             MASS_UPLOAD_JOBS[job_id] = {'status':'pending','log':[],'sets':[],'total':0,'done':0}
             t = threading.Thread(target=auto_convert_and_upload, args=(
-                job_id, params['src_video'], params['n_sets'],
+                job_id, params['src_video'], params.get('channel_ids'),
                 params.get('category','Видео'), params.get('privacy','unlisted'), user
             ), daemon=True)
             t.start()
