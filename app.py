@@ -35,9 +35,10 @@ def load_users():
     if os.path.exists(USERS_FILE):
         with open(USERS_FILE) as f:
             return json.load(f)
-    default = {'Vika2026': hashlib.sha256('Asghjhjdc@31431#'.encode()).hexdigest()}
-    save_users(default)
-    return default
+    return {}  # empty = first launch, show setup screen
+
+def is_first_launch():
+    return not os.path.exists(USERS_FILE) or not load_users()
 
 def save_users(u):
     with open(USERS_FILE, 'w') as f:
@@ -199,6 +200,60 @@ async function login(e){
   const d = await r.json();
   if(d.ok) window.location.href = '/';
   else { document.getElementById('err').style.display='block'; }
+}
+</script>
+</body></html>'''
+
+SETUP_HTML = '''<!DOCTYPE html>
+<html lang="ru">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Настройка — Video Editor</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+body{background:#0f0f1a;display:flex;align-items:center;justify-content:center;min-height:100vh;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;}
+.card{background:#1a1a2e;border:1px solid #2a2a4a;border-radius:20px;padding:40px 36px;width:100%;max-width:380px;box-shadow:0 20px 60px rgba(0,0,0,.5);}
+.logo{text-align:center;margin-bottom:28px;}
+.logo-icon{font-size:48px;margin-bottom:8px;}
+.logo h1{font-size:22px;font-weight:800;color:#fff;margin-bottom:4px;}
+.logo p{font-size:13px;color:#666;}
+label{display:block;font-size:12px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;}
+input{width:100%;padding:12px 14px;background:#0f0f1a;border:1.5px solid #2a2a4a;border-radius:10px;color:#fff;font-size:14px;outline:none;transition:.2s;margin-bottom:16px;}
+input:focus{border-color:#7c3aed;}
+.btn{width:100%;padding:13px;background:linear-gradient(135deg,#7c3aed,#a855f7);border:none;border-radius:12px;color:#fff;font-size:15px;font-weight:700;cursor:pointer;transition:.2s;margin-top:4px;}
+.btn:hover{opacity:.9;transform:translateY(-1px);}
+.err{background:#3a1515;border:1px solid #7f1d1d;color:#fca5a5;border-radius:8px;padding:10px 14px;font-size:13px;margin-bottom:16px;display:none;}
+.hint{font-size:12px;color:#555;margin-top:12px;text-align:center;}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="logo">
+    <div class="logo-icon">🎬</div>
+    <h1>Video Editor</h1>
+    <p>Первый запуск — создайте аккаунт</p>
+  </div>
+  <div class="err" id="err"></div>
+  <form onsubmit="setup(event)">
+    <label>Придумайте логин</label>
+    <input type="text" id="u" placeholder="например: buyer1" autocomplete="username" required>
+    <label>Придумайте пароль</label>
+    <input type="password" id="p" placeholder="минимум 4 символа" autocomplete="new-password" required>
+    <button class="btn" type="submit">Создать и войти →</button>
+  </form>
+  <p class="hint">Запомните логин и пароль — они нужны для входа</p>
+</div>
+<script>
+async function setup(e){
+  e.preventDefault();
+  const u=document.getElementById('u').value.trim();
+  const p=document.getElementById('p').value;
+  const err=document.getElementById('err');
+  if(u.length<2){err.style.display='block';err.textContent='Логин слишком короткий';return;}
+  if(p.length<4){err.style.display='block';err.textContent='Пароль минимум 4 символа';return;}
+  const r=await fetch('/setup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({u,p})});
+  const d=await r.json();
+  if(d.ok) window.location.href='/';
+  else{err.style.display='block';err.textContent=d.error||'Ошибка';}
 }
 </script>
 </body></html>'''
@@ -4435,8 +4490,9 @@ class Handler(BaseHTTPRequestHandler):
         user = self.get_current_user()
         if user:
             return user
-        # Not authenticated — show login page
-        body = LOGIN_HTML.encode()
+        # First launch — show setup screen
+        html = SETUP_HTML if is_first_launch() else LOGIN_HTML
+        body = html.encode()
         self.send_response(200)
         self.send_header('Content-Type', 'text/html; charset=utf-8')
         self.send_header('Content-Length', str(len(body)))
@@ -4446,6 +4502,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
+
+        if path == '/setup':
+            html = SETUP_HTML if is_first_launch() else LOGIN_HTML
+            body = html.encode()
+            self.send_response(200)
+            self.send_header('Content-Type','text/html; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(body)
+            return
 
         if path == '/login':
             body = LOGIN_HTML.encode()
@@ -4702,6 +4767,29 @@ class Handler(BaseHTTPRequestHandler):
             for k in to_del: SESSIONS.pop(k)
             save_sessions(SESSIONS)
             self.json({'ok': True})
+            return
+        elif path == '/setup':
+            if not is_first_launch():
+                self.json({'ok': False, 'error': 'Аккаунт уже создан'}); return
+            length = int(self.headers.get('Content-Length', 0))
+            data = json.loads(self.rfile.read(length))
+            uname = data.get('u', '').strip()
+            pw = data.get('p', '')
+            if len(uname) < 2 or len(pw) < 4:
+                self.json({'ok': False, 'error': 'Логин или пароль слишком короткий'}); return
+            pw_hash = hashlib.sha256(pw.encode()).hexdigest()
+            USERS[uname] = pw_hash
+            save_users(USERS)
+            sid = uuid.uuid4().hex
+            SESSIONS[sid] = {'user': uname, 'exp': time.time() + 30*24*3600}
+            save_sessions(SESSIONS)
+            body = b'{"ok":true}'
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.send_header('Set-Cookie', f'session={sid}; Max-Age=2592000; Path=/; HttpOnly; SameSite=Lax')
+            self.end_headers()
+            self.wfile.write(body)
             return
         elif path == '/login':
             length = int(self.headers.get('Content-Length', 0))
