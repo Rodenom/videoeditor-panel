@@ -371,7 +371,12 @@ def process_video(job_id, params):
             bar_h_px = int(src_h * bar_pct / 100)
             bar_y_px = src_h - bar_h_px
             txt_y_px = bar_y_px + (bar_h_px - overlay_size) // 2
-            if safe_txt:
+            has_drawtext = bool(subprocess.run(
+                ['ffmpeg', '-filters'], capture_output=True, text=True
+            ).stdout.__contains__('drawtext') or subprocess.run(
+                ['ffmpeg', '-filters'], capture_output=True, text=True
+            ).stderr.__contains__('drawtext'))
+            if safe_txt and has_drawtext:
                 vf = (f"drawbox=x=0:y={bar_y_px}:w=iw:h={bar_h_px}:color=0x{bar_color}:t=fill,"
                       f"drawtext=text='{safe_txt}':fontsize={overlay_size}:fontcolor=0x{txt_color}:x=(w-text_w)/2:y={txt_y_px}")
             else:
