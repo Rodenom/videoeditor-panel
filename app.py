@@ -5284,10 +5284,7 @@ if __name__ == '__main__':
     if not shutil.which('ffmpeg'):
         print("❌ FFmpeg не найден. Установи: brew install ffmpeg-full")
         sys.exit(1)
-    if not os.path.exists(CREDENTIALS_FILE):
-        print(f"❌ Файл client_secret.json не найден рядом с app.py")
-        print(f"   Положи его в: {os.path.dirname(os.path.abspath(__file__))}")
-        sys.exit(1)
+    # client_secret.json не обязателен — байер добавляет проект через панель
     # Migrate old channels.json → channels_pavel.json
     old_ch = os.path.join(BASE_DIR, 'channels.json')
     new_ch = get_channels_file('pavel')
