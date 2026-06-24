@@ -35,35 +35,24 @@ fi
 
 # Check ffmpeg with drawtext support
 echo "► Проверяем ffmpeg..."
-FFMPEG_OK=0
-if command -v ffmpeg &>/dev/null; then
-  if ffmpeg -filters 2>/dev/null | grep -q drawtext || ffmpeg -filters 2>&1 | grep -q drawtext; then
-    FFMPEG_OK=1
-  fi
+check_drawtext() { ffmpeg -filters 2>&1 | grep -q drawtext; }
+
+if ! command -v ffmpeg &>/dev/null; then
+  echo "► Устанавливаем ffmpeg..."
+  brew install ffmpeg
 fi
 
-if [ "$FFMPEG_OK" = "0" ]; then
-  echo "► Устанавливаем ffmpeg (статическая сборка со всеми кодеками)..."
-  ARCH=$(uname -m)
-  if [ "$ARCH" = "arm64" ]; then
-    FFMPEG_URL="https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip"
-  else
-    FFMPEG_URL="https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip"
-  fi
-  TMP_ZIP="/tmp/ffmpeg_static.zip"
-  curl -fsSL "$FFMPEG_URL" -o "$TMP_ZIP"
-  unzip -o "$TMP_ZIP" -d /tmp/ffmpeg_extract
-  mkdir -p "$HOME/.local/bin"
-  cp /tmp/ffmpeg_extract/ffmpeg "$HOME/.local/bin/ffmpeg"
-  chmod +x "$HOME/.local/bin/ffmpeg"
-  export PATH="$HOME/.local/bin:$PATH"
-  if ! grep -q '.local/bin' ~/.zprofile 2>/dev/null; then
-    echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zprofile
-  fi
-  rm -rf "$TMP_ZIP" /tmp/ffmpeg_extract
-  echo "✓ ffmpeg установлен"
+if ! check_drawtext; then
+  echo "► ffmpeg без drawtext — переустанавливаем..."
+  brew uninstall ffmpeg-full 2>/dev/null || true
+  brew uninstall ffmpeg 2>/dev/null || true
+  brew install ffmpeg
+fi
+
+if check_drawtext; then
+  echo "✓ ffmpeg готов"
 else
-  echo "✓ ffmpeg уже установлен"
+  echo "⚠ ffmpeg установлен (текст на видео недоступен, остальное работает)"
 fi
 
 # Install Python dependencies
