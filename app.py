@@ -4553,8 +4553,9 @@ class Handler(BaseHTTPRequestHandler):
         elif path == '/update':
             import urllib.request as _ur
             try:
-                update_url = 'https://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@raw.githubusercontent.com/Rodenom/videoeditor-panel/main/app.py'
-                new_code = _ur.urlopen(update_url, timeout=10).read()
+                update_url = 'https://raw.githubusercontent.com/Rodenom/videoeditor-panel/main/app.py'
+                req = _ur.Request(update_url, headers={'Authorization': 'token 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'})
+                new_code = _ur.urlopen(req, timeout=10).read()
                 current_file = os.path.abspath(__file__)
                 with open(current_file, 'rb') as f:
                     current_code = f.read()
