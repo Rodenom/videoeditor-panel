@@ -831,27 +831,34 @@ def auto_convert_and_upload(job_id, src_video, channel_ids, category, privacy, u
             converted[fmt_name] = out
             log.append(f'  ✅ {fmt_name} ({label}) готов')
 
-        # Build ordered list of channels to use
         all_channels = load_channels(user)
-        if channel_ids:
-            ordered = [(cid, all_channels[cid]) for cid in channel_ids if cid in all_channels]
-        else:
-            ordered = list(all_channels.items())
-        n_sets = len(ordered)
+        ordered = list(all_channels.items())
         total = n_sets * 3
         job['total'] = total
         job['done'] = 0
 
-        for i, (ch_id, ch_info) in enumerate(ordered):
+        ch_iter = iter(ordered)
+        sets_done = 0
+        while sets_done < n_sets:
+            try:
+                ch_id, ch_info = next(ch_iter)
+            except StopIteration:
+                log.append('⚠ Закончились доступные каналы')
+                break
             ch_proxy = ch_info.get('proxy', '')
-            log.append(f'📦 Набор {i+1}/{n_sets} → канал: {ch_info["name"]}' + (' 🔒 прокси' if ch_proxy else ''))
-            yt = get_youtube_service(ch_info['token_file'], proxy=ch_proxy)
+            log.append(f'📦 Набор {sets_done+1}/{n_sets} → канал: {ch_info["name"]}' + (' 🔒 прокси' if ch_proxy else ''))
+            try:
+                yt = get_youtube_service(ch_info['token_file'], proxy=ch_proxy)
+            except Exception as _auth_err:
+                log.append(f'  ❌ Ошибка авторизации: {_auth_err} — пропускаем канал')
+                channels = load_channels(user); channels[ch_id]['last_error'] = 'Ошибка авторизации'; save_channels(user, channels)
+                continue
             if not ch_proxy:
                 os.environ.pop('HTTPS_PROXY', None)
                 os.environ.pop('HTTP_PROXY', None)
 
             # Generate unique title+description via AI (same as /ai_generate)
-            unique_title = f'{category} — видео {i+1}'
+            unique_title = f'{category} — видео {sets_done+1}'
             unique_desc = ''
             try:
                 import urllib.request as _ur2, json as _json2, random as _r2
@@ -885,32 +892,47 @@ def auto_convert_and_upload(job_id, src_video, channel_ids, category, privacy, u
 
             set_links = []
             today_data = load_uploads_today()
+            ch_error = None
             for fmt_name, _, label in formats:
                 fpath = converted[fmt_name]
                 log.append(f'  ⏳ Загружаем {fmt_name}...')
-                body = {
-                    'snippet': {'title': unique_title, 'description': unique_desc, 'tags': [], 'categoryId': '22'},
-                    'status': {'privacyStatus': privacy}
-                }
-                media = MediaFileUpload(fpath, mimetype='video/mp4', resumable=True, chunksize=1024*1024*5)
-                req = yt.videos().insert(part='snippet,status', body=body, media_body=media)
-                response = None
-                while response is None:
-                    status_obj, response = req.next_chunk()
-                    if status_obj:
-                        pct = int(status_obj.progress() * 100)
-                        log[-1] = f'  ⏳ {fmt_name} — {pct}%...'
-                vid_id = response['id']
-                link = f'https://youtu.be/{vid_id}'
-                set_links.append({'fmt': fmt_name, 'link': link})
-                log[-1] = f'  ✅ {fmt_name} → {link}'
-                today_data['counts'][ch_id] = today_data['counts'].get(ch_id, 0) + 1
-                save_uploads_today(today_data)
-                proj_id = ch_info.get('project_id')
-                if proj_id:
-                    increment_project_upload(user, proj_id)
-                job['done'] += 1
-            job['sets'].append({'set_idx': i+1, 'channel': ch_info['name'], 'links': set_links})
+                try:
+                    body = {
+                        'snippet': {'title': unique_title, 'description': unique_desc, 'tags': [], 'categoryId': '22'},
+                        'status': {'privacyStatus': privacy}
+                    }
+                    media = MediaFileUpload(fpath, mimetype='video/mp4', resumable=True, chunksize=1024*1024*5)
+                    req = yt.videos().insert(part='snippet,status', body=body, media_body=media)
+                    response = None
+                    while response is None:
+                        status_obj, response = req.next_chunk()
+                        if status_obj:
+                            pct = int(status_obj.progress() * 100)
+                            log[-1] = f'  ⏳ {fmt_name} — {pct}%...'
+                    vid_id = response['id']
+                    link = f'https://youtu.be/{vid_id}'
+                    set_links.append({'fmt': fmt_name, 'link': link})
+                    log[-1] = f'  ✅ {fmt_name} → {link}'
+                    today_data['counts'][ch_id] = today_data['counts'].get(ch_id, 0) + 1
+                    save_uploads_today(today_data)
+                    proj_id = ch_info.get('project_id')
+                    if proj_id:
+                        increment_project_upload(user, proj_id)
+                    job['done'] += 1
+                except Exception as _upload_err:
+                    err_msg = str(_upload_err)[:80]
+                    log[-1] = f'  ❌ {fmt_name} ошибка: {err_msg}'
+                    ch_error = err_msg
+                    job['done'] += 1
+            if ch_error:
+                channels = load_channels(user); channels[ch_id]['last_error'] = ch_error; save_channels(user, channels)
+                log.append(f'  ⚠ Канал {ch_info["name"]} помечен с ошибкой, следующий запуск пропустит его')
+            else:
+                channels = load_channels(user)
+                if channels.get(ch_id, {}).get('last_error'):
+                    channels[ch_id].pop('last_error', None); save_channels(user, channels)
+            job['sets'].append({'set_idx': sets_done+1, 'channel': ch_info['name'], 'links': set_links})
+            sets_done += 1
 
         job['status'] = 'done'
         log.append(f'🎉 Готово! {n_sets} аккаунтов × 3 формата = {total} видео загружено!')
@@ -1490,11 +1512,11 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
         <div id="auto-cat-selected" style="font-size:12px;color:#4f46e5;margin-top:6px;"></div>
       </div>
 
-      <!-- Account selector -->
-      <div style="margin-bottom:16px;">
-        <div style="font-size:11px;color:var(--text3);font-weight:700;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;">Аккаунты для загрузки</div>
-        <div id="auto-channel-select-list" style="display:flex;flex-direction:column;gap:6px;"></div>
-        <div style="font-size:12px;color:var(--text3);margin-top:6px;" id="auto-n-info">Выбрано: 0 аккаунтов = 0 видео</div>
+      <!-- N accounts -->
+      <div class="up-n-row">
+        <label>Кол-во аккаунтов:</label>
+        <input type="number" class="up-n-input" id="auto-n" value="3" min="1" max="50" oninput="updateAutoInfo()">
+        <span class="up-n-info" id="auto-n-info">= 9 видео (3 формата × 3)</span>
       </div>
 
       <!-- Privacy -->
@@ -2310,19 +2332,17 @@ async function loadChannels(){
   const listTop = document.getElementById('channels-list-top');
   const targets = [list, listTop].filter(Boolean);
   targets.forEach(l => l.innerHTML = '');
-  const autoSelectList = document.getElementById('auto-channel-select-list');
-  if(autoSelectList) autoSelectList.innerHTML = '';
   // Rebuild channel select
   const sel = document.getElementById('upload-channel-select');
   if(sel){ sel.innerHTML = '<option value="auto">🔄 Авто (наименее загруженный)</option>'; }
   if(!data.channels || data.channels.length === 0){
     targets.forEach(l => l.innerHTML = '<div style="font-size:13px;color:#999;padding:6px 0;">Нет добавленных каналов</div>');
-    if(autoSelectList) autoSelectList.innerHTML = '<div style="font-size:13px;color:#999;">Нет каналов</div>';
     return;
   }
   const projects = (await fetch('/projects').then(r=>r.json())).projects || [];
   data.channels.forEach(ch => {
     const color = ch.available ? '#16a34a' : '#dc2626';
+    const errLabel = ch.last_error ? `<span style="font-size:10px;background:#fee2e2;color:#dc2626;border-radius:4px;padding:1px 6px;margin-left:6px;">❌ ${ch.last_error}</span>` : '';
     const status = ch.available ? `${ch.uploads_today}/10 сегодня` : '❌ Лимит исчерпан';
     const proxyLabel = ch.proxy ? `<span style="font-size:10px;background:#d1fae5;color:#065f46;border-radius:4px;padding:1px 6px;margin-left:6px;">🔒 прокси</span>` : '';
     const projName = ch.project_id ? (projects.find(p=>p.id===ch.project_id)||{name:'?'}).name : null;
@@ -2331,24 +2351,13 @@ async function loadChannels(){
       : '';
     const html = `<div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:var(--surface2,#f9f9f9);border-radius:8px;border:1px solid var(--border,#e5e5e5);">
       <div>
-        <div style="font-size:13px;font-weight:600;">📺 ${ch.name}${proxyLabel}${projLabel}</div>
+        <div style="font-size:13px;font-weight:600;">📺 ${ch.name}${proxyLabel}${projLabel}${errLabel}</div>
         <div style="font-size:11px;color:${color};margin-top:2px;">${status}</div>
       </div>
       <button onclick="deleteChannel('${ch.id}')" style="padding:4px 10px;font-size:11px;border:1px solid #fca5a5;border-radius:6px;background:transparent;color:#dc2626;cursor:pointer;">Удалить</button>
     </div>`;
     targets.forEach(l => l.innerHTML += html);
     if(sel){ const opt=document.createElement('option'); opt.value=ch.id; opt.textContent=`📺 ${ch.name}`; sel.appendChild(opt); }
-    // Checkbox for auto-upload selector
-    if(autoSelectList){
-      const row = document.createElement('label');
-      row.style.cssText = 'display:flex;align-items:center;gap:10px;padding:8px 12px;background:var(--surface2,#f9f9f9);border-radius:8px;border:1px solid var(--border,#e5e5e5);cursor:pointer;';
-      row.innerHTML = `<input type="checkbox" class="auto-ch-cb" data-id="${ch.id}" ${ch.available ? 'checked' : 'disabled'} onchange="updateAutoInfo()" style="width:16px;height:16px;accent-color:#4f46e5;cursor:pointer;">
-        <div>
-          <div style="font-size:13px;font-weight:600;">📺 ${ch.name}${proxyLabel}</div>
-          <div style="font-size:11px;color:${color};">${status}</div>
-        </div>`;
-      autoSelectList.appendChild(row);
-    }
   });
   updateAutoInfo();
 }
@@ -4253,25 +4262,18 @@ function setAutoPrivacy(p){
   });
 }
 
-function getSelectedChannelIds(){
-  return Array.from(document.querySelectorAll('.auto-ch-cb:checked')).map(cb=>cb.dataset.id);
-}
-
 function updateAutoInfo(){
-  const ids = getSelectedChannelIds();
-  const n = ids.length;
-  document.getElementById('auto-n-info').textContent = `Выбрано: ${n} аккаунт${n===1?'':'ов'} = ${n*3} видео`;
+  const n = parseInt(document.getElementById('auto-n').value)||1;
+  document.getElementById('auto-n-info').textContent = `= ${n*3} видео (3 формата × ${n})`;
   updateAutoRunBtn();
 }
 
 function updateAutoRunBtn(){
-  const ids = getSelectedChannelIds();
-  document.getElementById('auto-run-btn').disabled = !(autoVideoPath && autoCat && ids.length > 0);
+  document.getElementById('auto-run-btn').disabled = !(autoVideoPath && autoCat);
 }
 
 async function startAutoUpload(){
-  const channel_ids = getSelectedChannelIds();
-  if(!channel_ids.length){ alert('Выбери хотя бы один канал'); return; }
+  const n = parseInt(document.getElementById('auto-n').value)||1;
   const btn = document.getElementById('auto-run-btn');
   btn.disabled = true;
   document.getElementById('auto-log').style.display = 'block';
@@ -4281,7 +4283,7 @@ async function startAutoUpload(){
   document.getElementById('auto-result-body').innerHTML = '';
 
   const res = await fetch('/auto_upload',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({src_video:autoVideoPath, channel_ids, category:autoCat, privacy:autoPrivacy})});
+    body:JSON.stringify({src_video:autoVideoPath, n_sets:n, category:autoCat, privacy:autoPrivacy})});
   const data = await res.json();
   autoJobId = data.job_id;
 
