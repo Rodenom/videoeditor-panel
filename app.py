@@ -18,6 +18,14 @@ CREDENTIALS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cli
 TOKEN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "yt_token.json")
 UPLOADS_TODAY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads_today.json")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ANTHROPIC_FALLBACK_KEY = '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'
+
+def get_anthropic_key():
+    key_file = os.path.join(BASE_DIR, 'anthropic_key.txt')
+    if os.path.exists(key_file):
+        k = open(key_file).read().strip()
+        if k: return k
+    return ANTHROPIC_FALLBACK_KEY
 
 # ── Multi-user auth ──────────────────────────────────────────────
 USERS_FILE = os.path.join(BASE_DIR, 'users.json')
@@ -804,9 +812,8 @@ def auto_convert_and_upload(job_id, src_video, channel_ids, category, privacy, u
                     "TITLE: [English title here]\n"
                     "DESCRIPTION: [English description here]"
                 )
-                key_file = os.path.join(BASE_DIR, 'anthropic_key.txt')
-                if os.path.exists(key_file):
-                    with open(key_file) as _kf: _key2 = _kf.read().strip()
+                _key2 = get_anthropic_key()
+                if _key2:
                     _body2 = _json2.dumps({'model':'claude-haiku-4-5','max_tokens':300,
                         'messages':[{'role':'user','content':_prompt2}]}).encode()
                     _req2 = _ur2.Request('https://api.anthropic.com/v1/messages', data=_body2, headers={
@@ -4611,11 +4618,7 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self.send_response(404); self.end_headers()
         elif path == '/get_key':
-            key_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'anthropic_key.txt')
-            key = ''
-            if os.path.exists(key_file):
-                with open(key_file) as f: key = f.read().strip()
-            self.json({'key': key})
+            self.json({'key': get_anthropic_key()})
         elif path.startswith('/status/'):
             job_id = path.split('/')[-1]
             job = JOBS.get(job_id, {'status':'unknown','log':[],'files':[]})
@@ -5230,10 +5233,7 @@ class Handler(BaseHTTPRequestHandler):
                 'messages': [{'role':'user','content':prompt}]
             }).encode()
             import urllib.request
-            key_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'anthropic_key.txt')
-            key = ''
-            if os.path.exists(key_file):
-                with open(key_file) as kf: key = kf.read().strip()
+            key = get_anthropic_key()
             req = urllib.request.Request('https://api.anthropic.com/v1/messages', data=body, headers={
                 'Content-Type':'application/json',
                 'x-api-key': key,
