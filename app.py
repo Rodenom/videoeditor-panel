@@ -418,7 +418,7 @@ def process_video(job_id, params):
             voiced = os.path.join(tmp, 'voiced.mp4')
             run_ff(['ffmpeg','-y','-i',work,'-i',audio,
                 '-filter_complex',
-                f'[0:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[a0];'
+                f'[0:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,volume=2.0[a0];'
                 f'[1:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,volume={vol:.3f}[a1];'
                 f'[a0][a1]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]',
                 '-map','0:v','-map','[aout]','-c:v','copy','-c:a','aac','-b:a','128k', voiced], job_id)
@@ -516,6 +516,12 @@ def process_video(job_id, params):
                         '-c:v','libx264','-profile:v','baseline','-tune','stillimage',
                         '-crf','28','-preset','fast','-pix_fmt','yuv420p',
                         '-c:a','aac','-b:a','32k','-ar','44100','-ac','2', tail_v], job_id)
+            # Нормализуем громкость оригинала до стандартного уровня
+            work_loud = os.path.join(tmp, 'work_loud.mp4')
+            run_ff(['ffmpeg','-y','-i',work,
+                '-filter_complex','[0:a]loudnorm=I=-14:TP=-1:LRA=11[aout]',
+                '-map','0:v','-map','[aout]','-c:v','copy','-c:a','aac','-b:a','128k', work_loud], job_id)
+            work = work_loud
             merged = os.path.join(tmp, 'merged.mp4')
             concat_f = os.path.join(tmp, 'concat.txt')
             with open(concat_f,'w') as f:
@@ -798,7 +804,7 @@ def upload_to_youtube(upload_job_id, files, title, description, privacy, channel
         UPLOAD_JOBS[upload_job_id]['status'] = 'error'
         UPLOAD_JOBS[upload_job_id]['log'].append(f'❌ Ошибка: {str(e)}')
 
-def auto_convert_and_upload(job_id, src_video, channel_ids, category, privacy, user):
+def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user):
     from googleapiclient.http import MediaFileUpload
     job = MASS_UPLOAD_JOBS[job_id]
     job['status'] = 'running'
@@ -832,7 +838,10 @@ def auto_convert_and_upload(job_id, src_video, channel_ids, category, privacy, u
             log.append(f'  ✅ {fmt_name} ({label}) готов')
 
         all_channels = load_channels(user)
-        ordered = list(all_channels.items())
+        ordered = [(k,v) for k,v in all_channels.items() if not v.get('last_error')]
+        if not ordered:
+            ordered = list(all_channels.items())
+        n_sets = int(n_sets) if n_sets else len(ordered)
         total = n_sets * 3
         job['total'] = total
         job['done'] = 0
@@ -876,19 +885,22 @@ def auto_convert_and_upload(job_id, src_video, channel_ids, category, privacy, u
                 )
                 _key2 = get_anthropic_key()
                 if _key2:
-                    _body2 = _json2.dumps({'model':'claude-haiku-4-5','max_tokens':300,
-                        'messages':[{'role':'user','content':_prompt2}]}).encode()
-                    _req2 = _ur2.Request('https://api.anthropic.com/v1/messages', data=_body2, headers={
-                        'Content-Type':'application/json','x-api-key':_key2,'anthropic-version':'2023-06-01'})
-                    with _ur2.urlopen(_req2, timeout=15) as _r3:
-                        _resp2 = _json2.loads(_r3.read())
-                    _text2 = _resp2['content'][0]['text']
+                    import requests as _req_lib
+                    _resp2 = _req_lib.post('https://api.anthropic.com/v1/messages',
+                        json={'model':'claude-haiku-4-5-20251001','max_tokens':300,
+                              'messages':[{'role':'user','content':_prompt2}]},
+                        headers={'x-api-key':_key2,'anthropic-version':'2023-06-01'},
+                        timeout=20)
+                    _text2 = _resp2.json()['content'][0]['text']
+                    log.append(f'  🤖 AI: {_text2[:80]}')
                     _tm = __import__('re').search(r'TITLE:\s*(.+)', _text2)
                     _dm = __import__('re').search(r'DESCRIPTION:\s*([\s\S]+)', _text2)
                     if _tm: unique_title = _tm.group(1).strip()
                     if _dm: unique_desc = _dm.group(1).strip()
+                    log.append(f'  ✅ Заголовок: {unique_title}')
             except Exception as _e2:
-                log.append(f'  ⚠ AI заголовок: {_e2}')
+                import traceback as _tb
+                log.append(f'  ⚠ AI ошибка: {type(_e2).__name__}: {_e2}')
 
             set_links = []
             today_data = load_uploads_today()
@@ -936,6 +948,96 @@ def auto_convert_and_upload(job_id, src_video, channel_ids, category, privacy, u
 
         job['status'] = 'done'
         log.append(f'🎉 Готово! {n_sets} аккаунтов × 3 формата = {total} видео загружено!')
+    except Exception as e:
+        job['status'] = 'error'
+        log.append(f'❌ Ошибка: {str(e)}')
+
+
+def ready_upload_to_youtube(job_id, ready_files, n_sets, category, privacy, user):
+    """Upload already-converted videos directly to YouTube without re-encoding."""
+    from googleapiclient.http import MediaFileUpload
+    job = MASS_UPLOAD_JOBS[job_id]
+    job['status'] = 'running'
+    log = job['log']
+    try:
+        total = n_sets * len(ready_files)
+        job['total'] = total
+        job['done'] = 0
+        for i in range(n_sets):
+            ch_id, ch_info = get_best_channel(user)
+            if not ch_id:
+                raise Exception('Нет доступных каналов (все лимиты исчерпаны)')
+            ch_proxy = ch_info.get('proxy', '')
+            log.append(f'📦 Аккаунт {i+1}/{n_sets} → {ch_info["name"]}' + (' 🔒' if ch_proxy else ''))
+            yt = get_youtube_service(ch_info['token_file'], proxy=ch_proxy)
+            if not ch_proxy:
+                os.environ.pop('HTTPS_PROXY', None)
+                os.environ.pop('HTTP_PROXY', None)
+            set_links = []
+            today_data = load_uploads_today()
+            # Generate unique title via AI
+            title_ai = f'{category} — видео {i+1}'
+            desc_ai = ''
+            try:
+                import urllib.request as _ur2, json as _json2, random as _r2
+                _seed2 = _r2.randint(10000, 99999)
+                _prompt2 = (
+                    f"You are a YouTube video expert for nutra/health offers. Session: {_seed2}.\n"
+                    f"Generate a catchy YouTube title and description IN ENGLISH ONLY for a video about: {category}\n\n"
+                    "Rules:\n"
+                    "- MUST be in English language only\n"
+                    "- Title: max 70 chars, intriguing, benefit-focused, curiosity-gap\n"
+                    "- Description: 2-3 sentences, engaging, include call to action\n\n"
+                    "Respond EXACTLY in this format:\n"
+                    "TITLE: [English title here]\n"
+                    "DESCRIPTION: [English description here]"
+                )
+                _key2 = get_anthropic_key()
+                if _key2:
+                    import requests as _req_lib
+                    _resp2 = _req_lib.post('https://api.anthropic.com/v1/messages',
+                        json={'model':'claude-haiku-4-5-20251001','max_tokens':300,
+                              'messages':[{'role':'user','content':_prompt2}]},
+                        headers={'x-api-key':_key2,'anthropic-version':'2023-06-01'},
+                        timeout=20)
+                    _text2 = _resp2.json()['content'][0]['text']
+                    log.append(f'  🤖 AI: {_text2[:80]}')
+                    _tm = __import__('re').search(r'TITLE:\s*(.+)', _text2)
+                    _dm = __import__('re').search(r'DESCRIPTION:\s*([\s\S]+)', _text2)
+                    if _tm: title_ai = _tm.group(1).strip()
+                    if _dm: desc_ai = _dm.group(1).strip()
+                    log.append(f'  ✅ Заголовок: {title_ai}')
+            except Exception as _e2:
+                log.append(f'  ⚠ AI ошибка: {type(_e2).__name__}: {_e2}')
+            for rf in ready_files:
+                fpath = rf['path']
+                fmt = rf['fmt']
+                log.append(f'  ⏳ Загружаем {fmt}...')
+                body = {
+                    'snippet': {'title': title_ai, 'description': desc_ai, 'tags': [], 'categoryId': '22'},
+                    'status': {'privacyStatus': privacy}
+                }
+                media = MediaFileUpload(fpath, mimetype='video/mp4', resumable=True, chunksize=1024*1024*5)
+                req = yt.videos().insert(part='snippet,status', body=body, media_body=media)
+                response = None
+                while response is None:
+                    status_obj, response = req.next_chunk()
+                    if status_obj:
+                        pct = int(status_obj.progress()*100)
+                        log[-1] = f'  ⏳ {fmt} — {pct}%...'
+                vid_id = response['id']
+                link = f'https://youtu.be/{vid_id}'
+                set_links.append({'fmt': fmt, 'link': link})
+                log[-1] = f'  ✅ {fmt} → {link}'
+                today_data['counts'][ch_id] = today_data['counts'].get(ch_id, 0) + 1
+                save_uploads_today(today_data)
+                proj_id = ch_info.get('project_id')
+                if proj_id:
+                    increment_project_upload(user, proj_id)
+                job['done'] += 1
+            job['sets'].append({'set_idx': i+1, 'channel': ch_info['name'], 'links': set_links})
+        job['status'] = 'done'
+        log.append(f'🎉 Готово! {n_sets} аккаунтов × {len(ready_files)} форматов = {total} видео!')
     except Exception as e:
         job['status'] = 'error'
         log.append(f'❌ Ошибка: {str(e)}')
@@ -1486,6 +1588,14 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
     <div class="up-section">
       <div class="up-section-title">🚀 Загрузить на YouTube</div>
 
+      <!-- Mode switcher -->
+      <div style="display:flex;gap:8px;margin-bottom:18px;">
+        <button id="mode-auto-btn" onclick="setUploadMode('auto')" style="flex:1;padding:10px;border-radius:10px;border:2px solid #4f46e5;background:#4f46e5;color:#fff;font-weight:700;font-size:13px;cursor:pointer;">⚡ Авто (конвертация)</button>
+        <button id="mode-ready-btn" onclick="setUploadMode('ready')" style="flex:1;padding:10px;border-radius:10px;border:2px solid #d1d5db;background:var(--surface2);color:var(--text3);font-weight:700;font-size:13px;cursor:pointer;">📁 Готовые видео</button>
+      </div>
+
+      <!-- AUTO MODE -->
+      <div id="auto-mode-section">
       <!-- Video file -->
       <div class="up-field">
         <label>Видео файл</label>
@@ -1543,6 +1653,87 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
           <tbody id="auto-result-body"></tbody>
         </table>
       </div>
+      </div><!-- end auto-mode-section -->
+
+      <!-- READY MODE -->
+      <div id="ready-mode-section" style="display:none;">
+        <div style="font-size:12px;color:var(--text3);margin-bottom:14px;">Загрузи готовые видео в нужных форматах. Можно загрузить только один формат или все три.</div>
+
+        <!-- Drag & drop zone for all 3 at once -->
+        <div id="ready-dropzone" ondragover="event.preventDefault();this.style.borderColor='#4f46e5'" ondragleave="this.style.borderColor='#d1d5db'" ondrop="readyDropAll(event)" style="border:2px dashed #d1d5db;border-radius:12px;padding:18px;text-align:center;margin-bottom:14px;cursor:pointer;background:var(--surface2);transition:border-color .2s;" onclick="document.getElementById('ready-all-input').click()">
+          <input type="file" id="ready-all-input" accept="video/*" multiple style="display:none;" onchange="readyAllSelected(this)">
+          <div style="font-size:22px;margin-bottom:4px;">📂</div>
+          <div style="font-size:13px;font-weight:700;color:var(--text2);">Перетащи сюда все 3 видео сразу</div>
+          <div style="font-size:11px;color:var(--text3);margin-top:2px;">или кликни чтобы выбрать — панель сама определит формат по разрешению</div>
+        </div>
+
+        <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:14px;">
+          <div style="display:flex;align-items:center;gap:10px;">
+            <span style="width:60px;font-size:12px;font-weight:700;color:#4f46e5;">9:16</span>
+            <input type="file" id="ready-916-input" accept="video/*" style="display:none;" onchange="readyFileSelected(this,'9:16')">
+            <button onclick="document.getElementById('ready-916-input').click()" id="ready-916-btn" style="flex:1;padding:9px;border:2px dashed var(--border2,#d1d5db);border-radius:8px;background:var(--surface2);cursor:pointer;font-size:12px;color:var(--text3);">📂 Выбрать видео 9:16 (Shorts)</button>
+            <span id="ready-916-name" style="font-size:11px;color:#16a34a;display:none;"></span>
+          </div>
+          <div style="display:flex;align-items:center;gap:10px;">
+            <span style="width:60px;font-size:12px;font-weight:700;color:#4f46e5;">1:1</span>
+            <input type="file" id="ready-11-input" accept="video/*" style="display:none;" onchange="readyFileSelected(this,'1:1')">
+            <button onclick="document.getElementById('ready-11-input').click()" id="ready-11-btn" style="flex:1;padding:9px;border:2px dashed var(--border2,#d1d5db);border-radius:8px;background:var(--surface2);cursor:pointer;font-size:12px;color:var(--text3);">📂 Выбрать видео 1:1 (Feed)</button>
+            <span id="ready-11-name" style="font-size:11px;color:#16a34a;display:none;"></span>
+          </div>
+          <div style="display:flex;align-items:center;gap:10px;">
+            <span style="width:60px;font-size:12px;font-weight:700;color:#4f46e5;">16:9</span>
+            <input type="file" id="ready-169-input" accept="video/*" style="display:none;" onchange="readyFileSelected(this,'16:9')">
+            <button onclick="document.getElementById('ready-169-input').click()" id="ready-169-btn" style="flex:1;padding:9px;border:2px dashed var(--border2,#d1d5db);border-radius:8px;background:var(--surface2);cursor:pointer;font-size:12px;color:var(--text3);">📂 Выбрать видео 16:9 (YouTube)</button>
+            <span id="ready-169-name" style="font-size:11px;color:#16a34a;display:none;"></span>
+          </div>
+        </div>
+
+        <div class="up-field">
+          <label>Тематика <span style="font-size:11px;color:var(--text3);font-weight:400;">(AI сгенерирует заголовок)</span></label>
+          <div style="display:flex;flex-wrap:wrap;gap:6px;" id="ready-cat-grid">
+            <button class="lang-btn" onclick="setReadyCat(this)" data-cat="Суставы">🦴 Суставы</button>
+            <button class="lang-btn" onclick="setReadyCat(this)" data-cat="Диабет">🩸 Диабет</button>
+            <button class="lang-btn" onclick="setReadyCat(this)" data-cat="Гипертония">🫀 Гипертония</button>
+            <button class="lang-btn" onclick="setReadyCat(this)" data-cat="Похудение">⚖️ Похудение</button>
+            <button class="lang-btn" onclick="setReadyCat(this)" data-cat="Паразиты">🦠 Паразиты</button>
+            <button class="lang-btn" onclick="setReadyCat(this)" data-cat="Простатит">💊 Простатит</button>
+            <button class="lang-btn" onclick="setReadyCat(this)" data-cat="Потенция">💪 Потенция</button>
+            <button class="lang-btn" onclick="setReadyCat(this)" data-cat="Цистит">💧 Цистит</button>
+            <button class="lang-btn" onclick="setReadyCat(this)" data-cat="Зрение">👁️ Зрение</button>
+            <button class="lang-btn" onclick="setReadyCat(this)" data-cat="Память">🧠 Память</button>
+          </div>
+        </div>
+
+        <div class="up-n-row" style="margin-bottom:12px;">
+          <label>Кол-во аккаунтов:</label>
+          <input type="number" class="up-n-input" id="ready-n" value="1" min="1" max="50" oninput="updateReadyInfo()">
+          <span class="up-n-info" id="ready-n-info"></span>
+        </div>
+
+        <div style="margin-bottom:16px;">
+          <div style="font-size:11px;color:var(--text3);font-weight:700;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">Приватность</div>
+          <div class="privacy-row" style="margin:0;">
+            <div class="privacy-btn" id="ready-priv-public" onclick="setReadyPrivacy('public')">Публичное</div>
+            <div class="privacy-btn on" id="ready-priv-unlisted" onclick="setReadyPrivacy('unlisted')">По ссылке</div>
+            <div class="privacy-btn" id="ready-priv-private" onclick="setReadyPrivacy('private')">Приватное</div>
+          </div>
+        </div>
+
+        <button class="btn" id="ready-run-btn" onclick="startReadyUpload()" style="background:linear-gradient(135deg,#16a34a,#15803d);width:100%;font-size:15px;padding:13px;" disabled>🚀 Загрузить на YouTube</button>
+
+        <div id="ready-progress-wrap" style="display:none;margin-top:12px;">
+          <div class="up-progress-bar"><div class="up-progress-fill" id="ready-progress-fill" style="width:0%"></div></div>
+          <div style="font-size:12px;color:var(--text3);text-align:center;margin-top:4px;" id="ready-progress-text">0 / 0</div>
+        </div>
+        <div id="ready-log" style="display:none;background:#0d0d1a;color:#7eff7e;border-radius:10px;padding:10px;font-size:11px;font-family:monospace;max-height:160px;overflow-y:auto;white-space:pre-wrap;margin-top:10px;"></div>
+        <div id="ready-result" style="margin-top:12px;display:none;">
+          <div style="font-size:13px;font-weight:800;color:var(--text);margin-bottom:8px;">📋 Результаты:</div>
+          <table class="mass-result-table" id="ready-result-table">
+            <thead><tr><th>#</th><th>Канал</th><th>Формат</th><th>Ссылка</th></tr></thead>
+            <tbody id="ready-result-body"></tbody>
+          </table>
+        </div>
+      </div><!-- end ready-mode-section -->
     </div>
 
     <!-- Проекты и каналы -->
@@ -4231,6 +4422,144 @@ async function startMassUpload(){
 }
 
 // ── Auto upload (1 video → 3 formats → N accounts) ──
+// ─── Upload mode switcher ───────────────────────────────────────
+function setUploadMode(mode){
+  const isAuto = mode === 'auto';
+  document.getElementById('auto-mode-section').style.display = isAuto ? '' : 'none';
+  document.getElementById('ready-mode-section').style.display = isAuto ? 'none' : '';
+  document.getElementById('mode-auto-btn').style.cssText = isAuto
+    ? 'flex:1;padding:10px;border-radius:10px;border:2px solid #4f46e5;background:#4f46e5;color:#fff;font-weight:700;font-size:13px;cursor:pointer;'
+    : 'flex:1;padding:10px;border-radius:10px;border:2px solid #d1d5db;background:var(--surface2);color:var(--text3);font-weight:700;font-size:13px;cursor:pointer;';
+  document.getElementById('mode-ready-btn').style.cssText = isAuto
+    ? 'flex:1;padding:10px;border-radius:10px;border:2px solid #d1d5db;background:var(--surface2);color:var(--text3);font-weight:700;font-size:13px;cursor:pointer;'
+    : 'flex:1;padding:10px;border-radius:10px;border:2px solid #16a34a;background:#16a34a;color:#fff;font-weight:700;font-size:13px;cursor:pointer;';
+}
+
+// ─── Ready upload mode ──────────────────────────────────────────
+let readyFiles = {}, readyCat = '', readyPrivacy = 'unlisted', readyJobId = null, readyPollTimer = null;
+
+function readyDropAll(event){
+  event.preventDefault();
+  document.getElementById('ready-dropzone').style.borderColor = '#d1d5db';
+  const files = Array.from(event.dataTransfer.files).filter(f=>f.type.startsWith('video/'));
+  files.forEach(f => detectAndUploadReadyFile(f));
+}
+
+function readyAllSelected(input){
+  Array.from(input.files).forEach(f => detectAndUploadReadyFile(f));
+}
+
+function detectAndUploadReadyFile(file){
+  // Detect format from filename or use video metadata
+  const name = file.name.toLowerCase();
+  let fmt = null;
+  if(name.includes('9x16') || name.includes('9_16') || name.includes('916') || name.includes('short')) fmt = '9:16';
+  else if(name.includes('1x1') || name.includes('1_1') || name.includes('11') || name.includes('feed') || name.includes('square')) fmt = '1:1';
+  else if(name.includes('16x9') || name.includes('16_9') || name.includes('169') || name.includes('youtube')) fmt = '16:9';
+
+  if(fmt){
+    uploadReadyFile(file, fmt);
+  } else {
+    // Try to detect from video dimensions
+    const video = document.createElement('video');
+    video.preload = 'metadata';
+    video.onloadedmetadata = () => {
+      URL.revokeObjectURL(video.src);
+      const w = video.videoWidth, h = video.videoHeight;
+      if(h > w) fmt = '9:16';
+      else if(w === h) fmt = '1:1';
+      else fmt = '16:9';
+      uploadReadyFile(file, fmt);
+    };
+    video.src = URL.createObjectURL(file);
+  }
+}
+
+function uploadReadyFile(file, fmt){
+  const fd = new FormData();
+  fd.append('file', file); fd.append('type', 'video'); fd.append('filename', file.name);
+  fetch('/upload',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
+    readyFiles[fmt] = {path: d.path, fmt};
+    const idMap = {'9:16':'916','1:1':'11','16:9':'169'};
+    const key = idMap[fmt];
+    document.getElementById('ready-'+key+'-name').textContent = '✅ ' + file.name;
+    document.getElementById('ready-'+key+'-name').style.display = '';
+    document.getElementById('ready-'+key+'-btn').style.borderColor = '#16a34a';
+    updateReadyBtn();
+  });
+}
+
+function readyFileSelected(input, fmt){
+  const file = input.files[0];
+  if(!file) return;
+  uploadReadyFile(file, fmt);
+}
+
+function setReadyCat(btn){
+  document.querySelectorAll('#ready-cat-grid .lang-btn').forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active');
+  readyCat = btn.dataset.cat;
+  updateReadyBtn();
+}
+
+function setReadyPrivacy(p){
+  readyPrivacy = p;
+  ['public','unlisted','private'].forEach(x=>{
+    document.getElementById('ready-priv-'+x).classList.toggle('on', x===p);
+  });
+}
+
+function updateReadyInfo(){
+  const n = parseInt(document.getElementById('ready-n').value)||1;
+  const fmts = Object.keys(readyFiles).length;
+  document.getElementById('ready-n-info').textContent = fmts > 0 ? `= ${n*fmts} видео (${fmts} форм. × ${n})` : '';
+}
+
+function updateReadyBtn(){
+  updateReadyInfo();
+  const hasFiles = Object.keys(readyFiles).length > 0;
+  document.getElementById('ready-run-btn').disabled = !(hasFiles && readyCat);
+}
+
+async function startReadyUpload(){
+  const n = parseInt(document.getElementById('ready-n').value)||1;
+  const files = Object.values(readyFiles);
+  document.getElementById('ready-progress-wrap').style.display = '';
+  document.getElementById('ready-log').style.display = '';
+  document.getElementById('ready-result').style.display = 'none';
+  document.getElementById('ready-run-btn').disabled = true;
+  const res = await fetch('/ready_upload',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({files, n_sets:n, category:readyCat, privacy:readyPrivacy})});
+  const data = await res.json();
+  readyJobId = data.job_id;
+  readyPollTimer = setInterval(()=>pollReadyJob(), 1500);
+}
+
+function pollReadyJob(){
+  fetch('/mass_yt_status/'+readyJobId).then(r=>r.json()).then(d=>{
+    document.getElementById('ready-log').textContent = d.log.join('\n');
+    document.getElementById('ready-log').scrollTop = 9999;
+    const pct = d.total>0 ? Math.round(d.done/d.total*100) : 0;
+    document.getElementById('ready-progress-fill').style.width = pct+'%';
+    document.getElementById('ready-progress-text').textContent = d.done+' / '+d.total;
+    if(d.status==='done'||d.status==='error'){
+      clearInterval(readyPollTimer);
+      document.getElementById('ready-run-btn').disabled = false;
+      if(d.sets && d.sets.length){
+        document.getElementById('ready-result').style.display = '';
+        const tbody = document.getElementById('ready-result-body');
+        tbody.innerHTML = '';
+        d.sets.forEach(s=>{
+          s.links.forEach(lk=>{
+            tbody.innerHTML += `<tr><td>${s.set_idx}</td><td>${s.channel}</td><td>${lk.fmt}</td><td><a href="${lk.link}" target="_blank">${lk.link}</a></td></tr>`;
+          });
+        });
+      }
+    }
+  });
+}
+
+// ─── Auto upload mode ───────────────────────────────────────────
 let autoVideoPath = null, autoCat = '', autoPrivacy = 'unlisted', autoJobId = null, autoPollTimer = null;
 
 function autoVideoSelected(input){
@@ -4244,6 +4573,15 @@ function autoVideoSelected(input){
     document.getElementById('auto-video-name').textContent = '✅ ' + file.name;
     document.getElementById('auto-video-btn').style.borderColor = '#16a34a';
     updateAutoRunBtn();
+    // Диагностика: что перекрывает кнопку Суставы
+    setTimeout(()=>{
+      const btn = document.querySelector('#auto-cat-grid .lang-btn');
+      if(btn){
+        const r = btn.getBoundingClientRect();
+        const el = document.elementFromPoint(r.left+5, r.top+5);
+        console.log('Поверх кнопки:', el ? el.tagName+' id='+el.id+' class='+el.className : 'null');
+      }
+    }, 500);
   });
 }
 
@@ -4540,7 +4878,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == '/admin':
-            if user != 'pavel':
+            if user.lower() not in ('pavel', 'pavel2121'):
                 self.send_response(403); self.end_headers(); return
             self.send_response(200)
             self.send_header('Content-Type','text/html; charset=utf-8')
@@ -4548,7 +4886,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(ADMIN_HTML.encode())
             return
         elif path == '/admin/users':
-            if user != 'pavel':
+            if user.lower() not in ('pavel', 'pavel2121'):
                 self.json({'ok': False}); return
             self.json({'ok': True, 'users': list(USERS.keys())})
             return
@@ -4741,7 +5079,7 @@ class Handler(BaseHTTPRequestHandler):
 
         # Login endpoint — no auth needed
         if path == '/admin/add_user':
-            if user != 'pavel':
+            if user.lower() not in ('pavel', 'pavel2121'):
                 self.json({'ok': False, 'error': 'Нет доступа'}); return
             length = int(self.headers.get('Content-Length', 0))
             data = json.loads(self.rfile.read(length))
@@ -4756,7 +5094,7 @@ class Handler(BaseHTTPRequestHandler):
             self.json({'ok': True})
             return
         elif path == '/admin/delete_user':
-            if user != 'pavel':
+            if user.lower() not in ('pavel', 'pavel2121'):
                 self.json({'ok': False, 'error': 'Нет доступа'}); return
             length = int(self.headers.get('Content-Length', 0))
             data = json.loads(self.rfile.read(length))
@@ -5319,7 +5657,7 @@ class Handler(BaseHTTPRequestHandler):
                     "DESCRIPTION: [English description here]"
                 )
             body = json.dumps({
-                'model': 'claude-haiku-4-5',
+                'model': 'claude-haiku-4-5-20251001',
                 'max_tokens': 3000,
                 'messages': [{'role':'user','content':prompt}]
             }).encode()
@@ -5386,8 +5724,19 @@ class Handler(BaseHTTPRequestHandler):
             job_id = uuid.uuid4().hex[:8]
             MASS_UPLOAD_JOBS[job_id] = {'status':'pending','log':[],'sets':[],'total':0,'done':0}
             t = threading.Thread(target=auto_convert_and_upload, args=(
-                job_id, params['src_video'], params.get('channel_ids'),
+                job_id, params['src_video'], params.get('n_sets', 1),
                 params.get('category','Видео'), params.get('privacy','unlisted'), user
+            ), daemon=True)
+            t.start()
+            self.json({'job_id': job_id})
+        elif path == '/ready_upload':
+            length = int(self.headers.get('Content-Length',0))
+            params = json.loads(self.rfile.read(length))
+            job_id = uuid.uuid4().hex[:8]
+            MASS_UPLOAD_JOBS[job_id] = {'status':'pending','log':[],'sets':[],'total':0,'done':0}
+            t = threading.Thread(target=ready_upload_to_youtube, args=(
+                job_id, params['files'], params['n_sets'],
+                params.get('category',''), params.get('privacy','unlisted'), user
             ), daemon=True)
             t.start()
             self.json({'job_id': job_id})
