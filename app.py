@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "2.3"
+VERSION = "2.4"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -4912,7 +4912,7 @@ class Handler(BaseHTTPRequestHandler):
                     with open(current_file, 'wb') as f:
                         f.write(new_code)
                     self.json({'ok': True, 'status': 'updated', 'old': VERSION, 'new': new_ver})
-                    threading.Thread(target=lambda: (time.sleep(1.5), subprocess.Popen([sys.executable] + sys.argv), os._exit(0)), daemon=True).start()
+                    threading.Thread(target=lambda: (time.sleep(2), subprocess.Popen([sys.executable, os.path.abspath(__file__)], cwd=os.path.dirname(os.path.abspath(__file__))), os._exit(0)), daemon=True).start()
             except Exception as e:
                 self.json({'ok': False, 'error': str(e)})
             return
@@ -5770,7 +5770,7 @@ if __name__ == '__main__':
             print(f"🔄 Авто-обновление {VERSION} → {_nver2.decode()}")
             with open(os.path.abspath(__file__), 'wb') as _f2:
                 _f2.write(_new2)
-            subprocess.Popen([sys.executable] + sys.argv)
+            subprocess.Popen([sys.executable, os.path.abspath(__file__)], cwd=os.path.dirname(os.path.abspath(__file__)))
             sys.exit(0)
     except Exception as _e2:
         pass
