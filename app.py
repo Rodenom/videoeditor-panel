@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "1.5"
+VERSION = "1.6"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -4906,7 +4906,7 @@ class Handler(BaseHTTPRequestHandler):
                     current_code = f.read()
                 import re as _re
                 new_ver = (_re.search(r'VERSION\s*=\s*["\']([^"\']+)["\']', new_code.decode('utf-8', errors='ignore')) or [None,None])[1] or '?'
-                if new_code == current_code:
+                if new_ver == VERSION:
                     self.json({'ok': True, 'status': 'latest', 'version': VERSION})
                 else:
                     with open(current_file, 'wb') as f:
