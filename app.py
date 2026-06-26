@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "3.5"
+VERSION = "3.6"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -5769,8 +5769,7 @@ if __name__ == '__main__':
             print(f"🔄 Авто-обновление {VERSION} → {_nver2.decode()}")
             with open(os.path.abspath(__file__), 'wb') as _f2:
                 _f2.write(_new2)
-            subprocess.Popen([sys.executable, os.path.abspath(__file__)], cwd=os.path.dirname(os.path.abspath(__file__)))
-            sys.exit(0)
+            sys.exit(42)
     except Exception as _e2:
         pass
     if not shutil.which('ffmpeg'):

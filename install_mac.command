@@ -85,4 +85,13 @@ echo "╚═══════════════════════�
 echo ""
 
 sleep 2 && open http://localhost:7777 &
-python3 app.py
+while true; do
+  python3 app.py
+  EXIT_CODE=$?
+  if [ $EXIT_CODE -eq 42 ]; then
+    echo "🔄 Обновление применено, перезапуск..."
+    sleep 1
+  else
+    break
+  fi
+done
