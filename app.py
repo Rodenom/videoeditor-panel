@@ -4899,7 +4899,7 @@ class Handler(BaseHTTPRequestHandler):
             import urllib.request as _ur
             try:
                 update_url = 'https://raw.githubusercontent.com/Rodenom/videoeditor-panel/main/app.py'
-                req = _ur.Request(update_url, headers={'Authorization': 'token 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'})
+                req = _ur.Request(update_url)
                 new_code = _ur.urlopen(req, timeout=10).read()
                 current_file = os.path.abspath(__file__)
                 with open(current_file, 'rb') as f:
