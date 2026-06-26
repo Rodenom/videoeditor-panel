@@ -516,11 +516,11 @@ def process_video(job_id, params):
                         '-c:v','libx264','-profile:v','baseline','-tune','stillimage',
                         '-crf','28','-preset','fast','-pix_fmt','yuv420p',
                         '-c:a','aac','-b:a','32k','-ar','44100','-ac','2', tail_v], job_id)
-            # Нормализуем громкость оригинала до стандартного уровня
+            # Усиливаем громкость оригинала перед склейкой с хвостом
             work_loud = os.path.join(tmp, 'work_loud.mp4')
             run_ff(['ffmpeg','-y','-i',work,
-                '-filter_complex','[0:a]loudnorm=I=-14:TP=-1:LRA=11[aout]',
-                '-map','0:v','-map','[aout]','-c:v','copy','-c:a','aac','-b:a','128k', work_loud], job_id)
+                '-af','volume=2.0',
+                '-map','0:v','-map','0:a','-c:v','copy','-c:a','aac','-b:a','128k', work_loud], job_id)
             work = work_loud
             merged = os.path.join(tmp, 'merged.mp4')
             concat_f = os.path.join(tmp, 'concat.txt')
@@ -569,7 +569,6 @@ def process_video(job_id, params):
                 f'lowpass=f={lp_freq},'
                 f'equalizer=f={eq_freq}:width_type=o:width={eq_bw:.2f}:g={eq_gain:.2f},'
                 f'aecho=0.8:{reverb_mix:.3f}:{reverb_delay}:{reverb_decay:.3f},'
-                f'stereotools=mlev={stereo_width:.3f},'
                 f'aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo'
             )
             # Видео: micro-crop + цвет
