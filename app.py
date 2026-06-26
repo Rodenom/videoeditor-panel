@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "3.0"
+VERSION = "3.1"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -4779,7 +4779,7 @@ async function checkUpdate(){
       setTimeout(()=>{btn.textContent='🔄 Обновить';btn.disabled=false;}, 3000);
     } else if(d.status === 'updated'){
       btn.textContent = `✅ Обновлено ${d.old} → ${d.new}! Перезапуск...`;
-      setTimeout(()=>location.reload(), 3000);
+      setTimeout(()=>location.reload(), 8000);
     } else {
       btn.textContent = '❌ Ошибка';
       btn.disabled = false;
@@ -4912,7 +4912,14 @@ class Handler(BaseHTTPRequestHandler):
                     with open(current_file, 'wb') as f:
                         f.write(new_code)
                     self.json({'ok': True, 'status': 'updated', 'old': VERSION, 'new': new_ver})
-                    threading.Thread(target=lambda: (time.sleep(2), subprocess.Popen([sys.executable, os.path.abspath(__file__)], cwd=os.path.dirname(os.path.abspath(__file__))), os._exit(0)), daemon=True).start()
+                    _app = os.path.abspath(__file__)
+                    _cwd = os.path.dirname(_app)
+                    _py = sys.executable
+                    def _restart():
+                        time.sleep(2)
+                        subprocess.Popen(f'sleep 3 && python3 "{_app}"', shell=True, cwd=_cwd)
+                        os._exit(0)
+                    threading.Thread(target=_restart, daemon=True).start()
             except Exception as e:
                 self.json({'ok': False, 'error': str(e)})
             return
