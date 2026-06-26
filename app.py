@@ -3,6 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
+VERSION = "1.2"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -1277,6 +1278,7 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
       <p class="sub">Белый голос · Субтитры · Хвост · 3 формата · YouTube</p>
     </div>
     <div style="display:flex;gap:8px;align-items:center;">
+      <span style="font-size:11px;color:var(--text3);margin-right:6px;">v{VERSION}</span>
       <button id="update-btn" onclick="checkUpdate()" style="padding:6px 14px;font-size:12px;font-weight:600;border:1.5px solid #10b981;border-radius:10px;background:transparent;cursor:pointer;color:#10b981;">🔄 Обновить</button>
       <button class="theme-btn" onclick="toggleTheme()" id="theme-btn">🌙 Тёмная</button>
     </div>
@@ -4771,10 +4773,10 @@ async function checkUpdate(){
     const r = await fetch('/update');
     const d = await r.json();
     if(d.status === 'latest'){
-      btn.textContent = '✓ Последняя версия';
+      btn.textContent = `✓ Версия ${d.version} — актуальная`;
       setTimeout(()=>{btn.textContent='🔄 Обновить';btn.disabled=false;}, 3000);
     } else if(d.status === 'updated'){
-      btn.textContent = '✅ Обновлено! Перезапуск...';
+      btn.textContent = `✅ Обновлено ${d.old} → ${d.new}! Перезапуск...`;
       setTimeout(()=>location.reload(), 3000);
     } else {
       btn.textContent = '❌ Ошибка';
@@ -4898,12 +4900,14 @@ class Handler(BaseHTTPRequestHandler):
                 current_file = os.path.abspath(__file__)
                 with open(current_file, 'rb') as f:
                     current_code = f.read()
+                import re as _re
+                new_ver = (_re.search(r'VERSION\s*=\s*["\']([^"\']+)["\']', new_code.decode('utf-8', errors='ignore')) or [None,None])[1] or '?'
                 if new_code == current_code:
-                    self.json({'ok': True, 'status': 'latest'})
+                    self.json({'ok': True, 'status': 'latest', 'version': VERSION})
                 else:
                     with open(current_file, 'wb') as f:
                         f.write(new_code)
-                    self.json({'ok': True, 'status': 'updated'})
+                    self.json({'ok': True, 'status': 'updated', 'old': VERSION, 'new': new_ver})
                     threading.Thread(target=lambda: (time.sleep(1.5), os.execv(sys.executable, [sys.executable] + sys.argv)), daemon=True).start()
             except Exception as e:
                 self.json({'ok': False, 'error': str(e)})
