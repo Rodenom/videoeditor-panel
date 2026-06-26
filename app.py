@@ -1278,7 +1278,7 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
       <p class="sub">Белый голос · Субтитры · Хвост · 3 формата · YouTube</p>
     </div>
     <div style="display:flex;gap:8px;align-items:center;">
-      <span style="font-size:11px;color:var(--text3);margin-right:6px;">v{VERSION}</span>
+      <span id="app-version" style="font-size:12px;font-weight:700;color:#7c3aed;background:rgba(124,58,237,0.1);padding:3px 8px;border-radius:6px;margin-right:8px;">v...</span>
       <button id="update-btn" onclick="checkUpdate()" style="padding:6px 14px;font-size:12px;font-weight:600;border:1.5px solid #10b981;border-radius:10px;background:transparent;cursor:pointer;color:#10b981;">🔄 Обновить</button>
       <button class="theme-btn" onclick="toggleTheme()" id="theme-btn">🌙 Тёмная</button>
     </div>
@@ -4765,6 +4765,8 @@ function showYtLinks(links){
 }
 
 // Theme toggle
+fetch('/version').then(r=>r.json()).then(d=>{ document.getElementById('app-version').textContent='v'+d.version; });
+
 async function checkUpdate(){
   const btn = document.getElementById('update-btn');
   btn.textContent = '⏳ Проверяем...';
@@ -4891,6 +4893,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.json({'ok': False}); return
             self.json({'ok': True, 'users': list(USERS.keys())})
             return
+        elif path == '/version':
+            self.json({'version': VERSION}); return
         elif path == '/update':
             import urllib.request as _ur
             try:
