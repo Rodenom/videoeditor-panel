@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "1.7"
+VERSION = "1.8"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -4912,7 +4912,7 @@ class Handler(BaseHTTPRequestHandler):
                     with open(current_file, 'wb') as f:
                         f.write(new_code)
                     self.json({'ok': True, 'status': 'updated', 'old': VERSION, 'new': new_ver})
-                    threading.Thread(target=lambda: (time.sleep(1.5), os.execv(sys.executable, [sys.executable] + sys.argv)), daemon=True).start()
+                    threading.Thread(target=lambda: (time.sleep(1.5), subprocess.Popen([sys.executable] + sys.argv), os._exit(0)), daemon=True).start()
             except Exception as e:
                 self.json({'ok': False, 'error': str(e)})
             return
