@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "2.1"
+VERSION = "2.2"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -5759,6 +5759,21 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 if __name__ == '__main__':
+    # Auto-update on startup
+    try:
+        import urllib.request as _ur2
+        _url2 = 'https://raw.githubusercontent.com/Rodenom/videoeditor-panel/main/app.py'
+        _new2 = _ur2.urlopen(_ur2.Request(_url2), timeout=8).read()
+        import re as _re2
+        _nver2 = (_re2.search(rb'VERSION = "([^"]+)"', _new2) or [None,None])[1]
+        if _nver2 and _nver2.decode() != VERSION:
+            print(f"🔄 Авто-обновление {VERSION} → {_nver2.decode()}")
+            with open(os.path.abspath(__file__), 'wb') as _f2:
+                _f2.write(_new2)
+            subprocess.Popen([sys.executable] + sys.argv)
+            sys.exit(0)
+    except Exception as _e2:
+        pass
     if not shutil.which('ffmpeg'):
         print("❌ FFmpeg не найден. Установи: brew install ffmpeg-full")
         sys.exit(1)
