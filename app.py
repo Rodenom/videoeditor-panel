@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "3.8"
+VERSION = "3.9"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -5240,10 +5240,14 @@ class Handler(BaseHTTPRequestHandler):
             self.json({'ok': True})
             return
         elif path == '/binom/key':
+            length = int(self.headers.get('Content-Length', 0))
+            data = json.loads(self.rfile.read(length))
             binom_key_file = os.path.join(BASE_DIR, 'binom_key.txt')
             open(binom_key_file, 'w').write(data.get('key','').strip())
             self.json({'ok': True}); return
         elif path == '/binom/settings':
+            length = int(self.headers.get('Content-Length', 0))
+            data = json.loads(self.rfile.read(length))
             import json as _bsj2
             binom_sett_file = os.path.join(BASE_DIR, 'binom_settings.json')
             sett = _bsj2.load(open(binom_sett_file)) if os.path.exists(binom_sett_file) else {}
