@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "3.6"
+VERSION = "3.7"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -873,12 +873,13 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user):
                 import urllib.request as _ur2, json as _json2, random as _r2
                 _seed2 = _r2.randint(10000, 99999)
                 _prompt2 = (
-                    f"You are a YouTube video expert for nutra/health offers. Session: {_seed2}.\n"
-                    f"Generate a catchy YouTube title and description IN ENGLISH ONLY for a video about: {category}\n\n"
+                    f"You are a YouTube content creator. Session: {_seed2}.\n"
+                    f"Generate a YouTube title and description IN ENGLISH ONLY for a lifestyle video about: {category}\n\n"
                     "Rules:\n"
                     "- MUST be in English language only\n"
-                    "- Title: max 70 chars, intriguing, benefit-focused, curiosity-gap\n"
-                    "- Description: 2-3 sentences, engaging, include call to action\n\n"
+                    "- Title: max 70 chars, curious, story-driven, no medical claims\n"
+                    "- Description: 2-3 sentences, conversational, no exaggerated claims\n"
+                    "- Avoid words: cure, treat, heal, eliminate, guaranteed, miracle\n\n"
                     "Respond EXACTLY in this format:\n"
                     "TITLE: [English title here]\n"
                     "DESCRIPTION: [English description here]"
@@ -982,12 +983,13 @@ def ready_upload_to_youtube(job_id, ready_files, n_sets, category, privacy, user
                 import urllib.request as _ur2, json as _json2, random as _r2
                 _seed2 = _r2.randint(10000, 99999)
                 _prompt2 = (
-                    f"You are a YouTube video expert for nutra/health offers. Session: {_seed2}.\n"
-                    f"Generate a catchy YouTube title and description IN ENGLISH ONLY for a video about: {category}\n\n"
+                    f"You are a YouTube content creator. Session: {_seed2}.\n"
+                    f"Generate a YouTube title and description IN ENGLISH ONLY for a lifestyle video about: {category}\n\n"
                     "Rules:\n"
                     "- MUST be in English language only\n"
-                    "- Title: max 70 chars, intriguing, benefit-focused, curiosity-gap\n"
-                    "- Description: 2-3 sentences, engaging, include call to action\n\n"
+                    "- Title: max 70 chars, curious, story-driven, no medical claims\n"
+                    "- Description: 2-3 sentences, conversational, no exaggerated claims\n"
+                    "- Avoid words: cure, treat, heal, eliminate, guaranteed, miracle\n\n"
                     "Respond EXACTLY in this format:\n"
                     "TITLE: [English title here]\n"
                     "DESCRIPTION: [English description here]"
