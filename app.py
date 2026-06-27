@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "4.0"
+VERSION = "3.9"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -4848,6 +4848,7 @@ async function loadBinom() {
     // Group by account name (ACC####_NAME pattern)
     const accounts = {};
     for (const c of stats) {
+      if (c.id === "totals") continue;
       const name = c.name || '';
       const m = name.match(/^(ACC\d+_[A-Z_]+)/i);
       const acc = m ? m[1] : name.split('_').slice(0,2).join('_');
@@ -5903,7 +5904,7 @@ if __name__ == '__main__':
     try:
         import urllib.request as _ur2
         _url2 = 'https://raw.githubusercontent.com/Rodenom/videoeditor-panel/main/app.py'
-        _new2 = _ur2.urlopen(_ur2.Request(_url2), timeout=8).read()
+        raise Exception('skip')  # temp disabled
         import re as _re2
         _nver2 = (_re2.search(rb'VERSION = "([^"]+)"', _new2) or [None,None])[1]
         if _nver2 and _nver2.decode() != VERSION:
