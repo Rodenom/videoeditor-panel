@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "3.7"
+VERSION = "3.8"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -1290,6 +1290,7 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
     <button class="tab-btn" onclick="switchTab('ads')">📢 Заголовки и описания</button>
     <button class="tab-btn" onclick="switchTab('upload')">📤 Загрузить на YouTube</button>
     <button class="tab-btn" onclick="switchTab('tasks')">📋 Таски</button>
+    <button class="tab-btn" onclick="switchTab('binom')">📊 Binom</button>
     <div style="flex:1;"></div>
     <button onclick="addChannel()" style="padding:7px 14px;font-size:12px;font-weight:700;border:1.5px solid var(--accent1);border-radius:10px;background:transparent;cursor:pointer;color:var(--accent1);white-space:nowrap;">📺 + Канал</button>
   </div>
@@ -3044,12 +3045,13 @@ function updateReviewOpt(){
 }
 
 function switchTab(tab){
-  document.querySelectorAll('.tab-btn').forEach((b,i)=>b.classList.toggle('active',['editor','ads','upload','tasks'][i]===tab));
+  document.querySelectorAll('.tab-btn').forEach((b,i)=>b.classList.toggle('active',['editor','ads','upload','tasks','binom'][i]===tab));
   document.querySelectorAll('.tab-pane').forEach(p=>p.classList.remove('active'));
   document.getElementById('tab-'+tab).classList.add('active');
   if(tab==='prokla') loadProklaNames();
   if(tab==='tasks') tkInit();
   if(tab==='upload'){ loadChannels(); loadProjects(); }
+  if(tab==='binom'){ loadBinom(); }
 }
 
 // ===== TASKS =====
@@ -4810,7 +4812,108 @@ function toggleTheme(){
     });
   }
 })();
+
+// ── Binom ──────────────────────────────────────────────────────
+const GOOGLE_THRESHOLDS = [10, 50, 100, 200, 350];
+
+function getNextBill(cost, prepay) {
+  const spend = Math.max(0, cost - prepay);
+  for (let t of GOOGLE_THRESHOLDS) {
+    if (spend < t) return { next: t, remaining: +(t - spend).toFixed(2) };
+  }
+  const extra = Math.ceil((spend - 350) / 350);
+  const next = 350 + extra * 350;
+  return { next, remaining: +(next - spend).toFixed(2) };
+}
+
+async function saveBinomKey() {
+  const key = document.getElementById('binom-key').value.trim();
+  if (!key) return;
+  await fetch('/binom/key', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({key})});
+  document.getElementById('binom-status').textContent = '✅ Ключ сохранён';
+  loadBinom();
+}
+
+async function loadBinom() {
+  const st = document.getElementById('binom-status');
+  const wrap = document.getElementById('binom-table-wrap');
+  st.textContent = '⏳ Загружаем данные из Binom...';
+  wrap.innerHTML = '';
+  try {
+    const [statsR, settR] = await Promise.all([fetch('/binom/stats'), fetch('/binom/settings')]);
+    const stats = await statsR.json();
+    const sett = await settR.json();
+    if (stats.error) { st.textContent = '❌ ' + stats.error; return; }
+
+    // Group by account name (ACC####_NAME pattern)
+    const accounts = {};
+    for (const c of stats) {
+      const name = c.name || '';
+      const m = name.match(/^(ACC\d+_[A-Z_]+)/i);
+      const acc = m ? m[1] : name.split('_').slice(0,2).join('_');
+      if (!accounts[acc]) accounts[acc] = { cost: 0, n: 0 };
+      accounts[acc].cost += parseFloat(c.cost || 0);
+      accounts[acc].n++;
+    }
+
+    const now = new Date().toLocaleTimeString();
+    st.textContent = `✅ Обновлено в ${now} · ${Object.keys(accounts).length} аккаунтов`;
+
+    let html = `<table style="width:100%;border-collapse:collapse;font-size:13px;">
+<thead><tr style="background:var(--surface2);">
+<th style="padding:9px 12px;text-align:left;border:1px solid var(--border);">Аккаунт</th>
+<th style="padding:9px 12px;text-align:right;border:1px solid var(--border);">Cost</th>
+<th style="padding:9px 12px;text-align:center;border:1px solid var(--border);">Припей $</th>
+<th style="padding:9px 12px;text-align:right;border:1px solid var(--border);">Следующий бил</th>
+<th style="padding:9px 12px;text-align:right;border:1px solid var(--border);">Осталось до била</th>
+</tr></thead><tbody>`;
+
+    const sorted = Object.entries(accounts).sort((a,b) => b[1].cost - a[1].cost);
+    for (const [acc, data] of sorted) {
+      const s = sett[acc] || {};
+      const prepay = parseFloat(s.prepay || 0);
+      const bill = getNextBill(data.cost, prepay);
+      const rem = bill.remaining;
+      const color = rem < 5 ? '#ef4444' : rem < 20 ? '#f59e0b' : 'var(--text1)';
+      html += `<tr>
+<td style="padding:9px 12px;border:1px solid var(--border);font-weight:600;">${acc}</td>
+<td style="padding:9px 12px;text-align:right;border:1px solid var(--border);">$${data.cost.toFixed(2)}</td>
+<td style="padding:9px 12px;text-align:center;border:1px solid var(--border);">
+  <input type="number" value="${prepay||''}" placeholder="0" min="0" step="1"
+    style="width:60px;padding:4px 6px;border:1px solid var(--border);border-radius:6px;background:var(--surface2);color:var(--text1);text-align:center;font-size:12px;"
+    onchange="saveBinomSetting('${acc}','prepay',this.value)">
+</td>
+<td style="padding:9px 12px;text-align:right;border:1px solid var(--border);font-weight:700;">$${bill.next}</td>
+<td style="padding:9px 12px;text-align:right;border:1px solid var(--border);font-weight:700;color:${color};">$${rem}</td>
+</tr>`;
+    }
+    html += '</tbody></table>';
+    wrap.innerHTML = html;
+    setTimeout(loadBinom, 300000); // refresh every 5 min
+  } catch(e) { st.textContent = '❌ ' + e.message; }
+}
+
+async function saveBinomSetting(acc, field, value) {
+  await fetch('/binom/settings', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({acc, field, value})});
+}
 </script>
+
+  <div id="tab-binom" class="tab-pane">
+    <div style="max-width:960px;margin:0 auto;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px;">
+        <h2 style="margin:0;font-size:18px;">📊 Binom — Спенд по аккаунтам</h2>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          <input id="binom-key" type="password" placeholder="Binom API Key" style="padding:7px 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text1);font-size:12px;width:210px;">
+          <button onclick="saveBinomKey()" style="padding:7px 12px;background:var(--grad1);color:#fff;border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;">Сохранить ключ</button>
+          <button onclick="loadBinom()" style="padding:7px 12px;background:var(--surface2);color:var(--text1);border:1px solid var(--border);border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;">🔄 Обновить</button>
+        </div>
+      </div>
+      <div id="binom-status" style="margin-bottom:12px;font-size:13px;color:var(--text3);"></div>
+      <div id="binom-table-wrap"></div>
+    </div>
+  </div>
+
 </body>
 </html>"""
 
@@ -4894,6 +4997,25 @@ class Handler(BaseHTTPRequestHandler):
             if user.lower() not in ('pavel', 'pavel2121'):
                 self.json({'ok': False}); return
             self.json({'ok': True, 'users': list(USERS.keys())})
+            return
+        elif path == '/binom/stats':
+            import urllib.request as _ubr
+            binom_key_file = os.path.join(BASE_DIR, 'binom_key.txt')
+            if not os.path.exists(binom_key_file):
+                self.json({'error': 'API ключ не задан'}); return
+            bk = open(binom_key_file).read().strip()
+            try:
+                req = _ubr.Request('https://swat.icu/public/api/v1/stats/campaign', headers={'Api-Key': bk})
+                resp = _ubr.urlopen(req, timeout=15).read()
+                import json as _bj
+                self.json(_bj.loads(resp))
+            except Exception as e:
+                self.json({'error': str(e)})
+            return
+        elif path == '/binom/settings':
+            binom_sett_file = os.path.join(BASE_DIR, 'binom_settings.json')
+            import json as _bsj
+            self.json(_bsj.load(open(binom_sett_file)) if os.path.exists(binom_sett_file) else {})
             return
         elif path == '/version':
             self.json({'version': VERSION}); return
@@ -5117,6 +5239,20 @@ class Handler(BaseHTTPRequestHandler):
             save_sessions(SESSIONS)
             self.json({'ok': True})
             return
+        elif path == '/binom/key':
+            binom_key_file = os.path.join(BASE_DIR, 'binom_key.txt')
+            open(binom_key_file, 'w').write(data.get('key','').strip())
+            self.json({'ok': True}); return
+        elif path == '/binom/settings':
+            import json as _bsj2
+            binom_sett_file = os.path.join(BASE_DIR, 'binom_settings.json')
+            sett = _bsj2.load(open(binom_sett_file)) if os.path.exists(binom_sett_file) else {}
+            acc = data.get('acc','')
+            if acc:
+                if acc not in sett: sett[acc] = {}
+                sett[acc][data.get('field','')] = data.get('value','')
+            open(binom_sett_file,'w').write(_bsj2.dumps(sett, indent=2))
+            self.json({'ok': True}); return
         elif path == '/setup':
             if not is_first_launch():
                 self.json({'ok': False, 'error': 'Аккаунт уже создан'}); return
