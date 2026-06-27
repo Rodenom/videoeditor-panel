@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "3.9"
+VERSION = "4.0"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -4999,16 +4999,15 @@ class Handler(BaseHTTPRequestHandler):
             self.json({'ok': True, 'users': list(USERS.keys())})
             return
         elif path == '/binom/stats':
-            import urllib.request as _ubr
             binom_key_file = os.path.join(BASE_DIR, 'binom_key.txt')
             if not os.path.exists(binom_key_file):
                 self.json({'error': 'API ключ не задан'}); return
             bk = open(binom_key_file).read().strip()
             try:
-                req = _ubr.Request('https://swat.icu/public/api/v1/stats/campaign', headers={'Api-Key': bk})
-                resp = _ubr.urlopen(req, timeout=15).read()
-                import json as _bj
-                self.json(_bj.loads(resp))
+                import requests as _breq
+                resp = _breq.get('https://swat.icu/public/api/v1/stats/campaign',
+                    headers={'Api-Key': bk}, timeout=15)
+                self.json(resp.json())
             except Exception as e:
                 self.json({'error': str(e)})
             return
