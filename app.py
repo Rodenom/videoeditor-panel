@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "4.1"
+VERSION = "4.2"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -4211,6 +4211,12 @@ function pickFile(type){
 
 function uploadFile(type,file){
   if(type==='video'){
+    const lbl=document.getElementById('vlbl');
+    const drop=document.getElementById('vdrop');
+    lbl.textContent='⏳ Загружаем '+file.name+' ('+Math.round(file.size/1024/1024)+' МБ)...';
+    lbl.className='drop-text';
+    drop.classList.remove('ok');
+    drop.style.opacity='0.6';
     const url=URL.createObjectURL(file);
     const vid=document.createElement('video');
     vid.src=url; vid.muted=true; vid.playsInline=true;
@@ -4240,10 +4246,17 @@ function uploadFile(type,file){
       files[type]=d.path;
       const lblMap={video:'vlbl',audio:'albl',img:'ilbl'};
       const dropMap={video:'vdrop',audio:'adrop',img:'idrop'};
-      document.getElementById(lblMap[type]).textContent=file.name;
+      document.getElementById(lblMap[type]).textContent='✅ '+file.name;
       document.getElementById(lblMap[type]).className='drop-text ok';
-      document.getElementById(dropMap[type]).classList.add('ok');
+      const dropEl=document.getElementById(dropMap[type]);
+      dropEl.classList.add('ok');
+      dropEl.style.opacity='1';
       checkReady();
+    }).catch(()=>{
+      const lblMap={video:'vlbl',audio:'albl',img:'ilbl'};
+      const dropMap={video:'vdrop',audio:'adrop',img:'idrop'};
+      document.getElementById(lblMap[type]).textContent='❌ Ошибка загрузки';
+      document.getElementById(dropMap[type]).style.opacity='1';
     });
 }
 
