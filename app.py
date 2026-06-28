@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "4.5"
+VERSION = "4.6"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -1655,6 +1655,17 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
         </div>
       </div>
 
+<!-- AI Title block for auto mode -->
+      <div style="margin-bottom:14px;">
+        <button id="auto-gen-btn" onclick="generateAutoMeta()" style="width:100%;padding:10px;border-radius:10px;border:2px solid #4f46e5;background:var(--surface2);color:#4f46e5;font-weight:700;font-size:13px;cursor:pointer;margin-bottom:10px;">✨ Сгенерировать нейтральный заголовок (AI)</button>
+        <div id="auto-ai-result" style="display:none;background:rgba(79,70,229,.06);border:1.5px solid rgba(79,70,229,.2);border-radius:10px;padding:12px;margin-bottom:10px;">
+          <div style="font-size:11px;font-weight:700;color:#4f46e5;margin-bottom:4px;">ЗАГОЛОВОК:</div>
+          <div id="auto-ai-title" style="font-size:14px;font-weight:600;color:var(--text);margin-bottom:8px;"></div>
+          <div style="font-size:11px;font-weight:700;color:#4f46e5;margin-bottom:4px;">ОПИСАНИЕ:</div>
+          <div id="auto-ai-desc" style="font-size:13px;color:var(--text2);"></div>
+        </div>
+      </div>
+
       <button class="btn" id="auto-run-btn" onclick="startAutoUpload()" style="background:linear-gradient(135deg,#4f46e5,#7c3aed);width:100%;font-size:15px;padding:13px;" disabled>🚀 Запустить загрузку</button>
 
       <div id="auto-progress-wrap" style="display:none;margin-top:12px;">
@@ -2719,6 +2730,26 @@ function setUploadPrivacy(p){
   ['public','unlisted','private'].forEach(x=>{
     document.getElementById('up-priv-'+x).classList.toggle('on', x===p);
   });
+}
+
+async function generateAutoMeta(){
+  const btn=document.getElementById('auto-gen-btn');
+  btn.disabled=true;btn.textContent='⏳ Генерирую...';
+  document.getElementById('auto-ai-result').style.display='none';
+  try{
+    const resp=await fetch('/ai_generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({topic:'NEUTRAL_LIFESTYLE'})});
+    const data=await resp.json();
+    if(data.error){alert('Ошибка: '+data.error);return;}
+    const text=data.text;
+    const t=text.match(/TITLE:\s*(.+)/);
+    const d=text.match(/DESCRIPTION:\s*([\s\S]+)/);
+    if(t&&d){
+      document.getElementById('auto-ai-title').textContent=t[1].trim();
+      document.getElementById('auto-ai-desc').textContent=d[1].trim();
+      document.getElementById('auto-ai-result').style.display='block';
+    }
+  }catch(e){alert('Ошибка: '+e.message);}
+  btn.disabled=false;btn.textContent='✨ Сгенерировать нейтральный заголовок (AI)';
 }
 
 async function generateUploadMeta(){
@@ -4671,7 +4702,7 @@ async function startAutoUpload(){
   document.getElementById('auto-result-body').innerHTML = '';
 
   const res = await fetch('/auto_upload',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({src_video:autoVideoPath, n_sets:n, category:autoCat, privacy:autoPrivacy})});
+    body:JSON.stringify({src_video:autoVideoPath, n_sets:n, category:autoCat, privacy:autoPrivacy, custom_title:document.getElementById('auto-ai-title').textContent||'', custom_desc:document.getElementById('auto-ai-desc').textContent||''})});
   const data = await res.json();
   autoJobId = data.job_id;
 
