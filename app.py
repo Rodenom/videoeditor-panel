@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "4.4"
+VERSION = "4.5"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -1735,7 +1735,28 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
           </div>
         </div>
 
-        <button class="btn" id="ready-run-btn" onclick="startReadyUpload()" style="background:linear-gradient(135deg,#16a34a,#15803d);width:100%;font-size:15px;padding:13px;" disabled>🚀 Загрузить на YouTube</button>
+        <!-- AI Title/Desc block -->
+      <div style="margin-bottom:14px;">
+        <div style="font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;">Заголовок и описание</div>
+        <button id="upload-gen-btn" onclick="generateUploadMeta()" style="width:100%;padding:10px;border-radius:10px;border:2px solid #4f46e5;background:var(--surface2);color:#4f46e5;font-weight:700;font-size:13px;cursor:pointer;margin-bottom:10px;">✨ Сгенерировать нейтральный заголовок (AI)</button>
+        <div id="upload-ai-result" style="display:none;background:rgba(79,70,229,.06);border:1.5px solid rgba(79,70,229,.2);border-radius:10px;padding:12px;margin-bottom:10px;">
+          <div style="font-size:11px;font-weight:700;color:#4f46e5;margin-bottom:4px;">ЗАГОЛОВОК:</div>
+          <div id="upload-ai-title" style="font-size:14px;font-weight:600;color:var(--text);margin-bottom:8px;"></div>
+          <div style="font-size:11px;font-weight:700;color:#4f46e5;margin-bottom:4px;">ОПИСАНИЕ:</div>
+          <div id="upload-ai-desc" style="font-size:13px;color:var(--text2);margin-bottom:10px;"></div>
+          <button onclick="applyUploadMeta()" style="padding:7px 16px;background:#16a34a;color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;">✅ Применить</button>
+        </div>
+        <div class="up-field">
+          <label>Название</label>
+          <input type="text" id="upload-title" placeholder="Название видео..." style="width:100%;padding:9px 12px;border:1.5px solid var(--border2,#d1d5db);border-radius:10px;font-size:14px;background:var(--input-bg);color:var(--text);box-sizing:border-box;">
+        </div>
+        <div class="up-field">
+          <label>Описание</label>
+          <textarea id="upload-desc" placeholder="Описание видео..." style="width:100%;padding:9px 12px;border:1.5px solid var(--border2,#d1d5db);border-radius:10px;font-size:13px;background:var(--input-bg);color:var(--text);box-sizing:border-box;height:70px;resize:none;font-family:inherit;"></textarea>
+        </div>
+      </div>
+
+      <button class="btn" id="ready-run-btn" onclick="startReadyUpload()" style="background:linear-gradient(135deg,#16a34a,#15803d);width:100%;font-size:15px;padding:13px;" disabled>🚀 Загрузить на YouTube</button>
 
         <div id="ready-progress-wrap" style="display:none;margin-top:12px;">
           <div class="up-progress-bar"><div class="up-progress-fill" id="ready-progress-fill" style="width:0%"></div></div>
@@ -2701,12 +2722,11 @@ function setUploadPrivacy(p){
 }
 
 async function generateUploadMeta(){
-  if(!uploadCat){alert('Выбери категорию!');return;}
   const btn=document.getElementById('upload-gen-btn');
   btn.disabled=true;btn.textContent='⏳ Генерирую...';
   document.getElementById('upload-ai-result').style.display='none';
   try{
-    const resp=await fetch('/ai_generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({topic:uploadCat})});
+    const resp=await fetch('/ai_generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({topic:'NEUTRAL_LIFESTYLE'})});
     const data=await resp.json();
     if(data.error){alert('Ошибка: '+data.error);return;}
     const text=data.text;
@@ -2718,7 +2738,7 @@ async function generateUploadMeta(){
       document.getElementById('upload-ai-result').style.display='block';
     }
   }catch(e){alert('Ошибка: '+e.message);}
-  btn.disabled=false;btn.textContent='✨ Сгенерировать название и описание';
+  btn.disabled=false;btn.textContent='✨ Сгенерировать нейтральный заголовок (AI)';
 }
 
 function applyUploadMeta(){
@@ -5822,20 +5842,20 @@ class Handler(BaseHTTPRequestHandler):
                 _seed3 = _r3.randint(10000,99999)
                 prompt = (
                     f"You are a YouTube lifestyle vlogger. Session: {_seed3}.\n"
-                    "Write a YouTube title and description IN ENGLISH ONLY for a personal lifestyle video about daily habits and wellness.\n\n"
-                    "RULES:\n"
-                    "- Write ONLY about daily habits, routines, personal experience — NOT about any disease or condition\n"
-                    "- FORBIDDEN words: diabetes, blood sugar, prostate, parasite, cancer, cholesterol, pressure, weight, fat, slim, diet, sugar, insulin, glucose, secret, hidden, truth, reveals, doctor, cure, treat, heal, natural, remedy, medication, drug, clinical, proven, guaranteed, miracle, control, manage, reverse, eliminate, boost\n"
-                    "- Style: personal story, first-person, curious, conversational\n"
-                    "- Title: max 60 chars, must feel like a real person sharing their experience\n"
-                    "- Description: 2 short sentences, no health claims, no promises\n\n"
-                    "WRITE titles like these (copy this exact tone):\n"
-                    "TITLE: I tried waking up at 5am for 30 days — here's what happened\n"
-                    "TITLE: The one thing I stopped doing that changed my mornings\n"
-                    "TITLE: My honest 60-day habit experiment results\n\n"
-                    "Respond EXACTLY in this format:\n"
-                    "TITLE: [title here]\n"
-                    "DESCRIPTION: [description here]"
+                    "Write a YouTube title and description IN ENGLISH ONLY about daily habits and personal experience.\n\n"
+                    "MANDATORY RULES:\n"
+                    "- NEVER mention: health, disease, diabetes, blood sugar, prostate, cancer, weight, fat, cholesterol, pressure, parasites, vision, memory, joints, stomach, pain, cure, treat, heal, secret, hidden, doctor, natural, remedy, medication, drug, miracle, breakthrough, guaranteed, manage, reverse, eliminate, boost, control\n"
+                    "- Write about: morning routines, habits, productivity, sleep, energy, mindset, lifestyle experiments\n"
+                    "- Style: first-person, personal story, conversational\n"
+                    "- Title: max 60 chars\n"
+                    "- Description: 2 sentences, friendly, no health claims\n\n"
+                    "EXAMPLES (use this exact tone):\n"
+                    "TITLE: I tried waking up at 5am for 30 days\n"
+                    "TITLE: The one habit I stopped that changed everything\n"
+                    "TITLE: My honest results after 60 days of this routine\n\n"
+                    "Respond EXACTLY:\n"
+                    "TITLE: [title]\n"
+                    "DESCRIPTION: [description]"
                 )
             body = json.dumps({
                 'model': 'claude-haiku-4-5-20251001',
