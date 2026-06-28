@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "3.9"
+VERSION = "4.1"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -873,16 +873,23 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user):
                 import urllib.request as _ur2, json as _json2, random as _r2
                 _seed2 = _r2.randint(10000, 99999)
                 _prompt2 = (
-                    f"You are a YouTube content creator. Session: {_seed2}.\n"
-                    f"Generate a YouTube title and description IN ENGLISH ONLY for a lifestyle video about: {category}\n\n"
-                    "Rules:\n"
-                    "- MUST be in English language only\n"
-                    "- Title: max 70 chars, curious, story-driven, no medical claims\n"
-                    "- Description: 2-3 sentences, conversational, no exaggerated claims\n"
-                    "- Avoid words: cure, treat, heal, eliminate, guaranteed, miracle\n\n"
+                    f"You are a YouTube lifestyle content creator. Session: {_seed2}.\n"
+                    f"Write a YouTube title and description IN ENGLISH ONLY for a general wellness lifestyle video. Topic hint: {category}\n\n"
+                    "STRICT RULES (Google Ads policy — violations = account ban):\n"
+                    "- NO medical claims of any kind\n"
+                    "- NO words: reverse, cure, treat, heal, fix, eliminate, defeat, fight, beat, hidden, secret, truth, reveals, doctor, medical, clinical, proven, guaranteed, miracle, natural remedy, without medication, drug-free\n"
+                    "- NO conspiracy framing (doctors don't want, they hide, big pharma)\n"
+                    "- NO before/after promises\n"
+                    "- Style: curious lifestyle story, like a personal experience video\n"
+                    "- Title: max 65 chars, conversational, first-person or story angle\n"
+                    "- Description: 2 sentences max, friendly tone, no health promises\n\n"
+                    "Good examples:\n"
+                    "TITLE: I changed one morning habit and feel completely different\n"
+                    "TITLE: What I wish I knew about my energy levels sooner\n"
+                    "TITLE: My 60-day lifestyle experiment — honest results\n\n"
                     "Respond EXACTLY in this format:\n"
-                    "TITLE: [English title here]\n"
-                    "DESCRIPTION: [English description here]"
+                    "TITLE: [title here]\n"
+                    "DESCRIPTION: [description here]"
                 )
                 _key2 = get_anthropic_key()
                 if _key2:
@@ -983,16 +990,23 @@ def ready_upload_to_youtube(job_id, ready_files, n_sets, category, privacy, user
                 import urllib.request as _ur2, json as _json2, random as _r2
                 _seed2 = _r2.randint(10000, 99999)
                 _prompt2 = (
-                    f"You are a YouTube content creator. Session: {_seed2}.\n"
-                    f"Generate a YouTube title and description IN ENGLISH ONLY for a lifestyle video about: {category}\n\n"
-                    "Rules:\n"
-                    "- MUST be in English language only\n"
-                    "- Title: max 70 chars, curious, story-driven, no medical claims\n"
-                    "- Description: 2-3 sentences, conversational, no exaggerated claims\n"
-                    "- Avoid words: cure, treat, heal, eliminate, guaranteed, miracle\n\n"
+                    f"You are a YouTube lifestyle content creator. Session: {_seed2}.\n"
+                    f"Write a YouTube title and description IN ENGLISH ONLY for a general wellness lifestyle video. Topic hint: {category}\n\n"
+                    "STRICT RULES (Google Ads policy — violations = account ban):\n"
+                    "- NO medical claims of any kind\n"
+                    "- NO words: reverse, cure, treat, heal, fix, eliminate, defeat, fight, beat, hidden, secret, truth, reveals, doctor, medical, clinical, proven, guaranteed, miracle, natural remedy, without medication, drug-free\n"
+                    "- NO conspiracy framing (doctors don't want, they hide, big pharma)\n"
+                    "- NO before/after promises\n"
+                    "- Style: curious lifestyle story, like a personal experience video\n"
+                    "- Title: max 65 chars, conversational, first-person or story angle\n"
+                    "- Description: 2 sentences max, friendly tone, no health promises\n\n"
+                    "Good examples:\n"
+                    "TITLE: I changed one morning habit and feel completely different\n"
+                    "TITLE: What I wish I knew about my energy levels sooner\n"
+                    "TITLE: My 60-day lifestyle experiment — honest results\n\n"
                     "Respond EXACTLY in this format:\n"
-                    "TITLE: [English title here]\n"
-                    "DESCRIPTION: [English description here]"
+                    "TITLE: [title here]\n"
+                    "DESCRIPTION: [description here]"
                 )
                 _key2 = get_anthropic_key()
                 if _key2:
