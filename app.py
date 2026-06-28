@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "4.6"
+VERSION = "4.7"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -912,12 +912,52 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user):
             set_links = []
             today_data = load_uploads_today()
             ch_error = None
+
+            def _gen_ai_title(log_ref):
+                _t, _d = f'Lifestyle video', ''
+                try:
+                    import requests as _rq, random as _rnd, re as _re
+                    _s = _rnd.randint(10000,99999)
+                    _p = (
+                        f"You are a YouTube lifestyle vlogger. Session: {_s}.\n"
+                        "Write a YouTube title and description IN ENGLISH ONLY about daily habits and personal experience.\n\n"
+                        "MANDATORY RULES:\n"
+                        "- NEVER mention: health, disease, diabetes, blood sugar, prostate, cancer, weight, fat, cholesterol, pressure, parasites, vision, memory, joints, stomach, pain, cure, treat, heal, secret, hidden, doctor, natural, remedy, medication, drug, miracle, guaranteed, manage, reverse, eliminate, boost, control\n"
+                        "- Write about: morning routines, habits, productivity, sleep, energy, mindset, lifestyle experiments\n"
+                        "- Style: first-person, personal story, conversational\n"
+                        "- Title: max 60 chars\n"
+                        "- Description: 2 sentences, friendly, no health claims\n\n"
+                        "EXAMPLES:\n"
+                        "TITLE: I tried waking up at 5am for 30 days\n"
+                        "TITLE: The one habit I stopped that changed everything\n"
+                        "TITLE: My honest results after 60 days of this routine\n\n"
+                        "Respond EXACTLY:\n"
+                        "TITLE: [title]\n"
+                        "DESCRIPTION: [description]"
+                    )
+                    _key = get_anthropic_key()
+                    if _key:
+                        _r = _rq.post('https://api.anthropic.com/v1/messages',
+                            json={'model':'claude-haiku-4-5-20251001','max_tokens':300,
+                                  'messages':[{'role':'user','content':_p}]},
+                            headers={'x-api-key':_key,'anthropic-version':'2023-06-01'}, timeout=20)
+                        _txt = _r.json()['content'][0]['text']
+                        _tm = _re.search(r'TITLE:\s*(.+)', _txt)
+                        _dm = _re.search(r'DESCRIPTION:\s*([\s\S]+)', _txt)
+                        if _tm: _t = _tm.group(1).strip()
+                        if _dm: _d = _dm.group(1).strip()
+                except Exception as _e:
+                    log_ref.append(f'  ⚠ AI: {_e}')
+                return _t, _d
+
             for fmt_name, _, label in formats:
                 fpath = converted[fmt_name]
+                fmt_title, fmt_desc = _gen_ai_title(log)
+                log.append(f'  🤖 {fmt_name}: {fmt_title}')
                 log.append(f'  ⏳ Загружаем {fmt_name}...')
                 try:
                     body = {
-                        'snippet': {'title': unique_title, 'description': unique_desc, 'tags': [], 'categoryId': '22'},
+                        'snippet': {'title': fmt_title, 'description': fmt_desc, 'tags': [], 'categoryId': '22'},
                         'status': {'privacyStatus': privacy}
                     }
                     media = MediaFileUpload(fpath, mimetype='video/mp4', resumable=True, chunksize=1024*1024*5)
