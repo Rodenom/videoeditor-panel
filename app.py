@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "4.3"
+VERSION = "4.4"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -5818,16 +5818,24 @@ class Handler(BaseHTTPRequestHandler):
                 )
             else:
                 topic = topic_raw
+                import random as _r3
+                _seed3 = _r3.randint(10000,99999)
                 prompt = (
-                    f"You are a YouTube video expert for nutra/health offers. "
-                    f"Generate a catchy YouTube title and description IN ENGLISH ONLY for a video about: {topic}\n\n"
-                    "Rules:\n"
-                    "- MUST be in English language only\n"
-                    "- Title: max 70 chars, intriguing, benefit-focused\n"
-                    "- Description: 2-3 sentences, engaging, include call to action\n\n"
+                    f"You are a YouTube lifestyle vlogger. Session: {_seed3}.\n"
+                    "Write a YouTube title and description IN ENGLISH ONLY for a personal lifestyle video about daily habits and wellness.\n\n"
+                    "RULES:\n"
+                    "- Write ONLY about daily habits, routines, personal experience — NOT about any disease or condition\n"
+                    "- FORBIDDEN words: diabetes, blood sugar, prostate, parasite, cancer, cholesterol, pressure, weight, fat, slim, diet, sugar, insulin, glucose, secret, hidden, truth, reveals, doctor, cure, treat, heal, natural, remedy, medication, drug, clinical, proven, guaranteed, miracle, control, manage, reverse, eliminate, boost\n"
+                    "- Style: personal story, first-person, curious, conversational\n"
+                    "- Title: max 60 chars, must feel like a real person sharing their experience\n"
+                    "- Description: 2 short sentences, no health claims, no promises\n\n"
+                    "WRITE titles like these (copy this exact tone):\n"
+                    "TITLE: I tried waking up at 5am for 30 days — here's what happened\n"
+                    "TITLE: The one thing I stopped doing that changed my mornings\n"
+                    "TITLE: My honest 60-day habit experiment results\n\n"
                     "Respond EXACTLY in this format:\n"
-                    "TITLE: [English title here]\n"
-                    "DESCRIPTION: [English description here]"
+                    "TITLE: [title here]\n"
+                    "DESCRIPTION: [description here]"
                 )
             body = json.dumps({
                 'model': 'claude-haiku-4-5-20251001',
