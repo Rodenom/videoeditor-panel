@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "4.7"
+VERSION = "4.8"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -1706,7 +1706,7 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
         </div>
       </div>
 
-      <button class="btn" id="auto-run-btn" onclick="startAutoUpload()" style="background:linear-gradient(135deg,#4f46e5,#7c3aed);width:100%;font-size:15px;padding:13px;" disabled>🚀 Запустить загрузку</button>
+      <button class="btn" id="auto-run-btn" onclick="if(this.dataset.running)return;this.dataset.running=1;startAutoUpload().finally(()=>delete this.dataset.running)" style="background:linear-gradient(135deg,#4f46e5,#7c3aed);width:100%;font-size:15px;padding:13px;" disabled>🚀 Запустить загрузку</button>
 
       <div id="auto-progress-wrap" style="display:none;margin-top:12px;">
         <div class="up-progress-bar"><div class="up-progress-fill" id="auto-progress-fill" style="width:0%"></div></div>
@@ -4886,6 +4886,19 @@ function showYtLinks(links){
 
 // Theme toggle
 fetch('/version').then(r=>r.json()).then(d=>{ document.getElementById('app-version').textContent='v'+d.version; });
+
+window.addEventListener('DOMContentLoaded', async ()=>{
+  try{
+    const r = await fetch('/update');
+    const d = await r.json();
+    if(d.status === 'updated'){
+      const banner = document.createElement('div');
+      banner.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#4f46e5;color:#fff;text-align:center;padding:12px;font-size:14px;font-weight:700;z-index:9999;';
+      banner.innerHTML = '🔄 Обновление установлено! <button onclick="location.reload()" style="margin-left:12px;padding:4px 12px;background:#fff;color:#4f46e5;border:none;border-radius:6px;font-weight:700;cursor:pointer;">Перезагрузить</button>';
+      document.body.prepend(banner);
+    }
+  }catch(e){}
+});
 
 async function checkUpdate(){
   const btn = document.getElementById('update-btn');
