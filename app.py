@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "4.8"
+VERSION = "4.9"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -22,11 +22,12 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ANTHROPIC_FALLBACK_KEY = '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'
 
 def get_anthropic_key():
+    _default = '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'
     key_file = os.path.join(BASE_DIR, 'anthropic_key.txt')
     if os.path.exists(key_file):
         k = open(key_file).read().strip()
         if k: return k
-    return ANTHROPIC_FALLBACK_KEY
+    return _default
 
 # ── Multi-user auth ──────────────────────────────────────────────
 USERS_FILE = os.path.join(BASE_DIR, 'users.json')
