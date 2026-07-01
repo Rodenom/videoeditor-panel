@@ -84,6 +84,10 @@ echo "║        Запускаем панель...           ║"
 echo "╚══════════════════════════════════════╝"
 echo ""
 
+# Kill any old process on port 7777
+lsof -ti:7777 | xargs kill -9 2>/dev/null
+sleep 1
+
 sleep 2 && open http://localhost:7777 &
 while true; do
   python3 app.py
