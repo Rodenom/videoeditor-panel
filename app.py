@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.1"
+VERSION = "5.2"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -17,8 +17,9 @@ UPLOAD_DIR = os.path.expanduser("~/Desktop/VideoEditor_uploads")
 OUTPUT_DIR = os.path.expanduser("~/Desktop/VideoEditor_output")
 CREDENTIALS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "client_secret.json")
 TOKEN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "yt_token.json")
-UPLOADS_TODAY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads_today.json")
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = os.path.expanduser('~/VideoEditor_data')
+os.makedirs(BASE_DIR, exist_ok=True)
+UPLOADS_TODAY_FILE = os.path.join(BASE_DIR, "uploads_today.json")
 ANTHROPIC_FALLBACK_KEY = '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'
 
 def get_anthropic_key():
