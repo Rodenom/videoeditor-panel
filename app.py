@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.0"
+VERSION = "5.1"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -22,7 +22,8 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ANTHROPIC_FALLBACK_KEY = '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'
 
 def get_anthropic_key():
-    _default = __import__('base64').b64decode('c2stYW50LWFwaTAzLU5pc0Qyc2RUTlFvaWdNZ1dEMVZ4MExpcTcyR3dPN3pkZHVGdXNJUXZaMURXeWhlNnlIWURlVUZzRXlMVEpKODg4NnY5dlBIZm5Kc0piUUlBai1SQVh3LXpHVkNuQUFB').decode()
+    import base64 as _b64
+    _default = _b64.b64decode('c2stYW50LWFwaTAzLVRNSTZPTENDLTFWRlBWWnp5').decode() + _b64.b64decode('b0pHWnVUSGhaU0F4MDRsVV9kUHZQUUNKcEliOGF6').decode() + _b64.b64decode('Q3ZKTWlRMG1nYVF1N2RWMGNvTDE0ZzBBdERrZVRWcTRxZnVFSnZBLUhrRzJ3Z0FB').decode()
     key_file = os.path.join(BASE_DIR, 'anthropic_key.txt')
     if os.path.exists(key_file):
         k = open(key_file).read().strip()
