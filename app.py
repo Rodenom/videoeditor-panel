@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.2"
+VERSION = "5.3"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -6040,6 +6040,22 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 if __name__ == '__main__':
+    # Auto-update install_mac.command to fix old versions
+    try:
+        import urllib.request as _ur3
+        _cmd_url = 'https://raw.githubusercontent.com/Rodenom/videoeditor-panel/main/install_mac.command'
+        _cmd_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'install_mac.command')
+        if os.path.exists(_cmd_path):
+            _cmd_new = _ur3.urlopen(_ur3.Request(_cmd_url), timeout=8).read()
+            with open(_cmd_path, 'rb') as _f3:
+                _cmd_cur = _f3.read()
+            if _cmd_new != _cmd_cur:
+                with open(_cmd_path, 'wb') as _f3:
+                    _f3.write(_cmd_new)
+                os.chmod(_cmd_path, 0o755)
+    except Exception:
+        pass
+
     # Auto-update on startup
     try:
         import urllib.request as _ur2
