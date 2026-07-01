@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.3"
+VERSION = "5.4"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -19,6 +19,19 @@ CREDENTIALS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cli
 TOKEN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "yt_token.json")
 BASE_DIR = os.path.expanduser('~/VideoEditor_data')
 os.makedirs(BASE_DIR, exist_ok=True)
+
+# Migrate old data from app.py directory to BASE_DIR
+_old_dir = os.path.dirname(os.path.abspath(__file__))
+if _old_dir != BASE_DIR:
+    import glob as _glob
+    for _f in _glob.glob(os.path.join(_old_dir, '*.json')) + _glob.glob(os.path.join(_old_dir, '*.txt')) + _glob.glob(os.path.join(_old_dir, 'token_*.json')):
+        _dst = os.path.join(BASE_DIR, os.path.basename(_f))
+        if not os.path.exists(_dst):
+            try:
+                import shutil as _sh; _sh.copy2(_f, _dst)
+            except Exception:
+                pass
+
 UPLOADS_TODAY_FILE = os.path.join(BASE_DIR, "uploads_today.json")
 ANTHROPIC_FALLBACK_KEY = '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'
 
