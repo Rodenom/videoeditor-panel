@@ -1,0 +1,39 @@
+#!/bin/bash
+
+DIR="$(cd "$(dirname "$0")/../../.." && pwd)"
+cd "$DIR"
+
+# Install dependencies if needed (silent)
+if ! command -v brew &>/dev/null; then
+  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" &>/dev/null
+fi
+
+if ! command -v python3 &>/dev/null; then
+  brew install python &>/dev/null
+fi
+
+if ! command -v ffmpeg &>/dev/null; then
+  brew install ffmpeg &>/dev/null
+fi
+
+pip3 install --quiet google-auth google-auth-oauthlib google-api-python-client anthropic httplib2 PySocks &>/dev/null
+
+# Auto-update app.py
+TMP_FILE="/tmp/app_new.py"
+if curl -fsSL \
+  "https://raw.githubusercontent.com/Rodenom/videoeditor-panel/main/app.py" \
+  -o "$TMP_FILE" 2>/dev/null; then
+  if ! cmp -s "$TMP_FILE" "app.py" 2>/dev/null; then
+    cp "$TMP_FILE" "app.py"
+  fi
+fi
+
+# Kill old instance if running
+lsof -ti:7777 | xargs kill -9 2>/dev/null
+
+# Start server in background
+nohup python3 app.py > /tmp/videoeditor.log 2>&1 &
+
+# Wait and open browser
+sleep 2
+open http://localhost:7777
