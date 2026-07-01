@@ -57,7 +57,7 @@ fi
 
 # Install Python dependencies
 echo "► Устанавливаем Python библиотеки..."
-python3 -m pip install --quiet google-auth google-auth-oauthlib google-api-python-client anthropic httplib2 PySocks
+python3 -m pip install --quiet google-auth google-auth-oauthlib google-api-python-client anthropic httplib2 PySocks requests
 
 # Install SSL certificates
 PY_CERT=$(find /Applications/Python* -name "Install Certificates.command" 2>/dev/null | head -1)

@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "4.9"
+VERSION = "5.0"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -6042,7 +6042,7 @@ if __name__ == '__main__':
     try:
         import urllib.request as _ur2
         _url2 = 'https://raw.githubusercontent.com/Rodenom/videoeditor-panel/main/app.py'
-        raise Exception('skip')  # temp disabled
+        _new2 = _ur2.urlopen(_ur2.Request(_url2), timeout=8).read()
         import re as _re2
         _nver2 = (_re2.search(rb'VERSION = "([^"]+)"', _new2) or [None,None])[1]
         if _nver2 and _nver2.decode() != VERSION:
