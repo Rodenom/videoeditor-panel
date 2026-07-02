@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.6"
+VERSION = "5.7"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -919,11 +919,14 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user):
                 _key2 = get_anthropic_key()
                 if _key2:
                     import requests as _req_lib
+                    _sv_h = os.environ.pop('HTTPS_PROXY', None); _sv_hh = os.environ.pop('HTTP_PROXY', None)
                     _resp2 = _req_lib.post('https://api.anthropic.com/v1/messages',
                         json={'model':'claude-haiku-4-5-20251001','max_tokens':300,
                               'messages':[{'role':'user','content':_prompt2}]},
                         headers={'x-api-key':_key2,'anthropic-version':'2023-06-01'},
                         timeout=20)
+                    if _sv_h: os.environ['HTTPS_PROXY'] = _sv_h
+                    if _sv_hh: os.environ['HTTP_PROXY'] = _sv_hh
                     _text2 = _resp2.json()['content'][0]['text']
                     log.append(f'  🤖 AI: {_text2[:80]}')
                     _tm = __import__('re').search(r'TITLE:\s*(.+)', _text2)
@@ -963,10 +966,13 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user):
                     )
                     _key = get_anthropic_key()
                     if _key:
+                        _sv_h2 = os.environ.pop('HTTPS_PROXY', None); _sv_hh2 = os.environ.pop('HTTP_PROXY', None)
                         _r = _rq.post('https://api.anthropic.com/v1/messages',
                             json={'model':'claude-haiku-4-5-20251001','max_tokens':300,
                                   'messages':[{'role':'user','content':_p}]},
                             headers={'x-api-key':_key,'anthropic-version':'2023-06-01'}, timeout=20)
+                        if _sv_h2: os.environ['HTTPS_PROXY'] = _sv_h2
+                        if _sv_hh2: os.environ['HTTP_PROXY'] = _sv_hh2
                         _txt = _r.json()['content'][0]['text']
                         _tm = _re.search(r'TITLE:\s*(.+)', _txt)
                         _dm = _re.search(r'DESCRIPTION:\s*([\s\S]+)', _txt)
@@ -1076,11 +1082,14 @@ def ready_upload_to_youtube(job_id, ready_files, n_sets, category, privacy, user
                 _key2 = get_anthropic_key()
                 if _key2:
                     import requests as _req_lib
+                    _sv_h = os.environ.pop('HTTPS_PROXY', None); _sv_hh = os.environ.pop('HTTP_PROXY', None)
                     _resp2 = _req_lib.post('https://api.anthropic.com/v1/messages',
                         json={'model':'claude-haiku-4-5-20251001','max_tokens':300,
                               'messages':[{'role':'user','content':_prompt2}]},
                         headers={'x-api-key':_key2,'anthropic-version':'2023-06-01'},
                         timeout=20)
+                    if _sv_h: os.environ['HTTPS_PROXY'] = _sv_h
+                    if _sv_hh: os.environ['HTTP_PROXY'] = _sv_hh
                     _text2 = _resp2.json()['content'][0]['text']
                     log.append(f'  🤖 AI: {_text2[:80]}')
                     _tm = __import__('re').search(r'TITLE:\s*(.+)', _text2)
