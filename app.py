@@ -860,9 +860,7 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user):
             log.append(f'  ✅ {fmt_name} ({label}) готов')
 
         all_channels = load_channels(user)
-        ordered = [(k,v) for k,v in all_channels.items() if not v.get('last_error')]
-        if not ordered:
-            ordered = list(all_channels.items())
+        ordered = list(all_channels.items())  # use ALL channels each run
         n_sets = int(n_sets) if n_sets else len(ordered)
         total = n_sets * 3
         job['total'] = total
