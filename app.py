@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.4"
+VERSION = "5.5"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -1011,9 +1011,8 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user):
                     job['done'] += 1
             if ch_error:
                 channels = load_channels(user); channels[ch_id]['last_error'] = ch_error; save_channels(user, channels)
-                log.append(f'  ⚠ Канал {ch_info["name"]} — ошибка, переходим к следующему каналу')
+                log.append(f'  ⚠ Канал {ch_info["name"]} помечен с ошибкой, следующий запуск пропустит его')
                 failed_channels.add(ch_id)
-                continue  # don't count as completed set
             else:
                 channels = load_channels(user)
                 if channels.get(ch_id, {}).get('last_error'):
