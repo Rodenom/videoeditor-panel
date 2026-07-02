@@ -715,6 +715,7 @@ def _finish_channel_auth(job_id, creds, user, proxy='', secret_file=None):
     yt = build('youtube', 'v3', credentials=creds)
     ch_id = None
     ch_name = None
+    ch_email = None
     try:
         ch_resp = yt.channels().list(part='snippet', mine=True).execute()
         if ch_resp.get('items'):
@@ -724,16 +725,21 @@ def _finish_channel_auth(job_id, creds, user, proxy='', secret_file=None):
             UPLOAD_JOBS[job_id]['log'].append(f'📺 Канал: {ch_name}')
     except Exception as e:
         UPLOAD_JOBS[job_id]['log'].append(f'⚠️ Не удалось получить имя канала: {e}')
+    # Always try to get email for identification
+    try:
+        from googleapiclient.discovery import build as _gbuild
+        oauth2 = _gbuild('oauth2', 'v2', credentials=creds)
+        info = oauth2.userinfo().get().execute()
+        ch_email = info.get('email', '')
+        if ch_email:
+            UPLOAD_JOBS[job_id]['log'].append(f'📧 Аккаунт: {ch_email}')
+    except Exception:
+        pass
     if not ch_id:
-        try:
-            from googleapiclient.discovery import build as _gbuild
-            oauth2 = _gbuild('oauth2', 'v2', credentials=creds)
-            info = oauth2.userinfo().get().execute()
-            email = info.get('email', '')
-            ch_name = email or f'Канал {len(load_channels(user))+1}'
-            ch_id = 'ch_' + hashlib.md5(email.encode()).hexdigest()[:8] if email else 'ch_' + hashlib.md5(str(time.time()).encode()).hexdigest()[:8]
-            UPLOAD_JOBS[job_id]['log'].append(f'📧 Аккаунт: {email}')
-        except Exception:
+        if ch_email:
+            ch_name = ch_email
+            ch_id = 'ch_' + hashlib.md5(ch_email.encode()).hexdigest()[:8]
+        else:
             ch_id = 'ch_' + hashlib.md5(str(time.time()).encode()).hexdigest()[:8]
             ch_name = f'Канал {len(load_channels(user))+1}'
     token_file = os.path.join(BASE_DIR, f'token_{user}_{ch_id}.json')
@@ -741,7 +747,7 @@ def _finish_channel_auth(job_id, creds, user, proxy='', secret_file=None):
         f.write(creds.to_json())
     proj_id = get_proj_id_for_secret(secret_file, user)
     channels = load_channels(user)
-    channels[ch_id] = {'name': ch_name, 'token_file': token_file, 'project_id': proj_id, 'proxy': proxy}
+    channels[ch_id] = {'name': ch_name, 'email': ch_email or '', 'token_file': token_file, 'project_id': proj_id, 'proxy': proxy}
     save_channels(user, channels)
     if proxy:
         UPLOAD_JOBS[job_id]['log'].append(f'🔒 Прокси сохранён: {proxy.split("@")[-1] if "@" in proxy else proxy}')
@@ -862,14 +868,20 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user):
         job['total'] = total
         job['done'] = 0
 
-        ch_iter = iter(ordered)
+        failed_channels = set()
         sets_done = 0
+        ch_index = 0
         while sets_done < n_sets:
-            try:
-                ch_id, ch_info = next(ch_iter)
-            except StopIteration:
-                log.append('⚠ Закончились доступные каналы')
+            # cycle through channels, skip failed ones
+            if len(failed_channels) >= len(ordered):
+                log.append('⚠ Все каналы недоступны, выполнено: ' + str(sets_done) + '/' + str(n_sets))
                 break
+            if ch_index >= len(ordered):
+                ch_index = 0
+            ch_id, ch_info = ordered[ch_index]
+            ch_index += 1
+            if ch_id in failed_channels:
+                continue
             ch_proxy = ch_info.get('proxy', '')
             log.append(f'📦 Набор {sets_done+1}/{n_sets} → канал: {ch_info["name"]}' + (' 🔒 прокси' if ch_proxy else ''))
             try:
@@ -877,6 +889,7 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user):
             except Exception as _auth_err:
                 log.append(f'  ❌ Ошибка авторизации: {_auth_err} — пропускаем канал')
                 channels = load_channels(user); channels[ch_id]['last_error'] = 'Ошибка авторизации'; save_channels(user, channels)
+                failed_channels.add(ch_id)
                 continue
             if not ch_proxy:
                 os.environ.pop('HTTPS_PROXY', None)
@@ -1002,6 +1015,7 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user):
             if ch_error:
                 channels = load_channels(user); channels[ch_id]['last_error'] = ch_error; save_channels(user, channels)
                 log.append(f'  ⚠ Канал {ch_info["name"]} помечен с ошибкой, следующий запуск пропустит его')
+                failed_channels.add(ch_id)
             else:
                 channels = load_channels(user)
                 if channels.get(ch_id, {}).get('last_error'):
@@ -2647,6 +2661,7 @@ async function loadChannels(){
     const html = `<div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:var(--surface2,#f9f9f9);border-radius:8px;border:1px solid var(--border,#e5e5e5);">
       <div>
         <div style="font-size:13px;font-weight:600;">📺 ${ch.name}${proxyLabel}${projLabel}${errLabel}</div>
+        ${ch.email ? `<div style="font-size:10px;color:#888;margin-top:1px;">${ch.email}</div>` : ''}
         <div style="font-size:11px;color:${color};margin-top:2px;">${status}</div>
       </div>
       <button onclick="deleteChannel('${ch.id}')" style="padding:4px 10px;font-size:11px;border:1px solid #fca5a5;border-radius:6px;background:transparent;color:#dc2626;cursor:pointer;">Удалить</button>
@@ -5218,6 +5233,7 @@ class Handler(BaseHTTPRequestHandler):
                 result.append({
                     'id': ch_id,
                     'name': ch_info['name'],
+                    'email': ch_info.get('email', ''),
                     'uploads_today': counts.get(ch_id, 0),
                     'available': counts.get(ch_id, 0) < 10,
                     'proxy': bool(ch_info.get('proxy', ''))
