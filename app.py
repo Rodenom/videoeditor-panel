@@ -5193,7 +5193,6 @@ class Handler(BaseHTTPRequestHandler):
                     with open(current_file, 'wb') as f:
                         f.write(new_code)
                     self.json({'ok': True, 'status': 'updated', 'old': VERSION, 'new': new_ver})
-                    import threading as _t; _t.Timer(1.0, lambda: __import__('os')._exit(42)).start()
             except Exception as e:
                 self.json({'ok': False, 'error': str(e)})
             return
@@ -6090,11 +6089,15 @@ if __name__ == '__main__':
         _new2 = _ur2.urlopen(_ur2.Request(_url2), timeout=8).read()
         import re as _re2
         _nver2 = (_re2.search(rb'VERSION = "([^"]+)"', _new2) or [None,None])[1]
-        if _nver2 and _nver2.decode() != VERSION:
-            print(f"🔄 Авто-обновление {VERSION} → {_nver2.decode()}")
-            with open(os.path.abspath(__file__), 'wb') as _f2:
-                _f2.write(_new2)
-            sys.exit(42)
+        if _nver2:
+            _nver2_str = _nver2.decode()
+            _cur_parts = [int(x) for x in VERSION.split('.')]
+            _new_parts = [int(x) for x in _nver2_str.split('.')]
+            if _new_parts > _cur_parts:
+                print(f"🔄 Авто-обновление {VERSION} → {_nver2_str}")
+                with open(os.path.abspath(__file__), 'wb') as _f2:
+                    _f2.write(_new2)
+                sys.exit(42)
     except Exception as _e2:
         pass
     if not shutil.which('ffmpeg'):
