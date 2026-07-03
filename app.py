@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.8"
+VERSION = "5.9"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -1074,78 +1074,83 @@ def ready_upload_to_youtube(job_id, ready_files, n_sets, category, privacy, user
                 os.environ.pop('HTTPS_PROXY', None)
                 os.environ.pop('HTTP_PROXY', None)
             set_links = []
-            today_data = load_uploads_today()
-            # Generate unique title via AI
-            title_ai = f'{category} — видео {i+1}'
-            desc_ai = ''
+            ch_error_r = None
             try:
-                import urllib.request as _ur2, json as _json2, random as _r2
-                _seed2 = _r2.randint(10000, 99999)
-                _prompt2 = (
-                    f"You are a YouTube lifestyle vlogger. Session seed: {_seed2}. Use this seed to pick a UNIQUE angle.\n"
-                    "Write ONE YouTube title and description IN ENGLISH ONLY. Pick a random topic from this list based on the seed:\n"
-                    "sleep schedule, cold shower experiment, phone screen time, journaling, walking habit, meal timing, caffeine-free week, "
-                    "reading before bed, social media detox, early morning routine, night owl experiment, decluttering, "
-                    "no-alarm wake up, meditation streak, evening walks, digital minimalism, desk setup, weekend productivity, "
-                    "one-week no sugar experiment, stretching routine, limiting TV, cooking at home, gratitude journaling, "
-                    "working from different locations, taking breaks, standing desk, weekly planning, spending less time online.\n\n"
-                    "RULES:\n"
-                    "- Personal story, first-person, conversational tone\n"
-                    "- Title: max 65 chars, sounds like a real person sharing experience\n"
-                    "- Description: 2 short sentences, relatable, no health claims\n"
-                    "- FORBIDDEN: diabetes, blood sugar, prostate, parasite, cancer, cholesterol, pressure, weight, fat, slim, diet, sugar, insulin, glucose, secret, hidden, doctor, cure, treat, heal, remedy, medication, drug, proven, guaranteed, miracle, reverse, eliminate\n\n"
-                    "Respond EXACTLY in this format:\n"
-                    "TITLE: [title here]\n"
-                    "DESCRIPTION: [description here]"
-                )
-                _key2 = get_anthropic_key()
-                if _key2:
-                    import requests as _req_lib
-                    _sv_h = os.environ.pop('HTTPS_PROXY', None); _sv_hh = os.environ.pop('HTTP_PROXY', None)
-                    _resp2 = _req_lib.post('https://api.anthropic.com/v1/messages',
-                        json={'model':'claude-haiku-4-5-20251001','max_tokens':300,
-                              'messages':[{'role':'user','content':_prompt2}]},
-                        headers={'x-api-key':_key2,'anthropic-version':'2023-06-01'},
-                        timeout=20)
-                    if _sv_h: os.environ['HTTPS_PROXY'] = _sv_h
-                    if _sv_hh: os.environ['HTTP_PROXY'] = _sv_hh
-                    _text2 = _resp2.json()['content'][0]['text']
-                    log.append(f'  🤖 AI: {_text2[:80]}')
-                    _tm = __import__('re').search(r'TITLE:\s*(.+)', _text2)
-                    _dm = __import__('re').search(r'DESCRIPTION:\s*([\s\S]+)', _text2)
-                    if _tm: title_ai = _tm.group(1).strip()
-                    if _dm: desc_ai = _dm.group(1).strip()
-                    log.append(f'  ✅ Заголовок: {title_ai}')
-            except Exception as _e2:
-                log.append(f'  ⚠ AI ошибка: {type(_e2).__name__}: {_e2}')
-            for rf in ready_files:
-                fpath = rf['path']
-                fmt = rf['fmt']
-                log.append(f'  ⏳ Загружаем {fmt}...')
-                body = {
-                    'snippet': {'title': title_ai, 'description': desc_ai, 'tags': [], 'categoryId': '22'},
-                    'status': {'privacyStatus': privacy}
-                }
-                media = MediaFileUpload(fpath, mimetype='video/mp4', resumable=True, chunksize=1024*1024*5)
-                req = yt.videos().insert(part='snippet,status', body=body, media_body=media)
-                response = None
-                while response is None:
-                    status_obj, response = req.next_chunk()
-                    if status_obj:
-                        pct = int(status_obj.progress()*100)
-                        log[-1] = f'  ⏳ {fmt} — {pct}%...'
-                vid_id = response['id']
-                link = f'https://youtu.be/{vid_id}'
-                set_links.append({'fmt': fmt, 'link': link})
-                log[-1] = f'  ✅ {fmt} → {link}'
-                today_data['counts'][ch_id] = today_data['counts'].get(ch_id, 0) + 1
-                save_uploads_today(today_data)
-                proj_id = ch_info.get('project_id')
-                if proj_id:
-                    increment_project_upload(user, proj_id)
-                job['done'] += 1
-            job['sets'].append({'set_idx': sets_done_r+1, 'channel': ch_info['name'], 'links': set_links})
-            sets_done_r += 1
+                today_data = load_uploads_today()
+                title_ai = f'{category} — видео {i+1}'
+                desc_ai = ''
+                try:
+                    import urllib.request as _ur2, json as _json2, random as _r2
+                    _seed2 = _r2.randint(10000, 99999)
+                    _prompt2 = (
+                        f"You are a YouTube lifestyle vlogger. Session seed: {_seed2}. Use this seed to pick a UNIQUE angle.\n"
+                        "Write ONE YouTube title and description IN ENGLISH ONLY. Pick a random topic from this list based on the seed:\n"
+                        "sleep schedule, cold shower experiment, phone screen time, journaling, walking habit, meal timing, caffeine-free week, "
+                        "reading before bed, social media detox, early morning routine, night owl experiment, decluttering, "
+                        "no-alarm wake up, meditation streak, evening walks, digital minimalism, desk setup, weekend productivity, "
+                        "one-week no sugar experiment, stretching routine, limiting TV, cooking at home, gratitude journaling, "
+                        "working from different locations, taking breaks, standing desk, weekly planning, spending less time online.\n\n"
+                        "RULES:\n"
+                        "- Personal story, first-person, conversational tone\n"
+                        "- Title: max 65 chars, sounds like a real person sharing experience\n"
+                        "- Description: 2 short sentences, relatable, no health claims\n"
+                        "- FORBIDDEN: diabetes, blood sugar, prostate, parasite, cancer, cholesterol, pressure, weight, fat, slim, diet, sugar, insulin, glucose, secret, hidden, doctor, cure, treat, heal, remedy, medication, drug, proven, guaranteed, miracle, reverse, eliminate\n\n"
+                        "Respond EXACTLY in this format:\n"
+                        "TITLE: [title here]\n"
+                        "DESCRIPTION: [description here]"
+                    )
+                    _key2 = get_anthropic_key()
+                    if _key2:
+                        import requests as _req_lib
+                        _sv_h = os.environ.pop('HTTPS_PROXY', None); _sv_hh = os.environ.pop('HTTP_PROXY', None)
+                        _resp2 = _req_lib.post('https://api.anthropic.com/v1/messages',
+                            json={'model':'claude-haiku-4-5-20251001','max_tokens':300,
+                                  'messages':[{'role':'user','content':_prompt2}]},
+                            headers={'x-api-key':_key2,'anthropic-version':'2023-06-01'},
+                            timeout=20)
+                        if _sv_h: os.environ['HTTPS_PROXY'] = _sv_h
+                        if _sv_hh: os.environ['HTTP_PROXY'] = _sv_hh
+                        _text2 = _resp2.json()['content'][0]['text']
+                        _tm = __import__('re').search(r'TITLE:\s*(.+)', _text2)
+                        _dm = __import__('re').search(r'DESCRIPTION:\s*([\s\S]+)', _text2)
+                        if _tm: title_ai = _tm.group(1).strip()
+                        if _dm: desc_ai = _dm.group(1).strip()
+                        log.append(f'  ✅ Заголовок: {title_ai}')
+                except Exception as _e2:
+                    log.append(f'  ⚠ AI ошибка: {_e2}')
+                for rf in ready_files:
+                    fpath = rf['path']
+                    fmt = rf['fmt']
+                    log.append(f'  ⏳ Загружаем {fmt}...')
+                    body = {
+                        'snippet': {'title': title_ai, 'description': desc_ai, 'tags': [], 'categoryId': '22'},
+                        'status': {'privacyStatus': privacy}
+                    }
+                    media = MediaFileUpload(fpath, mimetype='video/mp4', resumable=True, chunksize=1024*1024*5)
+                    req = yt.videos().insert(part='snippet,status', body=body, media_body=media)
+                    response = None
+                    while response is None:
+                        status_obj, response = req.next_chunk()
+                        if status_obj:
+                            pct = int(status_obj.progress()*100)
+                            log[-1] = f'  ⏳ {fmt} — {pct}%...'
+                    vid_id = response['id']
+                    link = f'https://youtu.be/{vid_id}'
+                    set_links.append({'fmt': fmt, 'link': link})
+                    log[-1] = f'  ✅ {fmt} → {link}'
+                    today_data['counts'][ch_id] = today_data['counts'].get(ch_id, 0) + 1
+                    save_uploads_today(today_data)
+                    proj_id = ch_info.get('project_id')
+                    if proj_id:
+                        increment_project_upload(user, proj_id)
+                    job['done'] += 1
+            except Exception as _ch_err_r:
+                log.append(f'  ❌ Ошибка канала: {str(_ch_err_r)[:100]} — переходим к следующему')
+                failed_r.add(ch_id)
+                ch_error_r = str(_ch_err_r)
+            if not ch_error_r:
+                job['sets'].append({'set_idx': sets_done_r+1, 'channel': ch_info['name'], 'links': set_links})
+                sets_done_r += 1
         job['status'] = 'done'
         log.append(f'🎉 Готово! {sets_done_r} аккаунтов × {len(ready_files)} форматов = {sets_done_r*len(ready_files)} видео!')
     except Exception as e:
