@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.11"
+VERSION = "5.12"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -275,6 +275,8 @@ async function setup(e){
 </script>
 </body></html>'''
 
+MAX_CH_PER_DAY = 15  # жёсткий лимит видео на один канал в сутки
+
 def load_uploads_today():
     if os.path.exists(UPLOADS_TODAY_FILE):
         with open(UPLOADS_TODAY_FILE) as f:
@@ -366,7 +368,7 @@ def get_best_channel(user='pavel'):
     best_count = 999
     for ch_id, ch_info in channels.items():
         count = counts.get(ch_id, 0)
-        if count < 10 and count < best_count:
+        if count < MAX_CH_PER_DAY and count < best_count:
             best = ch_id
             best_count = count
     return best, channels.get(best)
@@ -880,6 +882,11 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user):
             ch_index += 1
             if ch_id in failed_channels:
                 continue
+            _used_td = load_uploads_today().get('counts', {}).get(ch_id, 0)
+            if _used_td + 3 > MAX_CH_PER_DAY:
+                log.append(f'  ⏸ Канал {ch_info["name"]} — дневной лимит {MAX_CH_PER_DAY} видео ({_used_td} уже загружено) — пропускаем')
+                failed_channels.add(ch_id)
+                continue
             ch_proxy = ch_info.get('proxy', '')
             log.append(f'📦 Набор {sets_done+1}/{n_sets} → канал: {ch_info["name"]}' + (' 🔒 прокси' if ch_proxy else ''))
             try:
@@ -1074,6 +1081,11 @@ def ready_upload_to_youtube(job_id, ready_files, n_sets, category, privacy, user
             ch_index_r += 1
             if ch_id in failed_r:
                 continue
+            _used_td_r = load_uploads_today().get('counts', {}).get(ch_id, 0)
+            if _used_td_r + len(ready_files) > MAX_CH_PER_DAY:
+                log.append(f'  ⏸ Канал {ch_info["name"]} — дневной лимит {MAX_CH_PER_DAY} видео ({_used_td_r} уже загружено) — пропускаем')
+                failed_r.add(ch_id)
+                continue
             try:
                 i = sets_done_r
                 ch_proxy = ch_info.get('proxy', '')
@@ -1188,6 +1200,11 @@ def mass_upload_to_youtube(job_id, files, n_sets, title, description, privacy, u
             ch_id, ch_info = ordered_m[ch_index_m]
             ch_index_m += 1
             if ch_id in failed_m:
+                continue
+            _used_td_m = load_uploads_today().get('counts', {}).get(ch_id, 0)
+            if _used_td_m + len(files) > MAX_CH_PER_DAY:
+                log.append(f'  ⏸ Канал {ch_info["name"]} — дневной лимит {MAX_CH_PER_DAY} видео ({_used_td_m} уже загружено) — пропускаем')
+                failed_m.add(ch_id)
                 continue
             try:
                 i = sets_done_m
