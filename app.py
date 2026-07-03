@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.7"
+VERSION = "5.8"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -1044,13 +1044,32 @@ def ready_upload_to_youtube(job_id, ready_files, n_sets, category, privacy, user
         total = n_sets * len(ready_files)
         job['total'] = total
         job['done'] = 0
-        for i in range(n_sets):
-            ch_id, ch_info = get_best_channel(user)
-            if not ch_id:
-                raise Exception('Нет доступных каналов (все лимиты исчерпаны)')
+        all_channels = load_channels(user)
+        ordered_r = list(all_channels.items())
+        if not ordered_r:
+            raise Exception('Нет каналов. Добавь хотя бы один канал.')
+        failed_r = set()
+        sets_done_r = 0
+        ch_index_r = 0
+        while sets_done_r < n_sets:
+            if len(failed_r) >= len(ordered_r):
+                log.append('⚠ Все каналы недоступны, выполнено: ' + str(sets_done_r) + '/' + str(n_sets))
+                break
+            if ch_index_r >= len(ordered_r):
+                ch_index_r = 0
+            ch_id, ch_info = ordered_r[ch_index_r]
+            ch_index_r += 1
+            if ch_id in failed_r:
+                continue
+            i = sets_done_r
             ch_proxy = ch_info.get('proxy', '')
-            log.append(f'📦 Аккаунт {i+1}/{n_sets} → {ch_info["name"]}' + (' 🔒' if ch_proxy else ''))
-            yt = get_youtube_service(ch_info['token_file'], proxy=ch_proxy)
+            log.append(f'📦 Набор {i+1}/{n_sets} → канал: {ch_info["name"]}' + (' 🔒 прокси' if ch_proxy else ''))
+            try:
+                yt = get_youtube_service(ch_info['token_file'], proxy=ch_proxy)
+            except Exception as _auth_err:
+                log.append(f'  ❌ Ошибка авторизации: {_auth_err} — пропускаем канал')
+                failed_r.add(ch_id)
+                continue
             if not ch_proxy:
                 os.environ.pop('HTTPS_PROXY', None)
                 os.environ.pop('HTTP_PROXY', None)
@@ -1125,9 +1144,10 @@ def ready_upload_to_youtube(job_id, ready_files, n_sets, category, privacy, user
                 if proj_id:
                     increment_project_upload(user, proj_id)
                 job['done'] += 1
-            job['sets'].append({'set_idx': i+1, 'channel': ch_info['name'], 'links': set_links})
+            job['sets'].append({'set_idx': sets_done_r+1, 'channel': ch_info['name'], 'links': set_links})
+            sets_done_r += 1
         job['status'] = 'done'
-        log.append(f'🎉 Готово! {n_sets} аккаунтов × {len(ready_files)} форматов = {total} видео!')
+        log.append(f'🎉 Готово! {sets_done_r} аккаунтов × {len(ready_files)} форматов = {sets_done_r*len(ready_files)} видео!')
     except Exception as e:
         job['status'] = 'error'
         log.append(f'❌ Ошибка: {str(e)}')
