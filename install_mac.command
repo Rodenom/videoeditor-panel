@@ -65,16 +65,18 @@ if [ -n "$PY_CERT" ]; then
   bash "$PY_CERT" &>/dev/null
 fi
 
-# Auto-update app.py from GitHub
+# Auto-update app.py from GitHub (only upgrade, never downgrade)
 echo "► Проверяем обновления..."
 UPDATE_URL="https://raw.githubusercontent.com/Rodenom/videoeditor-panel/main/app.py"
 TMP_FILE="/tmp/app_new.py"
 if curl -fsSL "$UPDATE_URL" -o "$TMP_FILE" 2>/dev/null; then
-  if ! cmp -s "$TMP_FILE" "app.py" 2>/dev/null; then
+  NEW_VER=$(grep -o 'VERSION = "[^"]*"' "$TMP_FILE" | grep -o '[0-9.]*')
+  CUR_VER=$(grep -o 'VERSION = "[^"]*"' "app.py" 2>/dev/null | grep -o '[0-9.]*')
+  if [ -n "$NEW_VER" ] && [ "$(printf '%s\n' "$NEW_VER" "$CUR_VER" | sort -V | tail -1)" = "$NEW_VER" ] && [ "$NEW_VER" != "$CUR_VER" ]; then
     cp "$TMP_FILE" "app.py"
-    echo "✓ Обновление установлено"
+    echo "✓ Обновление $CUR_VER → $NEW_VER установлено"
   else
-    echo "✓ Уже последняя версия"
+    echo "✓ Версия $CUR_VER актуальная"
   fi
 fi
 
