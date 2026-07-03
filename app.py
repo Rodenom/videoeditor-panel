@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.9"
+VERSION = "5.10"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -1061,21 +1061,15 @@ def ready_upload_to_youtube(job_id, ready_files, n_sets, category, privacy, user
             ch_index_r += 1
             if ch_id in failed_r:
                 continue
-            i = sets_done_r
-            ch_proxy = ch_info.get('proxy', '')
-            log.append(f'📦 Набор {i+1}/{n_sets} → канал: {ch_info["name"]}' + (' 🔒 прокси' if ch_proxy else ''))
             try:
+                i = sets_done_r
+                ch_proxy = ch_info.get('proxy', '')
+                log.append(f'📦 Набор {i+1}/{n_sets} → канал: {ch_info["name"]}' + (' 🔒 прокси' if ch_proxy else ''))
                 yt = get_youtube_service(ch_info['token_file'], proxy=ch_proxy)
-            except Exception as _auth_err:
-                log.append(f'  ❌ Ошибка авторизации: {_auth_err} — пропускаем канал')
-                failed_r.add(ch_id)
-                continue
-            if not ch_proxy:
-                os.environ.pop('HTTPS_PROXY', None)
-                os.environ.pop('HTTP_PROXY', None)
-            set_links = []
-            ch_error_r = None
-            try:
+                if not ch_proxy:
+                    os.environ.pop('HTTPS_PROXY', None)
+                    os.environ.pop('HTTP_PROXY', None)
+                set_links = []
                 today_data = load_uploads_today()
                 title_ai = f'{category} — видео {i+1}'
                 desc_ai = ''
@@ -1144,13 +1138,11 @@ def ready_upload_to_youtube(job_id, ready_files, n_sets, category, privacy, user
                     if proj_id:
                         increment_project_upload(user, proj_id)
                     job['done'] += 1
-            except Exception as _ch_err_r:
-                log.append(f'  ❌ Ошибка канала: {str(_ch_err_r)[:100]} — переходим к следующему')
-                failed_r.add(ch_id)
-                ch_error_r = str(_ch_err_r)
-            if not ch_error_r:
                 job['sets'].append({'set_idx': sets_done_r+1, 'channel': ch_info['name'], 'links': set_links})
                 sets_done_r += 1
+            except Exception as _ch_err_r:
+                log.append(f'  ❌ Канал {ch_info["name"]} — ошибка: {str(_ch_err_r)[:120]} — пропускаем')
+                failed_r.add(ch_id)
         job['status'] = 'done'
         log.append(f'🎉 Готово! {sets_done_r} аккаунтов × {len(ready_files)} форматов = {sets_done_r*len(ready_files)} видео!')
     except Exception as e:
@@ -1167,47 +1159,66 @@ def mass_upload_to_youtube(job_id, files, n_sets, title, description, privacy, u
         total = n_sets * len(files)
         job['total'] = total
         job['done'] = 0
-        for i in range(n_sets):
-            ch_id, ch_info = get_best_channel(user)
-            if not ch_id:
-                raise Exception(f'Нет доступных каналов (все лимиты исчерпаны)')
-            ch_proxy = ch_info.get('proxy', '')
-            log.append(f'📦 Набор {i+1}/{n_sets} → канал: {ch_info["name"]}' + (f' 🔒 прокси' if ch_proxy else ''))
-            yt = get_youtube_service(ch_info['token_file'], proxy=ch_proxy)
-            if not ch_proxy:
-                os.environ.pop('HTTPS_PROXY', None)
-                os.environ.pop('HTTP_PROXY', None)
-            set_links = []
-            today_data = load_uploads_today()
-            for f in files:
-                fpath = f['path']
-                ftitle = f.get('title', title)
-                log.append(f'  ⏳ Загружаем {f["fmt"]}...')
-                body = {
-                    'snippet': {'title': ftitle, 'description': description, 'tags': [], 'categoryId': '22'},
-                    'status': {'privacyStatus': privacy}
-                }
-                media = MediaFileUpload(fpath, mimetype='video/mp4', resumable=True, chunksize=1024*1024*5)
-                req = yt.videos().insert(part='snippet,status', body=body, media_body=media)
-                response = None
-                while response is None:
-                    status_obj, response = req.next_chunk()
-                    if status_obj:
-                        pct = int(status_obj.progress()*100)
-                        log[-1] = f'  ⏳ {f["fmt"]} — {pct}%...'
-                vid_id = response['id']
-                link = f'https://youtu.be/{vid_id}'
-                set_links.append({'fmt': f['fmt'], 'link': link})
-                log[-1] = f'  ✅ {f["fmt"]} → {link}'
-                today_data['counts'][ch_id] = today_data['counts'].get(ch_id, 0) + 1
-                save_uploads_today(today_data)
-                proj_id = ch_info.get('project_id')
-                if proj_id:
-                    increment_project_upload(user, proj_id)
-                job['done'] += 1
-            job['sets'].append({'set_idx': i+1, 'channel': ch_info['name'], 'links': set_links})
+        all_channels_m = load_channels(user)
+        ordered_m = list(all_channels_m.items())
+        if not ordered_m:
+            raise Exception('Нет каналов. Добавь хотя бы один канал.')
+        failed_m = set()
+        sets_done_m = 0
+        ch_index_m = 0
+        while sets_done_m < n_sets:
+            if len(failed_m) >= len(ordered_m):
+                log.append('⚠ Все каналы недоступны, выполнено: ' + str(sets_done_m) + '/' + str(n_sets))
+                break
+            if ch_index_m >= len(ordered_m):
+                ch_index_m = 0
+            ch_id, ch_info = ordered_m[ch_index_m]
+            ch_index_m += 1
+            if ch_id in failed_m:
+                continue
+            try:
+                i = sets_done_m
+                ch_proxy = ch_info.get('proxy', '')
+                log.append(f'📦 Набор {i+1}/{n_sets} → канал: {ch_info["name"]}' + (f' 🔒 прокси' if ch_proxy else ''))
+                yt = get_youtube_service(ch_info['token_file'], proxy=ch_proxy)
+                if not ch_proxy:
+                    os.environ.pop('HTTPS_PROXY', None)
+                    os.environ.pop('HTTP_PROXY', None)
+                set_links = []
+                today_data = load_uploads_today()
+                for f in files:
+                    fpath = f['path']
+                    ftitle = f.get('title', title)
+                    log.append(f'  ⏳ Загружаем {f["fmt"]}...')
+                    body = {
+                        'snippet': {'title': ftitle, 'description': description, 'tags': [], 'categoryId': '22'},
+                        'status': {'privacyStatus': privacy}
+                    }
+                    media = MediaFileUpload(fpath, mimetype='video/mp4', resumable=True, chunksize=1024*1024*5)
+                    req = yt.videos().insert(part='snippet,status', body=body, media_body=media)
+                    response = None
+                    while response is None:
+                        status_obj, response = req.next_chunk()
+                        if status_obj:
+                            pct = int(status_obj.progress()*100)
+                            log[-1] = f'  ⏳ {f["fmt"]} — {pct}%...'
+                    vid_id = response['id']
+                    link = f'https://youtu.be/{vid_id}'
+                    set_links.append({'fmt': f['fmt'], 'link': link})
+                    log[-1] = f'  ✅ {f["fmt"]} → {link}'
+                    today_data['counts'][ch_id] = today_data['counts'].get(ch_id, 0) + 1
+                    save_uploads_today(today_data)
+                    proj_id = ch_info.get('project_id')
+                    if proj_id:
+                        increment_project_upload(user, proj_id)
+                    job['done'] += 1
+                job['sets'].append({'set_idx': sets_done_m+1, 'channel': ch_info['name'], 'links': set_links})
+                sets_done_m += 1
+            except Exception as _ch_err_m:
+                log.append(f'  ❌ Канал {ch_info["name"]} — ошибка: {str(_ch_err_m)[:120]} — пропускаем')
+                failed_m.add(ch_id)
         job['status'] = 'done'
-        log.append(f'🎉 Готово! {n_sets} наборов × {len(files)} форматов = {total} видео загружено!')
+        log.append(f'🎉 Готово! {sets_done_m} наборов × {len(files)} форматов = {sets_done_m*len(files)} видео загружено!')
     except Exception as e:
         job['status'] = 'error'
         log.append(f'❌ Ошибка: {str(e)}')
