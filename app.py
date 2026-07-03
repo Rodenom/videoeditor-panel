@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.10"
+VERSION = "5.11"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -1034,6 +1034,19 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user):
         log.append(f'❌ Ошибка: {str(e)}')
 
 
+def friendly_upload_error(err):
+    s = str(err)
+    if 'exceeded the number of videos' in s or 'uploadLimitExceeded' in s:
+        return 'дневной лимит загрузок YouTube исчерпан (сбросится через ~24ч)'
+    if 'invalid_grant' in s:
+        return 'токен отозван — удали канал и добавь заново'
+    if 'quotaExceeded' in s:
+        return 'квота API проекта исчерпана (сбросится в 10:00 МСК)'
+    if 'ProxyError' in s or 'Cannot connect to proxy' in s or 'Tunnel connection failed' in s:
+        return 'прокси не отвечает'
+    return 'ошибка: ' + s[:120]
+
+
 def ready_upload_to_youtube(job_id, ready_files, n_sets, category, privacy, user):
     """Upload already-converted videos directly to YouTube without re-encoding."""
     from googleapiclient.http import MediaFileUpload
@@ -1141,7 +1154,7 @@ def ready_upload_to_youtube(job_id, ready_files, n_sets, category, privacy, user
                 job['sets'].append({'set_idx': sets_done_r+1, 'channel': ch_info['name'], 'links': set_links})
                 sets_done_r += 1
             except Exception as _ch_err_r:
-                log.append(f'  ❌ Канал {ch_info["name"]} — ошибка: {str(_ch_err_r)[:120]} — пропускаем')
+                log.append(f'  ❌ Канал {ch_info["name"]} — {friendly_upload_error(_ch_err_r)} — пропускаем')
                 failed_r.add(ch_id)
         job['status'] = 'done'
         log.append(f'🎉 Готово! {sets_done_r} аккаунтов × {len(ready_files)} форматов = {sets_done_r*len(ready_files)} видео!')
@@ -1215,7 +1228,7 @@ def mass_upload_to_youtube(job_id, files, n_sets, title, description, privacy, u
                 job['sets'].append({'set_idx': sets_done_m+1, 'channel': ch_info['name'], 'links': set_links})
                 sets_done_m += 1
             except Exception as _ch_err_m:
-                log.append(f'  ❌ Канал {ch_info["name"]} — ошибка: {str(_ch_err_m)[:120]} — пропускаем')
+                log.append(f'  ❌ Канал {ch_info["name"]} — {friendly_upload_error(_ch_err_m)} — пропускаем')
                 failed_m.add(ch_id)
         job['status'] = 'done'
         log.append(f'🎉 Готово! {sets_done_m} наборов × {len(files)} форматов = {sets_done_m*len(files)} видео загружено!')
@@ -5232,12 +5245,15 @@ class Handler(BaseHTTPRequestHandler):
                     current_code = f.read()
                 import re as _re
                 new_ver = (_re.search(r'VERSION\s*=\s*["\']([^"\']+)["\']', new_code.decode('utf-8', errors='ignore')) or [None,None])[1] or '?'
-                if new_ver == VERSION:
-                    self.json({'ok': True, 'status': 'latest', 'version': VERSION})
-                else:
+                def _vparts(v):
+                    try: return [int(x) for x in v.split('.')]
+                    except Exception: return [0]
+                if _vparts(new_ver) > _vparts(VERSION):
                     with open(current_file, 'wb') as f:
                         f.write(new_code)
                     self.json({'ok': True, 'status': 'updated', 'old': VERSION, 'new': new_ver})
+                else:
+                    self.json({'ok': True, 'status': 'latest', 'version': VERSION})
             except Exception as e:
                 self.json({'ok': False, 'error': str(e)})
             return
