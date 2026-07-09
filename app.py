@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.13"
+VERSION = "5.14"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -5574,11 +5574,32 @@ window.addEventListener('DOMContentLoaded', async ()=>{
     if(d.status === 'updated'){
       const banner = document.createElement('div');
       banner.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#4f46e5;color:#fff;text-align:center;padding:12px;font-size:14px;font-weight:700;z-index:9999;';
-      banner.innerHTML = '🔄 Обновление установлено! <button onclick="location.reload()" style="margin-left:12px;padding:4px 12px;background:#fff;color:#4f46e5;border:none;border-radius:6px;font-weight:700;cursor:pointer;">Перезагрузить</button>';
+      banner.innerHTML = '🔄 Обновление установлено! <button id="reload-after-update-btn" onclick="reloadAfterUpdate(this)" style="margin-left:12px;padding:4px 12px;background:#fff;color:#4f46e5;border:none;border-radius:6px;font-weight:700;cursor:pointer;">Перезагрузить</button>';
       document.body.prepend(banner);
     }
   }catch(e){}
 });
+
+async function reloadAfterUpdate(btn){
+  btn.disabled = true;
+  btn.textContent = '⏳ Ждём перезапуск сервера...';
+  const started = Date.now();
+  const maxWaitMs = 20000;
+  const poll = async () => {
+    try {
+      const r = await fetch('/version', {cache: 'no-store'});
+      if(r.ok){ location.reload(); return; }
+    } catch(e){}
+    if(Date.now() - started > maxWaitMs){
+      btn.textContent = '⚠️ Не перезапустился — закрой терминал и запусти "Запустить панель.command" заново';
+      btn.disabled = false;
+      btn.onclick = () => location.reload();
+      return;
+    }
+    setTimeout(poll, 700);
+  };
+  setTimeout(poll, 700);
+}
 
 async function checkUpdate(){
   const btn = document.getElementById('update-btn');
