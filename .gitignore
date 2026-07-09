@@ -9,6 +9,7 @@ uploads_today*.json
 proj_uploads_*.json
 client_secret*.json
 anthropic_key.txt
+binom_key*.txt
 VideoEditor_uploads/
 VideoEditor_output/
 __pycache__/

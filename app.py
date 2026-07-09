@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.12"
+VERSION = "5.13"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -43,6 +43,37 @@ def get_anthropic_key():
         k = open(key_file).read().strip()
         if k: return k
     return _default
+
+# ── Binom (два трекера) ──────────────────────────────────────────
+# swat.cam → gvita.beauty (старый, активный сейчас) · swat.icu → mybeauty.day (новый)
+BINOM_TARGETS = {
+    # Binom V1 (arm.php, ключ в query ?api_key=, action=entity@method)
+    'swatcam': {'version': 'v1', 'base': 'https://swat.cam/arm.php',        'domain': 'gvita.beauty',  'label': 'Старый · gvita.beauty'},
+    # Binom V2 (REST /public/api/v1/, ключ в заголовке Api-Key)
+    'swaticu': {'version': 'v2', 'base': 'https://swat.icu/public/api/v1/', 'domain': 'mybeauty.day', 'label': 'Новый · mybeauty.day'},
+}
+DEFAULT_BINOM = 'swatcam'
+
+def binom_norm_target(t):
+    return t if t in BINOM_TARGETS else DEFAULT_BINOM
+
+def binom_key_path(target):
+    # swat.icu исторически хранил ключ в binom_key.txt — сохраняем совместимость
+    fn = 'binom_key.txt' if target == 'swaticu' else 'binom_key_%s.txt' % target
+    return os.path.join(BASE_DIR, fn)
+
+def read_binom_key(target):
+    p = binom_key_path(target)
+    return open(p).read().strip() if os.path.exists(p) else ''
+
+def binom_v1_get(target, action, extra=None):
+    """Binom V1 call: GET arm.php?api_key=KEY&action=entity@method. Returns parsed JSON."""
+    import requests as _breq
+    params = {'api_key': read_binom_key(target), 'action': action}
+    if extra:
+        params.update(extra)
+    r = _breq.get(BINOM_TARGETS[target]['base'], params=params, timeout=25)
+    return r.json()
 
 # ── Multi-user auth ──────────────────────────────────────────────
 USERS_FILE = os.path.join(BASE_DIR, 'users.json')
@@ -92,6 +123,29 @@ def load_channels(user='pavel'):
 def save_channels(user, channels):
     with open(get_channels_file(user), 'w') as f:
         json.dump(channels, f, ensure_ascii=False, indent=2)
+
+def get_oauth_seen_file(user):
+    return os.path.join(BASE_DIR, f'oauth_seen_{user}.json')
+
+def load_oauth_seen(user):
+    f = get_oauth_seen_file(user)
+    if os.path.exists(f):
+        with open(f) as fp:
+            return json.load(fp)
+    return {}
+
+def record_oauth_seen(user, proj_id, ch_id, email):
+    """Track every distinct channel ever authorized per project, permanently.
+    Google's lifetime 100-user OAuth cap doesn't reset when a channel is
+    deleted from the panel, so this ledger must not shrink either."""
+    if not proj_id:
+        return
+    seen = load_oauth_seen(user)
+    bucket = seen.setdefault(proj_id, {})
+    if ch_id not in bucket:
+        bucket[ch_id] = {'email': email, 'first_seen': time.time()}
+        with open(get_oauth_seen_file(user), 'w') as f:
+            json.dump(seen, f, ensure_ascii=False, indent=2)
 
 ADMIN_HTML = '''<!DOCTYPE html>
 <html lang="ru">
@@ -749,8 +803,9 @@ def _finish_channel_auth(job_id, creds, user, proxy='', secret_file=None):
         f.write(creds.to_json())
     proj_id = get_proj_id_for_secret(secret_file, user)
     channels = load_channels(user)
-    channels[ch_id] = {'name': ch_name, 'email': ch_email or '', 'token_file': token_file, 'project_id': proj_id, 'proxy': proxy}
+    channels[ch_id] = {'name': ch_name, 'email': ch_email or '', 'token_file': token_file, 'project_id': proj_id, 'proxy': proxy, 'auth_time': time.time()}
     save_channels(user, channels)
+    record_oauth_seen(user, proj_id, ch_id, ch_email or '')
     if proxy:
         UPLOAD_JOBS[job_id]['log'].append(f'🔒 Прокси сохранён: {proxy.split("@")[-1] if "@" in proxy else proxy}')
     UPLOAD_JOBS[job_id]['status'] = 'done'
@@ -892,8 +947,9 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user):
             try:
                 yt = get_youtube_service(ch_info['token_file'], proxy=ch_proxy)
             except Exception as _auth_err:
-                log.append(f'  ❌ Ошибка авторизации: {_auth_err} — пропускаем канал')
-                channels = load_channels(user); channels[ch_id]['last_error'] = 'Ошибка авторизации'; save_channels(user, channels)
+                _auth_msg = friendly_upload_error(_auth_err)
+                log.append(f'  ❌ Ошибка авторизации: {_auth_msg} — пропускаем канал')
+                channels = load_channels(user); channels[ch_id]['last_error'] = _auth_msg; save_channels(user, channels)
                 failed_channels.add(ch_id)
                 continue
             if not ch_proxy:
@@ -1445,9 +1501,94 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
     <button class="tab-btn" onclick="switchTab('upload')">📤 Загрузить на YouTube</button>
     <button class="tab-btn" onclick="switchTab('tasks')">📋 Таски</button>
     <button class="tab-btn" onclick="switchTab('binom')">📊 Binom</button>
+    <button class="tab-btn" onclick="switchTab('static')">🖼️ Статика</button>
     <div style="flex:1;"></div>
     <button onclick="addChannel()" style="padding:7px 14px;font-size:12px;font-weight:700;border:1.5px solid var(--accent1);border-radius:10px;background:transparent;cursor:pointer;color:var(--accent1);white-space:nowrap;">📺 + Канал</button>
   </div>
+  <!-- STATIC TAB -->
+  <div id="tab-static" class="tab-pane">
+    <style>
+      .st-wrap{max-width:760px;margin:0 auto;padding:20px 0;}
+      .st-card{background:var(--surface);border:var(--card-border);border-radius:16px;padding:24px;margin-bottom:16px;box-shadow:var(--shadow);}
+      .st-label{font-size:12px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px;}
+      .st-drop{border:2px dashed var(--border);border-radius:14px;padding:32px;text-align:center;cursor:pointer;transition:.2s;background:var(--surface2);}
+      .st-drop:hover{border-color:var(--accent1);}
+      .st-fmt{display:flex;gap:10px;flex-wrap:wrap;}
+      .st-fmt-btn{flex:1;min-width:120px;display:flex;flex-direction:column;align-items:center;gap:2px;padding:12px;border:2px solid var(--border);border-radius:12px;cursor:pointer;transition:.15s;font-weight:700;color:var(--text2);user-select:none;}
+      .st-fmt-btn.on{border-color:var(--accent1);background:var(--surface2);color:var(--accent1);}
+      .st-fmt-ratio{font-size:16px;}
+      .st-fmt-name{font-size:11px;color:var(--text3);}
+      .st-opt{display:flex;align-items:center;gap:10px;padding:8px 0;font-size:14px;color:var(--text);cursor:pointer;}
+      .st-num{width:80px;background:var(--surface2);border:1.5px solid var(--border);border-radius:10px;padding:9px 12px;font-size:14px;color:var(--text);}
+      .st-gen{width:100%;padding:14px;background:var(--grad1);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;transition:.2s;}
+      .st-gen:hover{opacity:.9;} .st-gen:disabled{opacity:.5;cursor:default;}
+      .st-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:14px;margin-top:8px;}
+      .st-item{background:var(--surface2);border:1.5px solid var(--border);border-radius:12px;padding:10px;text-align:center;}
+      .st-item img{width:100%;border-radius:8px;background:#00000010;}
+      .st-item-meta{font-size:11px;color:var(--text3);margin:6px 0;}
+      .st-dl{display:inline-block;padding:6px 12px;font-size:12px;font-weight:700;background:var(--accent1);color:#fff;border-radius:8px;text-decoration:none;cursor:pointer;border:none;}
+      .st-seg{display:flex;gap:8px;}
+      .st-seg label{flex:1;display:flex;align-items:center;gap:8px;padding:10px 14px;border:1.5px solid var(--border);border-radius:10px;cursor:pointer;font-size:13px;font-weight:600;color:var(--text);}
+    </style>
+    <div class="st-wrap">
+      <div class="st-card">
+        <div style="font-size:18px;font-weight:800;color:var(--text);margin-bottom:4px;">🖼️ Генератор статики</div>
+        <div style="font-size:13px;color:var(--text3);margin-bottom:18px;">Загрузи один креатив — получишь его в 3 форматах, каждый уникализирован (микро-кроп, поворот, шум, перекодировка), чтобы Google не считал картинки одинаковыми.</div>
+        <div class="st-label">Исходный креатив</div>
+        <div class="st-drop" id="st-drop" onclick="document.getElementById('st-file').click()">
+          <input type="file" id="st-file" accept="image/*" style="display:none;" onchange="staticFileSelected(this)">
+          <div id="st-drop-empty">
+            <div style="font-size:34px;">🖼️</div>
+            <div style="font-size:14px;font-weight:700;color:var(--text2);margin-top:6px;">Кликни или перетащи картинку</div>
+            <div style="font-size:12px;color:var(--text3);margin-top:2px;">JPG / PNG · или вставь из буфера Ctrl+V</div>
+          </div>
+          <img id="st-preview" style="display:none;max-height:220px;max-width:100%;border-radius:10px;">
+        </div>
+      </div>
+
+      <div class="st-card">
+        <div class="st-label">Форматы</div>
+        <div class="st-fmt" id="st-fmt">
+          <div class="st-fmt-btn on" data-fmt="9:16" onclick="staticToggleFmt(this)"><span class="st-fmt-ratio">9:16</span><span class="st-fmt-name">Stories/Shorts</span></div>
+          <div class="st-fmt-btn on" data-fmt="1:1" onclick="staticToggleFmt(this)"><span class="st-fmt-ratio">1:1</span><span class="st-fmt-name">Feed</span></div>
+          <div class="st-fmt-btn on" data-fmt="16:9" onclick="staticToggleFmt(this)"><span class="st-fmt-ratio">16:9</span><span class="st-fmt-name">YouTube/Desktop</span></div>
+        </div>
+        <div style="height:16px;"></div>
+        <div class="st-label">Как вписывать</div>
+        <div class="st-seg" style="flex-wrap:wrap;">
+          <label style="min-width:150px;"><input type="radio" name="st-fit" value="stretch" checked style="accent-color:var(--accent1);" onchange="staticFitChange()"> ↕️ Растянуть под формат</label>
+          <label style="min-width:150px;"><input type="radio" name="st-fit" value="cover" style="accent-color:var(--accent1);" onchange="staticFitChange()"> 🔳 Заполнить (обрезать края)</label>
+          <label style="min-width:150px;"><input type="radio" name="st-fit" value="contain" style="accent-color:var(--accent1);" onchange="staticFitChange()"> 🖼️ Вписать целиком (с полями)</label>
+        </div>
+        <div id="st-fit-hint" style="font-size:11px;color:var(--text3);margin-top:6px;">↕️ Растянуть — ничего не теряется и нет полей, пропорции слегка искажаются (лучший вариант для уникализации).</div>
+        <div id="st-bg-row" style="margin-top:12px;display:none;">
+          <div class="st-label">Фон полей</div>
+          <div class="st-seg">
+            <label><input type="radio" name="st-bg" value="blur" checked style="accent-color:var(--accent1);"> 🌫️ Размытый</label>
+            <label><input type="radio" name="st-bg" value="white" style="accent-color:var(--accent1);"> ⬜ Белый</label>
+            <label><input type="radio" name="st-bg" value="black" style="accent-color:var(--accent1);"> ⬛ Чёрный</label>
+          </div>
+        </div>
+        <div style="height:16px;"></div>
+        <div class="st-label">Вариантов на каждый формат</div>
+        <input type="number" class="st-num" id="st-variants" value="1" min="1" max="10">
+        <div style="font-size:11px;color:var(--text3);margin-top:4px;">Каждый вариант уникализируется по-своему. Напр. 3 варианта × 3 формата = 9 картинок.</div>
+        <label class="st-opt"><input type="checkbox" id="st-noise" checked style="accent-color:var(--accent1);width:16px;height:16px;"> Добавлять шум (сильнее меняет хэш)</label>
+        <label class="st-opt"><input type="checkbox" id="st-flip" style="accent-color:var(--accent1);width:16px;height:16px;"> Отзеркалить по горизонтали</label>
+      </div>
+
+      <div class="st-card">
+        <button class="st-gen" id="st-gen-btn" onclick="staticGenerate()">🎨 Сгенерировать</button>
+        <div id="st-status" style="font-size:13px;color:var(--text3);text-align:center;margin-top:10px;display:none;"></div>
+        <div id="st-results-head" style="margin-top:18px;align-items:center;justify-content:space-between;display:none;">
+          <div style="font-size:15px;font-weight:800;color:var(--text);">Готовые креативы</div>
+          <button class="st-dl" onclick="staticDownloadAll()">⬇️ Скачать всё</button>
+        </div>
+        <div class="st-grid" id="st-results"></div>
+      </div>
+    </div>
+  </div>
+
   <div id="tab-editor" class="tab-pane active">
   
   <div class="info"><span>⚡</span><span>Всё обрабатывается локально на твоём Mac. Готовые видео можно сразу загрузить на YouTube.</span></div>
@@ -2355,6 +2496,70 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
     .tk-geo-selected{display:flex;align-items:center;gap:8px;padding:6px 0;font-size:14px;font-weight:700;color:var(--accent1);min-height:24px;}
   </style>
   <div class="tk-wrap" id="tk-wrap-top">
+
+    <!-- ── AI: ленд + оффер → таска ── -->
+    <div class="tk-step active" id="ai-task-card" style="border:2px solid var(--accent1);">
+      <div class="tk-step-title" style="margin-bottom:6px;">🤖 AI-разбор: ленд + оффер → таска</div>
+      <div style="font-size:12px;color:var(--text3);margin-bottom:16px;">Загрузи архив прокла и карточку оффера — ИИ сам увидит, что менять (цена, фото, название, маска), и напишет готовый текст для теха.</div>
+
+      <div class="tk-mb">
+        <div class="tk-label">API-ключ Claude <span style="color:var(--text3);font-weight:400;text-transform:none;">— console.anthropic.com, сохраняется в этом браузере</span></div>
+        <input class="tk-input" id="ai-api-key" type="password" placeholder="sk-ant-..." oninput="localStorage.setItem('claude_api_key', this.value)">
+      </div>
+
+      <div class="tk-row">
+        <div class="tk-col">
+          <div class="tk-label">Архив ленда (.zip)</div>
+          <input type="file" id="ai-lander-zip" accept=".zip" style="display:none;" onchange="aiLanderSelected(this)">
+          <button onclick="document.getElementById('ai-lander-zip').click()" id="ai-lander-btn" style="width:100%;padding:11px;border:2px dashed var(--border);border-radius:10px;background:var(--surface2);cursor:pointer;font-size:13px;color:var(--text3);">📦 Выбрать архив прокла</button>
+        </div>
+      </div>
+
+      <div class="tk-mb">
+        <div class="tk-label">Карточка оффера</div>
+        <div id="ai-offer-drop" onclick="document.getElementById('ai-offer-file').click()" style="border:2px dashed var(--border);border-radius:10px;padding:14px;text-align:center;cursor:pointer;background:var(--surface2);font-size:13px;color:var(--text3);">
+          🖼️ Вставь скрин карточки (Ctrl+V) или кликни для выбора
+          <input type="file" id="ai-offer-file" accept="image/*" style="display:none;" onchange="aiOfferFileSelected(this)">
+        </div>
+        <img id="ai-offer-preview" style="display:none;max-height:140px;margin-top:8px;border-radius:8px;border:2px solid var(--accent1);">
+        <div style="font-size:11px;color:var(--text3);margin:8px 0 4px;">или впиши данными:</div>
+        <textarea class="tk-input" id="ai-offer-text" rows="3" placeholder="Оффер: Trauflix · Гео: HU · Цена: 9900 HUF · метка zd · тип цены low ..."></textarea>
+      </div>
+
+      <div class="tk-mb">
+        <div class="tk-label">Фото товара <span style="color:var(--text3);font-weight:400;text-transform:none;">— для превью таски, необязательно (Front.png)</span></div>
+        <div id="ai-prod-drop" onclick="document.getElementById('ai-prod-file').click()" style="border:2px dashed var(--border);border-radius:10px;padding:10px;text-align:center;cursor:pointer;background:var(--surface2);font-size:12px;color:var(--text3);">🖼️ Выбрать фото товара
+          <input type="file" id="ai-prod-file" accept="image/*" style="display:none;" onchange="aiProdFileSelected(this)">
+        </div>
+        <img id="ai-prod-preview" style="display:none;max-height:90px;margin-top:8px;border-radius:8px;border:2px solid var(--accent3);">
+      </div>
+
+      <div class="tk-mb">
+        <div class="tk-label">Мій коментар <span style="color:var(--text3);font-weight:400;text-transform:none;">— врахувати при розборі (пріоритет), необов'язково</span></div>
+        <textarea class="tk-input" id="ai-comment" rows="2" placeholder="Напр.: знижка має бути 80%, а не 50% · стару ціну взяти як X · блок відгуків не перекладати ..."></textarea>
+      </div>
+
+      <div class="tk-mb">
+        <div class="tk-label">Моя мітка <span style="color:var(--text3);font-weight:400;text-transform:none;">— для нейміngу ленду (напр. ZD, GG), зберігається в браузері</span></div>
+        <input class="tk-input" id="ai-mark" placeholder="ZD" style="max-width:160px;" oninput="localStorage.setItem('ai_mark', this.value)">
+      </div>
+
+      <button class="tk-btn tk-btn-next" style="width:100%;" id="ai-gen-btn" onclick="aiTaskGenerate()">✨ Розібрати → таска</button>
+      <div id="ai-status" style="font-size:13px;color:var(--text3);text-align:center;margin-top:10px;display:none;"></div>
+
+      <div id="ai-result-wrap" style="display:none;margin-top:16px;">
+        <div class="tk-result">
+          <div class="tk-result-text" id="ai-result-text"></div>
+          <div style="display:flex;gap:8px;margin-top:12px;">
+            <button class="tk-copy-btn" style="margin-top:0;flex:1;" onclick="aiCopyResult()">📋 Скопировать</button>
+            <button class="tk-copy-btn" id="ai-save-btn" style="margin-top:0;width:150px;flex-shrink:0;background:var(--accent3);" onclick="aiSaveTask()">💾 Сохранить</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div style="text-align:center;font-size:12px;color:var(--text3);margin:6px 0 16px;">— или заполни вручную ниже —</div>
+
     <div class="tk-progress" id="tk-progress">
       <div class="tk-progress-dot active"></div>
       <div class="tk-progress-dot"></div>
@@ -2594,21 +2799,80 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
       </div>
     </div>
 
-    <!-- Step 3: URL naming -->
+    <!-- Step 3: ArkNet naming -->
     <div class="tk-step" id="tk-step-3">
-      <div class="tk-step-title"><span class="tk-step-num">3</span>Название прокла (URL)</div>
-      <div style="font-size:12px;color:var(--text3);margin-bottom:16px;">https://gvita.beauty/landers/official-<b style="color:var(--text)">{название}</b>-<b style="color:var(--text)">{метка}</b>-<b style="color:var(--text)">{гео}</b>-lend<b style="color:var(--text)">{номер}</b>/</div>
+      <div class="tk-step-title"><span class="tk-step-num">3</span>Название ленда (стандарт ArkNet)</div>
+      <div style="font-size:12px;color:var(--text3);margin-bottom:16px;">Формат: <b style="color:var(--text)">Оффер-Гео-Метка-LP-Название-ТипЦены</b><br>напр. <b style="color:var(--accent1)">Slimoxil-UA-VG-LP-MedicalArticle-low</b></div>
+
+      <div class="tk-mb">
+        <div class="tk-label">Тип ленда</div>
+        <div style="display:flex;gap:8px;">
+          <label style="flex:1;display:flex;align-items:center;gap:8px;padding:10px 14px;border:1.5px solid var(--border);border-radius:10px;cursor:pointer;font-size:13px;font-weight:600;">
+            <input type="radio" name="tk-land-type" value="LP" checked onchange="tkLandTypeChange();tkUpdateUrlPreview()" style="accent-color:var(--accent1);"> 📄 LP — лендинг
+          </label>
+          <label style="flex:1;display:flex;align-items:center;gap:8px;padding:10px 14px;border:1.5px solid var(--border);border-radius:10px;cursor:pointer;font-size:13px;font-weight:600;">
+            <input type="radio" name="tk-land-type" value="RD" onchange="tkLandTypeChange();tkUpdateUrlPreview()" style="accent-color:var(--accent1);"> 🎁 RD — редирект
+          </label>
+        </div>
+      </div>
+
+      <div id="tk-lp-fields">
+        <div class="tk-mb">
+          <div class="tk-label">Название ленда (тематика)</div>
+          <input class="tk-input" id="tk-land-name" placeholder="MedicalArticle" oninput="tkUpdateUrlPreview()" autocomplete="off">
+          <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;">
+            <button type="button" class="tk-scat" onclick="tkPickName('MedicalArticle')">MedicalArticle</button>
+            <button type="button" class="tk-scat" onclick="tkPickName('NewsVSL')">NewsVSL</button>
+            <button type="button" class="tk-scat" onclick="tkPickName('MedicalBlog')">MedicalBlog</button>
+            <button type="button" class="tk-scat" onclick="tkPickName('BlogVSL')">BlogVSL</button>
+            <button type="button" class="tk-scat" onclick="tkPickName('News')">News</button>
+            <button type="button" class="tk-scat" onclick="tkPickName('Blog')">Blog</button>
+            <button type="button" class="tk-scat" onclick="tkPickName('Article')">Article</button>
+          </div>
+        </div>
+        <div class="tk-mb">
+          <div class="tk-label">Тип цены</div>
+          <div style="display:flex;gap:8px;" id="tk-price-type-btns">
+            <button type="button" class="tk-scat on" data-pt="low" onclick="tkPickPrice('low',this)">low</button>
+            <button type="button" class="tk-scat" data-pt="free" onclick="tkPickPrice('free',this)">free</button>
+            <button type="button" class="tk-scat" data-pt="full" onclick="tkPickPrice('full',this)">full (без хвоста)</button>
+          </div>
+          <input type="hidden" id="tk-price-type" value="low">
+        </div>
+      </div>
+
+      <div id="tk-rd-fields" style="display:none;">
+        <div class="tk-mb">
+          <div class="tk-label">Тип интерактива</div>
+          <input class="tk-input" id="tk-rd-type" placeholder="Chest" oninput="tkUpdateUrlPreview()" autocomplete="off">
+          <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;">
+            <button type="button" class="tk-scat" onclick="tkPickRd('Boxes')">Boxes</button>
+            <button type="button" class="tk-scat" onclick="tkPickRd('Chest')">Chest</button>
+            <button type="button" class="tk-scat" onclick="tkPickRd('Form')">Form</button>
+            <button type="button" class="tk-scat" onclick="tkPickRd('Wheel')">Wheel</button>
+            <button type="button" class="tk-scat" onclick="tkPickRd('Aids')">Aids</button>
+          </div>
+        </div>
+      </div>
+
       <div class="tk-row">
         <div class="tk-col">
           <div class="tk-label">Моя метка</div>
-          <input class="tk-input" id="tk-url-marker" placeholder="po" value="po">
+          <input class="tk-input" id="tk-url-marker" placeholder="po" value="po" oninput="tkUpdateUrlPreview()">
         </div>
-        <div class="tk-col">
-          <div class="tk-label">Номер (сплит)</div>
-          <input class="tk-input" id="tk-url-num" placeholder="1" type="number" value="1" min="1">
+        <div class="tk-col" id="tk-split-wrap">
+          <div class="tk-label">Номер (сплит, если &gt;1)</div>
+          <input class="tk-input" id="tk-url-num" placeholder="—" type="number" min="2" oninput="tkUpdateUrlPreview()">
         </div>
       </div>
-      <div class="tk-url-preview" id="tk-url-preview"></div>
+      <div class="tk-mb">
+        <div class="tk-label">Ваш домен</div>
+        <input class="tk-input" id="tk-domain" placeholder="gvita.beauty" value="gvita.beauty">
+      </div>
+      <div style="padding:12px 16px;background:var(--surface2);border-radius:10px;border-left:3px solid var(--accent1);">
+        <div style="font-size:11px;color:var(--text3);font-weight:700;margin-bottom:4px;">НАЗВАНИЕ ЛЕНДА:</div>
+        <div class="tk-url-preview" id="tk-url-preview"></div>
+      </div>
       <div class="tk-nav">
         <button class="tk-btn tk-btn-back" onclick="tkBack(3)">← Назад</button>
         <button class="tk-btn tk-btn-next" onclick="tkNext(3)">Сгенерировать таску →</button>
@@ -2675,6 +2939,9 @@ async function loadProjects(){
   list.innerHTML = data.projects.map(p=>{
     const pct = Math.round(p.uploads_today/100*100);
     const color = pct>80?'#ef4444':pct>50?'#f59e0b':'#22c55e';
+    const seen = p.seen_count || 0;
+    const seenColor = seen>=90?'#ef4444':seen>=70?'#f59e0b':'#6d28d9';
+    const seenLabel = `<div style="font-size:11px;color:${seenColor};margin-top:3px;" title="Пожизненный лимит Google на непроверенный проект — не сбрасывается, оценка по каналам, авторизованным через эту панель">≈${seen}/100 юзеров авторизовано (пожизненный лимит Google)</div>`;
     return `<div style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--surface2);border-radius:10px;border:1.5px solid var(--border);">
       <div style="flex:1;min-width:0;">
         <div style="font-size:13px;font-weight:700;color:var(--text);margin-bottom:4px;">🔑 ${p.name}</div>
@@ -2682,6 +2949,7 @@ async function loadProjects(){
           <div style="width:${pct}%;height:100%;background:${color};border-radius:4px;transition:.3s;"></div>
         </div>
         <div style="font-size:11px;color:var(--text3);margin-top:3px;">${p.uploads_today}/100 загружено сегодня · осталось <b style="color:${color};">${p.remaining}</b></div>
+        ${seenLabel}
       </div>
       <button onclick="deleteProject('${p.id}')" style="padding:5px 10px;font-size:11px;font-weight:700;border:1.5px solid #fca5a5;border-radius:7px;background:transparent;color:#ef4444;cursor:pointer;flex-shrink:0;">✕</button>
     </div>`;
@@ -2721,22 +2989,37 @@ async function loadChannels(){
     return;
   }
   const projects = (await fetch('/projects').then(r=>r.json())).projects || [];
+  window.__chCache = window.__chCache || {};
   data.channels.forEach(ch => {
+    window.__chCache[ch.id] = ch;
     const color = ch.available ? '#16a34a' : '#dc2626';
     const errLabel = ch.last_error ? `<span style="font-size:10px;background:#fee2e2;color:#dc2626;border-radius:4px;padding:1px 6px;margin-left:6px;">❌ ${ch.last_error}</span>` : '';
-    const status = ch.available ? `${ch.uploads_today}/10 сегодня` : '❌ Лимит исчерпан';
+    const status = ch.available ? `${ch.uploads_today}/15 сегодня` : '❌ Лимит исчерпан';
     const proxyLabel = ch.proxy ? `<span style="font-size:10px;background:#d1fae5;color:#065f46;border-radius:4px;padding:1px 6px;margin-left:6px;">🔒 прокси</span>` : '';
     const projName = ch.project_id ? (projects.find(p=>p.id===ch.project_id)||{name:'?'}).name : null;
     const projLabel = projName
       ? `<span style="font-size:10px;background:#ede9fe;color:#6d28d9;border-radius:4px;padding:1px 6px;margin-left:6px;">🔑 ${projName}</span>`
       : '';
+    let daysLabel = '';
+    if(ch.days_left !== null && ch.days_left !== undefined){
+      const d = ch.days_left;
+      const dColor = d <= 0 ? '#dc2626' : d <= 1 ? '#dc2626' : d <= 2 ? '#f59e0b' : '#16a34a';
+      const dText = d <= 0 ? '⏳ токен истёк' : `⏳ ${d} дн. до переавторизации`;
+      daysLabel = `<div style="font-size:11px;color:${dColor};margin-top:2px;font-weight:600;">${dText}</div>`;
+    }
+    const needsReauth = (ch.days_left !== null && ch.days_left !== undefined && ch.days_left <= 2) || !!ch.last_error;
+    const reauthBtn = `<button onclick="reauthChannel('${ch.id}')" style="padding:4px 10px;font-size:11px;border:1px solid ${needsReauth?'#f59e0b':'var(--border,#e5e5e5)'};border-radius:6px;background:${needsReauth?'#fffbeb':'transparent'};color:${needsReauth?'#b45309':'#666'};cursor:pointer;margin-right:6px;">🔄 Переавторизовать</button>`;
     const html = `<div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:var(--surface2,#f9f9f9);border-radius:8px;border:1px solid var(--border,#e5e5e5);">
       <div>
         <div style="font-size:13px;font-weight:600;">📺 ${ch.name}${proxyLabel}${projLabel}${errLabel}</div>
         ${ch.email ? `<div style="font-size:10px;color:#888;margin-top:1px;">${ch.email}</div>` : ''}
         <div style="font-size:11px;color:${color};margin-top:2px;">${status}</div>
+        ${daysLabel}
       </div>
+      <div style="display:flex;align-items:center;flex-shrink:0;">
+      ${reauthBtn}
       <button onclick="deleteChannel('${ch.id}')" style="padding:4px 10px;font-size:11px;border:1px solid #fca5a5;border-radius:6px;background:transparent;color:#dc2626;cursor:pointer;">Удалить</button>
+      </div>
     </div>`;
     targets.forEach(l => l.innerHTML += html);
     if(sel){ const opt=document.createElement('option'); opt.value=ch.id; opt.textContent=`📺 ${ch.name}`; sel.appendChild(opt); }
@@ -2765,27 +3048,37 @@ async function assignProject(chId){
   loadChannels();
 }
 
+function reauthChannel(chId){
+  const ch = (window.__chCache || {})[chId];
+  if(!ch){ alert('Канал не найден, обнови страницу'); return; }
+  addChannel({email: ch.email || '', proxy: ch.proxy || '', reauth: true});
+}
+
 let addChTimer = null;
-async function addChannel(){
+async function addChannel(prefill){
+  prefill = prefill || {};
   let modal = document.getElementById('add-ch-modal');
   if(modal) modal.remove();
   modal = document.createElement('div');
   modal.id = 'add-ch-modal';
   modal.style.cssText = 'position:fixed;top:20px;right:20px;z-index:9999;background:#1a1a1a;color:#7eff7e;border-radius:14px;padding:18px 20px;font-size:13px;font-family:monospace;min-width:320px;max-width:440px;box-shadow:0 8px 32px rgba(0,0,0,.6);border:1.5px solid #333;';
-  modal.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;"><b style="color:#fff;font-family:sans-serif;">📺 Добавление канала</b><span onclick="this.parentElement.parentElement.remove()" style="cursor:pointer;color:#666;font-size:18px;">✕</span></div><div id="add-ch-modal-log" style="white-space:pre-wrap;">⏳ Запускаем...</div>';
+  const title = prefill.reauth ? '🔄 Переавторизация канала' : '📺 Добавление канала';
+  modal.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;"><b style="color:#fff;font-family:sans-serif;">${title}</b><span onclick="this.parentElement.parentElement.remove()" style="cursor:pointer;color:#666;font-size:18px;">✕</span></div><div id="add-ch-modal-log" style="white-space:pre-wrap;">⏳ Запускаем...</div>`;
   document.body.appendChild(modal);
   const log = document.getElementById('add-ch-modal-log');
 
-  // Show input form in modal
+  // Show input form in modal — pre-filled + auto-skipped when reauthorizing a known channel
+  const reauthNote = prefill.reauth ? `<div style="font-size:11px;color:#7eff7e;margin-bottom:10px;">Тот же email и прокси, что и раньше — просто пройди авторизацию в Google ещё раз.</div>` : '';
   log.innerHTML = `
     <div style="font-family:sans-serif;color:#fff;">
+      ${reauthNote}
       <div style="margin-bottom:12px;">
         <label style="font-size:12px;color:#aaa;display:block;margin-bottom:4px;">EMAIL АККАУНТА <span style="color:#ff6b6b;">*</span></label>
-        <input id="ch-email-inp" type="email" placeholder="farmaccount@gmail.com" style="width:100%;padding:8px 10px;border-radius:8px;border:1.5px solid #444;background:#222;color:#fff;font-size:13px;outline:none;" />
+        <input id="ch-email-inp" type="email" placeholder="farmaccount@gmail.com" value="${prefill.email||''}" style="width:100%;padding:8px 10px;border-radius:8px;border:1.5px solid #444;background:#222;color:#fff;font-size:13px;outline:none;" />
       </div>
       <div style="margin-bottom:16px;">
         <label style="font-size:12px;color:#aaa;display:block;margin-bottom:4px;">ПРОКСИ КАНАЛА <span style="color:#ff6b6b;">*</span></label>
-        <input id="ch-proxy-inp" type="text" placeholder="socks5://user:pass@host:port" style="width:100%;padding:8px 10px;border-radius:8px;border:1.5px solid #444;background:#222;color:#fff;font-size:13px;outline:none;" />
+        <input id="ch-proxy-inp" type="text" placeholder="socks5://user:pass@host:port" value="${prefill.proxy||''}" style="width:100%;padding:8px 10px;border-radius:8px;border:1.5px solid #444;background:#222;color:#fff;font-size:13px;outline:none;" />
         <div style="font-size:11px;color:#666;margin-top:4px;">Формат: socks5://user:pass@host:port</div>
       </div>
       <button id="ch-start-btn" style="width:100%;padding:10px;background:#4f46e5;color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:600;cursor:pointer;">Продолжить →</button>
@@ -3251,14 +3544,243 @@ function updateReviewOpt(){
 }
 
 function switchTab(tab){
-  document.querySelectorAll('.tab-btn').forEach((b,i)=>b.classList.toggle('active',['editor','ads','upload','tasks','binom'][i]===tab));
+  document.querySelectorAll('.tab-btn').forEach((b,i)=>b.classList.toggle('active',['editor','ads','upload','tasks','binom','static'][i]===tab));
   document.querySelectorAll('.tab-pane').forEach(p=>p.classList.remove('active'));
   document.getElementById('tab-'+tab).classList.add('active');
   if(tab==='prokla') loadProklaNames();
   if(tab==='tasks') tkInit();
   if(tab==='upload'){ loadChannels(); loadProjects(); }
-  if(tab==='binom'){ loadBinom(); }
+  if(tab==='binom'){ loadBinomTargets().then(loadBinom); }
 }
+
+// ===== STATIC CREATIVE GENERATOR =====
+let staticSrc = null;
+let staticResults = [];
+
+function staticSetImage(dataUrl){
+  staticSrc = dataUrl;
+  const img = document.getElementById('st-preview');
+  img.src = dataUrl; img.style.display = 'block';
+  document.getElementById('st-drop-empty').style.display = 'none';
+}
+function staticFileSelected(input){
+  const f = input.files && input.files[0];
+  if(!f) return;
+  const r = new FileReader();
+  r.onload = e => staticSetImage(e.target.result);
+  r.readAsDataURL(f);
+}
+function staticToggleFmt(el){ el.classList.toggle('on'); }
+function staticFitChange(){
+  const fit = (document.querySelector('input[name="st-fit"]:checked')||{}).value;
+  document.getElementById('st-bg-row').style.display = (fit==='contain') ? 'block' : 'none';
+  const hints = {
+    stretch: '↕️ Растянуть — ничего не теряется и нет полей, пропорции слегка искажаются (лучший вариант для уникализации).',
+    cover: '🔳 Заполнить — картинка заполняет кадр целиком, края слегка обрезаются.',
+    contain: '🖼️ Вписать целиком — вся картинка видна, по краям добавляются поля (фон).'
+  };
+  const h = document.getElementById('st-fit-hint');
+  if(h) h.textContent = hints[fit] || '';
+}
+
+function staticGenerate(){
+  if(!staticSrc){ alert('Сначала загрузи картинку'); return; }
+  const formats = [...document.querySelectorAll('#st-fmt .st-fmt-btn.on')].map(b=>b.dataset.fmt);
+  if(!formats.length){ alert('Выбери хотя бы один формат'); return; }
+  let variants = parseInt(document.getElementById('st-variants').value)||1;
+  variants = Math.max(1, Math.min(10, variants));
+  const fit = (document.querySelector('input[name="st-fit"]:checked')||{}).value || 'stretch';
+  const bg = (document.querySelector('input[name="st-bg"]:checked')||{}).value || 'blur';
+  const noise = document.getElementById('st-noise').checked;
+  const flip = document.getElementById('st-flip').checked;
+  const btn = document.getElementById('st-gen-btn');
+  const status = document.getElementById('st-status');
+  btn.disabled = true; btn.textContent = '⏳ Генерирую...';
+  status.style.display = 'block'; status.textContent = 'Обрабатываю ' + (formats.length*variants) + ' картинок...';
+  fetch('/gen_static', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({img_data: staticSrc, formats: formats, variants: variants, fit: fit, bg: bg, noise: noise, flip: flip})
+  }).then(r=>r.json()).then(d=>{
+    btn.disabled = false; btn.textContent = '🎨 Сгенерировать';
+    if(d.error){ status.textContent = '❌ ' + d.error; return; }
+    staticResults = d.results || [];
+    status.style.display = 'none';
+    staticRender();
+  }).catch(e=>{
+    btn.disabled = false; btn.textContent = '🎨 Сгенерировать';
+    status.textContent = '❌ Ошибка: ' + e;
+  });
+}
+
+function staticRender(){
+  const grid = document.getElementById('st-results');
+  const head = document.getElementById('st-results-head');
+  grid.innerHTML = '';
+  if(!staticResults.length){ head.style.display='none'; return; }
+  head.style.display = 'flex';
+  staticResults.forEach((r,i)=>{
+    const d = document.createElement('div');
+    d.className = 'st-item';
+    d.innerHTML = '<img src="'+r.data+'" loading="lazy">'
+      + '<div class="st-item-meta">'+r.format+' · '+r.w+'×'+r.h+' · v'+r.variant+'</div>'
+      + '<button class="st-dl" onclick="staticDownloadOne('+i+')">⬇️ Скачать</button>';
+    grid.appendChild(d);
+  });
+}
+function staticDlData(dataUrl, name){
+  const a = document.createElement('a');
+  a.href = dataUrl; a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+}
+function staticDownloadOne(i){
+  const r = staticResults[i]; if(!r) return;
+  staticDlData(r.data, 'static_' + r.format.replace(':','x') + '_v' + r.variant + '.jpg');
+}
+function staticDownloadAll(){
+  staticResults.forEach((r,i)=> setTimeout(()=>staticDownloadOne(i), i*250));
+}
+
+(function(){
+  const drop = document.getElementById('st-drop');
+  if(drop){
+    ['dragover','dragenter'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.style.borderColor='var(--accent1)';}));
+    ['dragleave'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.style.borderColor='';}));
+    drop.addEventListener('drop',e=>{
+      e.preventDefault(); drop.style.borderColor='';
+      const f = e.dataTransfer.files && e.dataTransfer.files[0];
+      if(f && f.type.startsWith('image/')){ const r=new FileReader(); r.onload=ev=>staticSetImage(ev.target.result); r.readAsDataURL(f); }
+    });
+  }
+  document.addEventListener('paste',e=>{
+    const tab = document.getElementById('tab-static');
+    if(!tab || !tab.classList.contains('active')) return;
+    const items = (e.clipboardData||{}).items||[];
+    for(const it of items){
+      if(it.type && it.type.startsWith('image/')){
+        const f = it.getAsFile(); const r = new FileReader();
+        r.onload = ev=>staticSetImage(ev.target.result); r.readAsDataURL(f);
+        break;
+      }
+    }
+  });
+})();
+
+// ===== AI: ЛЕНД + ОФФЕР → ТАСКА =====
+let aiLanderData = null;   // data URL of .zip
+let aiOfferImage = null;   // data URL of offer card image
+let aiProductImage = null; // data URL of product photo (для превью)
+let aiCurrentTask = null;  // последний сгенерированный текст таски
+
+function aiProdFileSelected(input){
+  const f = input.files && input.files[0];
+  if(!f) return;
+  const r = new FileReader();
+  r.onload = e => { aiProductImage = e.target.result; const img=document.getElementById('ai-prod-preview'); img.src=e.target.result; img.style.display='block'; };
+  r.readAsDataURL(f);
+}
+
+function aiLanderSelected(input){
+  const f = input.files && input.files[0];
+  if(!f) return;
+  const r = new FileReader();
+  r.onload = e => { aiLanderData = e.target.result; document.getElementById('ai-lander-btn').textContent = '📦 ' + f.name; };
+  r.readAsDataURL(f);
+}
+function aiOfferSetImage(dataUrl){
+  aiOfferImage = dataUrl;
+  const img = document.getElementById('ai-offer-preview');
+  img.src = dataUrl; img.style.display = 'block';
+}
+function aiOfferFileSelected(input){
+  const f = input.files && input.files[0];
+  if(!f) return;
+  const r = new FileReader();
+  r.onload = e => aiOfferSetImage(e.target.result);
+  r.readAsDataURL(f);
+}
+function aiCopyResult(){
+  const t = document.getElementById('ai-result-text').innerText;
+  navigator.clipboard.writeText(t).then(()=>{
+    const b = document.querySelector('#ai-result-wrap .tk-copy-btn');
+    const o = b.textContent; b.textContent = '✅ Скопировано!';
+    setTimeout(()=>b.textContent=o, 1800);
+  });
+}
+function aiEsc(s){ return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function aiFlag(cc){ if(!cc||cc.length!==2) return ''; try{ return String.fromCodePoint(...[...cc.toUpperCase()].map(c=>0x1F1E6+c.charCodeAt(0)-65)); }catch(e){ return ''; } }
+function aiSaveTask(){
+  if(!aiCurrentTask){ alert('Сначала сгенерируй таску'); return; }
+  const txt = aiCurrentTask;
+  const nameM = txt.match(/Назва товару\s*[-:]\s*(.+)/i);
+  const landM = txt.match(/Назвати лендинг\s*[-:]\s*(.+)/i);
+  const geoM = txt.match(/Кра[їi]на\s*[-:]\s*([A-Za-z]{2})/i);
+  let geoCode = geoM ? geoM[1].toUpperCase() : '';
+  const geoName = geoCode;
+  const offerFull = (nameM ? nameM[1].trim() : (landM ? landM[1].trim() : 'AI-таска'));
+  const tasks = JSON.parse(localStorage.getItem('tk_saved_tasks')||'[]');
+  tasks.unshift({ id: Date.now(), isAI: true, aiText: txt, offerFull: offerFull, offerShort: offerFull,
+    geoName: geoName, geoCode: geoCode, geoFlag: aiFlag(geoCode), thumb: aiProductImage||aiOfferImage||'', savedAt: new Date().toLocaleString('ru') });
+  localStorage.setItem('tk_saved_tasks', JSON.stringify(tasks.slice(0,80)));
+  tkRenderSaved();
+  const b = document.getElementById('ai-save-btn'); if(b){ const o=b.textContent; b.textContent='✅ Сохранено'; setTimeout(()=>b.textContent=o,1800); }
+}
+function aiToggleText(id){ const p=document.getElementById('tk-aitext-'+id); if(p) p.classList.toggle('open'); }
+function aiCopySaved(id, el){
+  const tasks = JSON.parse(localStorage.getItem('tk_saved_tasks')||'[]');
+  const t = tasks.find(x=>String(x.id)===String(id)); if(!t) return;
+  navigator.clipboard.writeText(t.aiText||'').then(()=>{ if(el){ const o=el.textContent; el.textContent='✅'; setTimeout(()=>el.textContent=o,1500); } });
+}
+function aiTaskGenerate(){
+  const key = (document.getElementById('ai-api-key').value||'').trim();
+  const offerText = (document.getElementById('ai-offer-text').value||'').trim();
+  const status = document.getElementById('ai-status');
+  if(!key){ alert('Вставь API-ключ Claude (console.anthropic.com)'); return; }
+  if(!aiLanderData){ alert('Загрузи архив ленда (.zip)'); return; }
+  if(!aiOfferImage && !offerText){ alert('Добавь карточку оффера — скрин или текстом'); return; }
+  const btn = document.getElementById('ai-gen-btn');
+  btn.disabled = true; btn.textContent = '⏳ ИИ разбирает ленд...';
+  status.style.display = 'block'; status.textContent = 'Обычно 15–40 секунд...';
+  fetch('/analyze_lander_ai', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({
+      api_key: key,
+      zip_data: aiLanderData,
+      offer_image: aiOfferImage || '',
+      offer_text: offerText,
+      comment: (document.getElementById('ai-comment').value||'').trim(),
+      mark: (document.getElementById('ai-mark').value||'').trim(),
+      domain: binomTarget()==='swaticu' ? 'mybeauty.day' : 'gvita.beauty'
+    })
+  }).then(r=>r.json()).then(d=>{
+    btn.disabled = false; btn.textContent = '✨ Разобрать → таска';
+    if(d.error){ status.style.display='block'; status.textContent = '❌ ' + d.error; return; }
+    status.style.display = 'none';
+    aiCurrentTask = d.task || '';
+    document.getElementById('ai-result-text').textContent = d.task || '(пусто)';
+    document.getElementById('ai-result-wrap').style.display = 'block';
+  }).catch(e=>{
+    btn.disabled = false; btn.textContent = '✨ Разобрать → таска';
+    status.style.display='block'; status.textContent = '❌ Ошибка: ' + e;
+  });
+}
+(function(){
+  const k = localStorage.getItem('claude_api_key');
+  const el = document.getElementById('ai-api-key');
+  if(k && el) el.value = k;
+  const mk = localStorage.getItem('ai_mark');
+  const mel = document.getElementById('ai-mark');
+  if(mk && mel) mel.value = mk;
+  document.addEventListener('paste', e=>{
+    const tab = document.getElementById('tab-tasks');
+    if(!tab || !tab.classList.contains('active')) return;
+    const items = (e.clipboardData||{}).items||[];
+    for(const it of items){
+      if(it.type && it.type.startsWith('image/')){
+        const f = it.getAsFile(); const r = new FileReader();
+        r.onload = ev=>aiOfferSetImage(ev.target.result); r.readAsDataURL(f);
+        break;
+      }
+    }
+  });
+})();
 
 // ===== TASKS =====
 let tkGeoCode='', tkGeoName='', tkCurrentStep=1;
@@ -3458,14 +3980,38 @@ function tkCalcDiscount(){
   if(n&&o) document.getElementById('tk-discount').value=Math.round((1-n/o)*100)+'%';
 }
 
+// ── ArkNet naming standard: Offer-Geo-Mark-LP-Name-PriceType (or -RD-Interactive) ──
+function tkArkName(){
+  const offer=(document.getElementById('tk-offer-name-short').value||'Offer').trim().replace(/\s+/g,'');
+  const geo=(tkGeoCode||'XX').toUpperCase();
+  const mark=(document.getElementById('tk-url-marker').value||'po').trim();
+  const landType=(document.querySelector('input[name="tk-land-type"]:checked')||{}).value||'LP';
+  const num=(document.getElementById('tk-url-num').value||'').trim();
+  if(landType==='RD'){
+    const rt=(document.getElementById('tk-rd-type').value||'Interactive').trim().replace(/\s+/g,'');
+    return `${offer}-${geo}-${mark}-RD-${rt}`;
+  }
+  let nm=(document.getElementById('tk-land-name').value||'Landing').trim().replace(/\s+/g,'');
+  if(num && num!=='1') nm+=num;
+  const pt=(document.getElementById('tk-price-type').value||'full');
+  const ptSuffix=(pt==='full')?'':`-${pt}`;
+  return `${offer}-${geo}-${mark}-LP-${nm}${ptSuffix}`;
+}
 function tkUpdateUrlPreview(){
-  const name=document.getElementById('tk-offer-name-short').value||'НазваниеОфера';
-  const marker=document.getElementById('tk-url-marker').value||'po';
-  const geo=tkGeoCode||'geo';
-  const num=document.getElementById('tk-url-num').value||'1';
-  const url=`https://gvita.beauty/landers/official-${name}-${marker}-${geo}-lend${num}/`;
   const el=document.getElementById('tk-url-preview');
-  if(el) el.textContent=url;
+  if(el) el.textContent=tkArkName();
+}
+function tkLandTypeChange(){
+  const t=(document.querySelector('input[name="tk-land-type"]:checked')||{}).value||'LP';
+  document.getElementById('tk-lp-fields').style.display = t==='LP'?'block':'none';
+  document.getElementById('tk-rd-fields').style.display = t==='RD'?'block':'none';
+}
+function tkPickName(v){ document.getElementById('tk-land-name').value=v; tkUpdateUrlPreview(); }
+function tkPickRd(v){ document.getElementById('tk-rd-type').value=v; tkUpdateUrlPreview(); }
+function tkPickPrice(v,btn){
+  document.getElementById('tk-price-type').value=v;
+  document.querySelectorAll('#tk-price-type-btns .tk-scat').forEach(b=>b.classList.toggle('on', b===btn));
+  tkUpdateUrlPreview();
 }
 
 let tkSundukOn = false;
@@ -3687,7 +4233,8 @@ function tkGenerate(){
   const marker=document.getElementById('tk-url-marker').value.trim()||'po';
   const geo=tkGeoCode||'geo';
   const num=document.getElementById('tk-url-num').value.trim()||'1';
-  const finalUrl=`https://gvita.beauty/landers/official-${name}-${marker}-${geo}-lend${num}/`;
+  const domain=(document.getElementById('tk-domain').value.trim())||'gvita.beauty';
+  const finalUrl=tkArkName();
   const proklaType=document.querySelector('input[name="tk-prokla-type"]:checked').value;
   const copyUrl=document.getElementById('tk-copy-url').value.trim();
 
@@ -3766,36 +4313,42 @@ function tkGenerate(){
   // Title
   html += `<div style="font-size:15px;font-weight:800;color:var(--text);margin-bottom:16px;padding-bottom:10px;border-bottom:2px solid var(--accent1);">${lines[0]}</div>`;
 
-  // Offer info block
+  // Naming (ArkNet) — top block
   html += `<div style="background:var(--surface);border:1.5px solid var(--border);border-radius:10px;padding:12px 16px;margin-bottom:14px;line-height:2;">`;
-  if(offerUrl) html += `<div style="color:var(--accent1);font-size:12px;">${offerUrl}</div>`;
-  if(geoName) html += `<div><span style="color:var(--text3);">Гео:</span> <b>${geoName}</b></div>`;
-  if(offerFull) html += `<div><span style="color:var(--text3);">Офер:</span> <b>${offerFull}</b></div>`;
-  if(offerId) html += `<div><span style="color:var(--text3);">ID:</span> <b>${offerId}</b></div>`;
-  if(streamId) html += `<div><span style="color:var(--text3);">id потока:</span> <b>${streamId}</b></div>`;
-  if(apiToken) html += `<div><span style="color:var(--text3);">API токен:</span> <b>${apiToken}</b></div>`;
+  if(proklaType==='download'){
+    html += `<div><span style="color:var(--text3);">Скопіювати лендинг:</span> <b>архів (додано нижче)</b></div>`;
+  } else {
+    html += `<div><span style="color:var(--text3);">Скопіювати лендинг:</span> <b style="color:var(--accent1);">${copyUrl||'[посилання]'}</b></div>`;
+  }
+  html += `<div><span style="color:var(--text3);">Назвати лендинг:</span> <b style="color:var(--accent3);">${finalUrl}</b></div>`;
   html += `</div>`;
 
-  // Prokla section
-  html += `<div style="font-size:12px;font-weight:800;color:var(--text3);text-transform:uppercase;letter-spacing:.07em;margin-bottom:10px;">ПРОКЛА</div>`;
+  // Offer data block (ArkNet field labels)
+  html += `<div style="background:var(--surface);border:1.5px solid var(--border);border-radius:10px;padding:12px 16px;margin-bottom:14px;line-height:2;">`;
+  if(offerUrl) html += `<div style="color:var(--accent1);font-size:12px;">${offerUrl}</div>`;
+  html += `<div><span style="color:var(--text3);">Ваш домен:</span> <b>${domain}</b></div>`;
+  if(offerFull) html += `<div><span style="color:var(--text3);">Назва товару:</span> <b>${offerFull}</b></div>`;
+  if(offerId) html += `<div><span style="color:var(--text3);">ID в ПП товару:</span> <b>${offerId}</b></div>`;
+  if(streamId) html += `<div><span style="color:var(--text3);">Поток ID товара в ПП:</span> <b>${streamId}</b></div>`;
+  if(apiToken) html += `<div><span style="color:var(--text3);">Апі Токен:</span> <b>${apiToken}</b></div>`;
+  if(geoName) html += `<div><span style="color:var(--text3);">Країна:</span> <b>${(tkGeoCode||'').toUpperCase()} (${geoName})</b></div>`;
+  html += `</div>`;
+
+  // Edits section
+  html += `<div style="font-size:12px;font-weight:800;color:var(--text3);text-transform:uppercase;letter-spacing:.07em;margin-bottom:10px;">ПРАВКИ</div>`;
   html += `<div style="line-height:2.1;margin-bottom:14px;">`;
 
   // Fixed items
   const proklaType2 = document.querySelector('input[name="tk-prokla-type"]:checked').value;
   const copyUrl2 = document.getElementById('tk-copy-url').value.trim();
-  if(proklaType2==='download'){
-    html += `<div>1) Выкачать проклу <span style="color:var(--text3);">(ниже добавил)</span></div>`;
-  } else {
-    html += `<div>1) Скопировать проклу: <b style="color:var(--accent1);">${copyUrl2||'[ссылка]'}</b></div>`;
-  }
-  html += `<div>1. Залить на домен <b>gvita.beauty</b></div>`;
-  html += `<div>2. Удалить все редиректы и бекбаттоны</div>`;
-  html += `<div>3. Заменить ID , ID потоку , и api токен</div>`;
-  html += `<div>4. Все пути должны быть исключительно относительными!</div>`;
-  html += `<div>5. На прокле сделать камбекер</div>`;
+  html += `<div>Почистити та оптимізувати ленд від зайвих та потенційно шкідливих скриптів</div>`;
+  html += `<div>1. Залити на домен <b>${domain}</b></div>`;
+  html += `<div>2. Видалити всі зайві редіректи та бекбаттони</div>`;
+  html += `<div>3. Замінити ID товару, Поток ID та Апі Токен</div>`;
+  html += `<div>4. Всі шляхи мають бути виключно відносними!</div>`;
 
   // Variable items
-  let vidx = 6;
+  let vidx = 5;
   if(document.getElementById('tk-ch-name').checked){
     const oldN=document.getElementById('tk-old-name').value.trim();
     const newN=document.getElementById('tk-new-name-field').value.trim()||name;
@@ -3845,9 +4398,9 @@ function tkGenerate(){
   }
   html += `</div>`;
 
-  // URL
+  // Final name reminder
   html += `<div style="padding:12px 16px;background:var(--surface2);border-radius:10px;border-left:3px solid var(--accent1);">`;
-  html += `<div style="font-size:11px;color:var(--text3);font-weight:700;margin-bottom:4px;">НАЗВАТЬ КАК:</div>`;
+  html += `<div style="font-size:11px;color:var(--text3);font-weight:700;margin-bottom:4px;">НАЗВАТИ ЛЕНДИНГ:</div>`;
   html += `<div style="color:var(--accent1);font-weight:700;word-break:break-all;">${finalUrl}</div>`;
   html += `</div>`;
 
@@ -3999,15 +4552,39 @@ function tkRenderSaved(){
   header.style.display = allTasks.length ? 'block' : 'none';
   if(!tasks.length){ list.innerHTML='<div style="color:var(--text3);font-size:13px;padding:10px 0;">Ничего не найдено</div>'; return; }
 
-  // Group by offerShort
+  // AI-таски — отдельными карточками (не входят в группировку структурных тасок)
+  const aiTasks = tasks.filter(t=>t.isAI);
+  const structTasks = tasks.filter(t=>!t.isAI);
+  const aiHtml = aiTasks.map(t=>`
+    <div class="tk-saved-group">
+      <div class="tk-saved-card" style="border-left:4px solid #7c3aed;border-radius:14px;border-right:1px solid var(--border);border-top:1px solid var(--border);border-bottom:1px solid var(--border);">
+        <div class="tk-saved-card-inner">
+          ${t.thumb?`<img class="tk-saved-thumb" src="${t.thumb}">`:`<div class="tk-saved-thumb-ph">🤖</div>`}
+          <div style="flex:1;min-width:0;">
+            <div class="tk-saved-title"><span class="tk-saved-num" style="background:#ede9fe;color:#7c3aed;">AI</span>${t.offerFull||'AI-таска'}</div>
+            <div class="tk-saved-meta"><span class="tk-saved-meta-flag">${t.geoFlag||''}</span><span>${t.geoName||''}</span><span style="opacity:.5;">·</span><span>${t.savedAt||''}</span></div>
+            <div class="tk-saved-btns">
+              <button class="tk-saved-btn" onclick="aiToggleText(${t.id})">📄 Текст таски</button>
+              <button class="tk-saved-btn green" onclick="aiCopySaved(${t.id},this)">📋 Копировать</button>
+              <button class="tk-saved-btn tk-saved-btn-del" onclick="tkDeleteTask(${t.id})" style="color:#ef4444;border-color:#fca5a5;">✕ Удалить</button>
+            </div>
+          </div>
+        </div>
+        <div class="tk-binom-panel" id="tk-aitext-${t.id}">
+          <pre style="white-space:pre-wrap;font-family:monospace;font-size:12px;color:var(--text);margin:0;">${aiEsc(t.aiText)}</pre>
+        </div>
+      </div>
+    </div>`).join('');
+
+  // Group structured tasks by offerShort
   const groups = {};
-  tasks.forEach(t=>{
+  structTasks.forEach(t=>{
     const key = t.offerShort||t.offerFull||'Без названия';
     if(!groups[key]) groups[key]={tasks:[],flag:t.geoFlag||'',geo:t.geoName||''};
     groups[key].tasks.push(t);
   });
 
-  list.innerHTML = Object.entries(groups).map(([name,g])=>{
+  list.innerHTML = aiHtml + Object.entries(groups).map(([name,g])=>{
     const lastTask = g.tasks[g.tasks.length-1];
     const sundukTask = g.tasks.find(t=>t.sunduk);
     const sid = sundukTask ? 'sd-'+sundukTask.id : '';
@@ -5058,11 +5635,39 @@ function getNextBill(cost, prepay) {
   return { next, remaining: +(next - spend).toFixed(2) };
 }
 
+function binomTarget() {
+  const sel = document.getElementById('binom-target');
+  return (sel && sel.value) || localStorage.getItem('binom_target') || 'swatcam';
+}
+
+async function loadBinomTargets() {
+  const sel = document.getElementById('binom-target');
+  if (!sel) return;
+  try {
+    const r = await fetch('/binom/targets');
+    const d = await r.json();
+    const saved = localStorage.getItem('binom_target') || d.default;
+    sel.innerHTML = d.targets.map(t =>
+      `<option value="${t.id}" ${t.id===saved?'selected':''}>${t.hasKey?'🔑 ':'⚪️ '}${t.label}</option>`
+    ).join('');
+  } catch(e) {}
+}
+
+function onBinomTargetChange() {
+  localStorage.setItem('binom_target', binomTarget());
+  document.getElementById('binom-recon-wrap').innerHTML = '';
+  loadBinom();
+}
+
 async function saveBinomKey() {
   const key = document.getElementById('binom-key').value.trim();
   if (!key) return;
-  await fetch('/binom/key', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({key})});
+  const resp = await fetch('/binom/key', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({key, target: binomTarget()})});
+  const res = await resp.json();
+  if (res.ok === false) { document.getElementById('binom-status').textContent = '❌ ' + res.error; return; }
+  document.getElementById('binom-key').value = '';
   document.getElementById('binom-status').textContent = '✅ Ключ сохранён';
+  await loadBinomTargets();
   loadBinom();
 }
 
@@ -5072,9 +5677,10 @@ async function loadBinom() {
   st.textContent = '⏳ Загружаем данные из Binom...';
   wrap.innerHTML = '';
   try {
-    const [statsR, settR] = await Promise.all([fetch('/binom/stats'), fetch('/binom/settings')]);
+    const [statsR, settR] = await Promise.all([fetch('/binom/stats?target='+binomTarget()), fetch('/binom/settings')]);
     const stats = await statsR.json();
     const sett = await settR.json();
+    if (stats.info) { st.textContent = 'ℹ️ ' + stats.info; return; }
     if (stats.error) { st.textContent = '❌ ' + stats.error; return; }
 
     // Group by account name (ACC####_NAME pattern)
@@ -5130,6 +5736,32 @@ async function saveBinomSetting(acc, field, value) {
   await fetch('/binom/settings', {method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({acc, field, value})});
 }
+
+async function reconBinom() {
+  const wrap = document.getElementById('binom-recon-wrap');
+  const st = document.getElementById('binom-status');
+  st.textContent = '🔍 Разведка API (read-only)...';
+  wrap.innerHTML = '';
+  try {
+    const r = await fetch('/binom/recon?target='+binomTarget());
+    const data = await r.json();
+    if (data.error) { st.textContent = '❌ ' + data.error; return; }
+    let html = `<div style="font-size:11px;font-weight:800;color:var(--accent1);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px;">🔍 Разведка ${data.base} · только чтение, ничего не создаётся</div>`;
+    for (const row of data.results) {
+      const ok = row.status >= 200 && row.status < 300;
+      const color = ok ? '#22c55e' : row.status === 0 ? '#ef4444' : '#f59e0b';
+      html += `<details style="margin-bottom:6px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);">
+        <summary style="padding:8px 12px;cursor:pointer;font-size:13px;font-weight:700;">
+          <span style="color:${color};">●</span> <code>${row.endpoint}</code>
+          <span style="color:var(--text3);font-weight:600;">→ ${row.status}${row.count!=null?' · '+row.count+' записей':''}</span>
+        </summary>
+        <pre style="margin:0;padding:10px 12px;font-size:11px;overflow:auto;max-height:280px;white-space:pre-wrap;word-break:break-all;color:var(--text1);border-top:1px solid var(--border);">${(row.sample||'').replace(/</g,'&lt;')}</pre>
+      </details>`;
+    }
+    wrap.innerHTML = html;
+    st.textContent = '✅ Разведка завершена — зелёные (2xx) эндпоинты рабочие';
+  } catch(e) { st.textContent = '❌ ' + e.message; }
+}
 </script>
 
   <div id="tab-binom" class="tab-pane">
@@ -5137,12 +5769,15 @@ async function saveBinomSetting(acc, field, value) {
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px;">
         <h2 style="margin:0;font-size:18px;">📊 Binom — Спенд по аккаунтам</h2>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          <select id="binom-target" onchange="onBinomTargetChange()" title="Какой Бином" style="padding:7px 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text1);font-size:12px;font-weight:700;cursor:pointer;"></select>
           <input id="binom-key" type="password" placeholder="Binom API Key" style="padding:7px 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text1);font-size:12px;width:210px;">
           <button onclick="saveBinomKey()" style="padding:7px 12px;background:var(--grad1);color:#fff;border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;">Сохранить ключ</button>
           <button onclick="loadBinom()" style="padding:7px 12px;background:var(--surface2);color:var(--text1);border:1px solid var(--border);border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;">🔄 Обновить</button>
+          <button onclick="reconBinom()" style="padding:7px 12px;background:var(--surface2);color:var(--text1);border:1px solid var(--border);border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;">🔍 Разведка API</button>
         </div>
       </div>
       <div id="binom-status" style="margin-bottom:12px;font-size:13px;color:var(--text3);"></div>
+      <div id="binom-recon-wrap" style="margin-bottom:16px;"></div>
       <div id="binom-table-wrap"></div>
     </div>
   </div>
@@ -5232,13 +5867,20 @@ class Handler(BaseHTTPRequestHandler):
             self.json({'ok': True, 'users': list(USERS.keys())})
             return
         elif path == '/binom/stats':
-            binom_key_file = os.path.join(BASE_DIR, 'binom_key.txt')
-            if not os.path.exists(binom_key_file):
-                self.json({'error': 'API ключ не задан'}); return
-            bk = open(binom_key_file).read().strip()
+            qs = parse_qs(urlparse(self.path).query)
+            target = binom_norm_target(qs.get('target', [DEFAULT_BINOM])[0])
+            bk = read_binom_key(target)
+            if not bk:
+                self.json({'error': 'API ключ не задан для %s' % BINOM_TARGETS[target]['domain']}); return
+            if not bk.isascii():
+                self.json({'error': 'Сохранённый ключ содержит не-латинские символы — похоже, вставился не ключ. Введи API-ключ заново.'}); return
+            if BINOM_TARGETS[target]['version'] == 'v1':
+                # Binom V1 (arm.php) не отдаёт спенд списком — реальный cost живёт
+                # в report-API. Пока подключены только разведка и создание.
+                self.json({'info': 'Спенд по аккаунтам пока только для нового Бинома (mybeauty.day). Для старого (gvita.beauty) используй 🔍 Разведку API.'}); return
             try:
                 import requests as _breq
-                resp = _breq.get('https://swat.icu/public/api/v1/stats/campaign',
+                resp = _breq.get(BINOM_TARGETS[target]['base'] + 'stats/campaign',
                     headers={'Api-Key': bk}, timeout=15)
                 self.json(resp.json())
             except Exception as e:
@@ -5248,6 +5890,79 @@ class Handler(BaseHTTPRequestHandler):
             binom_sett_file = os.path.join(BASE_DIR, 'binom_settings.json')
             import json as _bsj
             self.json(_bsj.load(open(binom_sett_file)) if os.path.exists(binom_sett_file) else {})
+            return
+        elif path == '/binom/targets':
+            self.json({'default': DEFAULT_BINOM, 'targets': [
+                {'id': t, 'domain': cfg['domain'], 'label': cfg['label'],
+                 'version': cfg['version'], 'hasKey': bool(read_binom_key(t))}
+                for t, cfg in BINOM_TARGETS.items()
+            ]})
+            return
+        elif path == '/binom/recon':
+            # Read-only reconnaissance of the Binom V2 API: probe reference
+            # list endpoints so we can see the real IDs/names on the tracker
+            # before building any create logic. Creates NOTHING.
+            qs = parse_qs(urlparse(self.path).query)
+            target = binom_norm_target(qs.get('target', [DEFAULT_BINOM])[0])
+            bk = read_binom_key(target)
+            if not bk:
+                self.json({'error': 'API ключ не задан для %s' % BINOM_TARGETS[target]['domain']}); return
+            if not bk.isascii():
+                self.json({'error': 'Сохранённый ключ содержит не-латинские символы — похоже, вставился не ключ. Введи API-ключ заново.'}); return
+            base = BINOM_TARGETS[target]['base']
+            version = BINOM_TARGETS[target]['version']
+            out = []
+
+            def _summarize(items, extras):
+                lines = []
+                for it in items[:60]:
+                    if isinstance(it, dict):
+                        bits = [str(it.get('id', '?')), str(it.get('name', ''))]
+                        for ex in extras:
+                            if it.get(ex):
+                                bits.append(str(it[ex])[:60])
+                        lines.append('  '.join(b for b in bits if b))
+                return '\n'.join(lines) if lines else '[]'
+
+            if version == 'v1':
+                # Binom V1 (arm.php): action=entity@get_all, ключ в query
+                entities = ['offer', 'campaign']
+                for ent in entities:
+                    ep = ent + '@get_all'
+                    try:
+                        j = binom_v1_get(target, ep)
+                        if isinstance(j, list):
+                            out.append({'endpoint': ep, 'status': 200, 'count': len(j),
+                                        'sample': _summarize(j, ('url', 'group_name', 'ts_name'))})
+                        else:
+                            msg = j.get('message', '') if isinstance(j, dict) else str(j)
+                            out.append({'endpoint': ep, 'status': 0, 'count': None, 'sample': msg[:300]})
+                    except Exception as e:
+                        out.append({'endpoint': ep, 'status': 0, 'count': None, 'sample': str(e)[:300]})
+                self.json({'base': base, 'results': out})
+                return
+
+            # Binom V2 (REST): GET info/<resource>, ключ в заголовке Api-Key
+            candidates = [
+                'info/offer', 'info/campaign', 'info/landing', 'info/rotation',
+            ]
+            import requests as _breq
+            for ep in candidates:
+                try:
+                    r = _breq.get(base + ep, headers={'Api-Key': bk}, timeout=15)
+                    sample = r.text[:800]
+                    count = None
+                    try:
+                        j = r.json()
+                        if isinstance(j, list):
+                            count = len(j)
+                            sample = _summarize(j, ('country', 'group_name', 'affiliate_network'))
+                    except Exception:
+                        pass
+                    out.append({'endpoint': ep, 'status': r.status_code, 'count': count, 'sample': sample})
+                except Exception as e:
+                    out.append({'endpoint': ep, 'status': 0, 'count': None, 'sample': str(e)[:300]})
+            self.json({'base': base, 'results': out})
             return
         elif path == '/version':
             self.json({'version': VERSION}); return
@@ -5285,9 +6000,11 @@ class Handler(BaseHTTPRequestHandler):
             projects = load_projects(user)
             uploads = load_project_uploads(user)
             counts = uploads.get('counts', {})
+            seen = load_oauth_seen(user)
             result = []
             for pid, pinfo in projects.items():
-                result.append({'id': pid, 'name': pinfo.get('name',''), 'uploads_today': counts.get(pid,0), 'remaining': max(0, 100-counts.get(pid,0))})
+                result.append({'id': pid, 'name': pinfo.get('name',''), 'uploads_today': counts.get(pid,0), 'remaining': max(0, 100-counts.get(pid,0)),
+                                'seen_count': len(seen.get(pid, {}))})
             self.json({'projects': result})
         elif path.startswith('/delete_project/'):
             pid = path.split('/')[-1]
@@ -5303,15 +6020,21 @@ class Handler(BaseHTTPRequestHandler):
             channels = load_channels(user)
             today_data = load_uploads_today()
             counts = today_data.get('counts', {})
+            now = time.time()
             result = []
             for ch_id, ch_info in channels.items():
+                auth_time = ch_info.get('auth_time')
+                days_left = round(7 - (now - auth_time) / 86400, 1) if auth_time else None
                 result.append({
                     'id': ch_id,
                     'name': ch_info['name'],
                     'email': ch_info.get('email', ''),
                     'uploads_today': counts.get(ch_id, 0),
-                    'available': counts.get(ch_id, 0) < 10,
-                    'proxy': bool(ch_info.get('proxy', ''))
+                    'available': counts.get(ch_id, 0) < MAX_CH_PER_DAY,
+                    'proxy': ch_info.get('proxy', ''),
+                    'project_id': ch_info.get('project_id', ''),
+                    'last_error': ch_info.get('last_error', ''),
+                    'days_left': days_left,
                 })
             self.json({'channels': result})
         elif path == '/add_channel_status/':
@@ -5478,8 +6201,16 @@ class Handler(BaseHTTPRequestHandler):
         elif path == '/binom/key':
             length = int(self.headers.get('Content-Length', 0))
             data = json.loads(self.rfile.read(length))
-            binom_key_file = os.path.join(BASE_DIR, 'binom_key.txt')
-            open(binom_key_file, 'w').write(data.get('key','').strip())
+            target = binom_norm_target(data.get('target', DEFAULT_BINOM))
+            key = data.get('key', '').replace('\xa0', ' ').strip()
+            # Tolerate a pasted URL/fragment like "&api_key=XXX" or "?apiKey=XXX"
+            import re as _rek
+            _m = _rek.search(r'api_?key=([^&\s]+)', key, _rek.I)
+            if _m:
+                key = _m.group(1).strip()
+            if key and not key.isascii():
+                self.json({'ok': False, 'error': 'Похоже, это не API-ключ (есть кириллица/пробелы). Скопируй ключ из Binom заново — там только латиница и цифры.'}); return
+            open(binom_key_path(target), 'w').write(key)
             self.json({'ok': True}); return
         elif path == '/binom/settings':
             length = int(self.headers.get('Content-Length', 0))
@@ -5577,6 +6308,229 @@ class Handler(BaseHTTPRequestHandler):
             with open(fpath, 'wb') as f:
                 f.write(fdata if isinstance(fdata, bytes) else fdata.encode())
             self.json({'path': fpath})
+        elif path == '/gen_static':
+            import base64 as _b64, io as _sio, random as _srnd
+            from PIL import Image as _Img, ImageEnhance as _IE, ImageFilter as _IF, ImageOps as _IO
+            try:
+                import numpy as _snp
+            except Exception:
+                _snp = None
+            length = int(self.headers.get('Content-Length', 0))
+            try:
+                params = json.loads(self.rfile.read(length))
+            except Exception as e:
+                self.json({'error': f'Плохой запрос: {e}'}); return
+            try:
+                raw_b64 = params.get('img_data', '')
+                if ',' in raw_b64:
+                    raw_b64 = raw_b64.split(',', 1)[1]
+                src = _Img.open(_sio.BytesIO(_b64.b64decode(raw_b64)))
+                src = src.convert('RGB')
+            except Exception as e:
+                self.json({'error': f'Не удалось прочитать картинку: {e}'}); return
+
+            SIZES = {'9:16': (1080, 1920), '1:1': (1080, 1080), '16:9': (1920, 1080)}
+            formats = [f for f in params.get('formats', ['9:16', '1:1', '16:9']) if f in SIZES]
+            if not formats:
+                self.json({'error': 'Не выбран ни один формат'}); return
+            try:
+                variants = max(1, min(10, int(params.get('variants', 1))))
+            except Exception:
+                variants = 1
+            fit = params.get('fit', 'stretch')
+            bg_mode = params.get('bg', 'blur')
+            do_noise = bool(params.get('noise', True)) and _snp is not None
+            do_flip = bool(params.get('flip', False))
+
+            def make_variant(base, tw, th):
+                im = base
+                if do_flip:
+                    im = _IO.mirror(im)
+                sw, sh = im.size
+                ang = _srnd.uniform(-0.6, 0.6)
+                if fit == 'stretch':
+                    # Растянуть на весь формат — ничего не теряется, нет полей (пропорции искажаются)
+                    rx, ry = _srnd.uniform(0.985, 1.015), _srnd.uniform(0.985, 1.015)
+                    tmp = im.resize((max(1, int(tw * rx)), max(1, int(th * ry))), _Img.LANCZOS)
+                    out = tmp.resize((tw, th), _Img.LANCZOS)
+                elif fit == 'contain':
+                    # Вписать целиком — ничего не обрезаем, по краям поля (фон)
+                    if bg_mode == 'blur':
+                        scale_bg = max(tw / sw, th / sh) * 1.12
+                        bw, bh = max(1, int(sw * scale_bg)), max(1, int(sh * scale_bg))
+                        canvas = im.resize((bw, bh), _Img.LANCZOS)
+                        bx, by = (bw - tw) // 2, (bh - th) // 2
+                        canvas = canvas.crop((bx, by, bx + tw, by + th)).filter(_IF.GaussianBlur(_srnd.randint(22, 30)))
+                    else:
+                        fill = (255, 255, 255) if bg_mode == 'white' else (0, 0, 0)
+                        canvas = _Img.new('RGB', (tw, th), fill)
+                    # Картинка целиком (min-fit), лёгкая вариация масштаба для уникальности
+                    scale_fg = min(tw / sw, th / sh) * _srnd.uniform(0.93, 0.99)
+                    fw, fh = max(1, int(sw * scale_fg)), max(1, int(sh * scale_fg))
+                    fg = im.resize((fw, fh), _Img.LANCZOS).convert('RGBA').rotate(ang, expand=True, resample=_Img.BICUBIC)
+                    # Строго по центру — уникальность дают масштаб, поворот, шум и перекодировка
+                    ox = (tw - fg.width) // 2
+                    oy = (th - fg.height) // 2
+                    canvas.paste(fg, (ox, oy), fg)
+                    out = canvas
+                else:
+                    # Заполнить весь кадр с минимальной обрезкой (без поворота — чтобы не терять края)
+                    zoom = _srnd.uniform(1.0, 1.04)
+                    scale = max(tw / sw, th / sh) * zoom
+                    rw, rh = max(tw, int(sw * scale)), max(th, int(sh * scale))
+                    work = im.resize((rw, rh), _Img.LANCZOS)
+                    maxx, maxy = rw - tw, rh - th
+                    jx = _srnd.randint(-min(10, maxx // 2), min(10, maxx // 2)) if maxx > 2 else 0
+                    jy = _srnd.randint(-min(10, maxy // 2), min(10, maxy // 2)) if maxy > 2 else 0
+                    cx = max(0, min(maxx // 2 + jx, maxx)) if maxx > 0 else 0
+                    cy = max(0, min(maxy // 2 + jy, maxy)) if maxy > 0 else 0
+                    out = work.crop((cx, cy, cx + tw, cy + th))
+                out = _IE.Brightness(out).enhance(_srnd.uniform(0.98, 1.02))
+                out = _IE.Contrast(out).enhance(_srnd.uniform(0.98, 1.02))
+                out = _IE.Color(out).enhance(_srnd.uniform(0.97, 1.03))
+                out = _IE.Sharpness(out).enhance(_srnd.uniform(0.90, 1.10))
+                if do_noise:
+                    arr = _snp.asarray(out).astype(_snp.float32)
+                    arr = _snp.clip(arr + _snp.random.normal(0, 2.2, arr.shape), 0, 255).astype(_snp.uint8)
+                    out = _Img.fromarray(arr, 'RGB')
+                return out
+
+            results = []
+            try:
+                for fmt in formats:
+                    tw, th = SIZES[fmt]
+                    for v in range(variants):
+                        im = make_variant(src, tw, th)
+                        buf = _sio.BytesIO()
+                        im.save(buf, format='JPEG', quality=_srnd.randint(88, 95), optimize=True)
+                        results.append({
+                            'format': fmt, 'variant': v + 1, 'w': tw, 'h': th,
+                            'data': 'data:image/jpeg;base64,' + _b64.b64encode(buf.getvalue()).decode()
+                        })
+            except Exception as e:
+                self.json({'error': f'Ошибка обработки: {e}'}); return
+            self.json({'results': results})
+        elif path == '/analyze_lander_ai':
+            import zipfile, base64 as _b64, re as _re2, io as _io2, tempfile, shutil as _sh2
+            try:
+                import requests as _rq
+            except Exception:
+                self.json({'error': 'На сервере не установлен requests (pip install requests)'}); return
+            length = int(self.headers.get('Content-Length', 0))
+            try:
+                params = json.loads(self.rfile.read(length))
+            except Exception as e:
+                self.json({'error': f'Плохой запрос: {e}'}); return
+            api_key = (params.get('api_key') or '').strip()
+            if not api_key:
+                self.json({'error': 'Не указан API-ключ Claude'}); return
+            # 1) извлечь текст ленда из архива
+            try:
+                zb64 = params.get('zip_data', '')
+                if ',' in zb64:
+                    zb64 = zb64.split(',', 1)[1]
+                zbytes = _b64.b64decode(zb64)
+                tmp = tempfile.mkdtemp()
+                with zipfile.ZipFile(_io2.BytesIO(zbytes)) as zf:
+                    zf.extractall(tmp)
+                index_html = None
+                for root, dirs, files in os.walk(tmp):
+                    for fn in files:
+                        if fn.lower() == 'index.html':
+                            index_html = os.path.join(root, fn); break
+                    if index_html: break
+                if not index_html:
+                    _sh2.rmtree(tmp, ignore_errors=True)
+                    self.json({'error': 'В архиве не найден index.html'}); return
+                with open(index_html, 'r', encoding='utf-8', errors='ignore') as f:
+                    html = f.read()
+                _sh2.rmtree(tmp, ignore_errors=True)
+            except Exception as e:
+                self.json({'error': f'Не удалось прочитать архив: {e}'}); return
+            txt = _re2.sub(r'<(script|style)[^>]*>.*?</\1>', ' ', html, flags=_re2.S | _re2.I)
+            txt = _re2.sub(r'<[^>]+>', ' ', txt).replace('&nbsp;', ' ')
+            txt = _re2.sub(r'\s+', ' ', txt).strip()[:24000]
+            # 2) собрать запрос к Claude
+            offer_domain = (params.get('domain') or 'gvita.beauty').strip()
+            buyer_mark = (params.get('mark') or '').strip()
+            system = (
+                "Ти — асистент медіабаєра в команді ArkNet. Тобі дають ТЕКСТ лендінга (прокла) і КАРТКУ ОФФЕРА. "
+                "Порівняй їх і напиши ГОТОВЕ ТЗ для технічного спеціаліста УКРАЇНСЬКОЮ мовою за стандартом ArkNet. "
+                "Ти нічого не редагуєш сам, тільки описуєш правки. Тех досвідчений — зайвого не пиши.\n\n"
+                "ЖОРСТКІ ПРАВИЛА (порушувати не можна):\n"
+                "- Пиши МАКСИМАЛЬНО коротко: тільки конкретні правки, без вступів і пояснень.\n"
+                "- НЕ пиши обмеження/комплаєнс оффера (про лікарів, держсимволіку, що можна/не можна) — це НЕ входить у таску.\n"
+                "- НЕ пиши нагадування «не чіпати зарплати/статистику/дати/лічильники/відсотки» — тех це знає, просто не згадуй ці числа.\n"
+                "- Де пропонуєш заміну — давай ОДРАЗУ конкретне значення, а не «заміни на щось місцеве».\n"
+                "- НЕ використовуй стрілки «→». Кожну заміну формулюй так: Замінити \"старе\" НА \"нове\" (у лапках).\n"
+                "- Пиши тільки ті правки, які реально потрібні САМЕ цьому ленду під ЦЕЙ оффер.\n"
+                "- Якщо у запиті є «ВКАЗІВКИ БАЄРА» — вони ПРІОРИТЕТНІШІ за загальні правила (напр. баєр задав знижку 80% замість 50% чи іншу ціну — бери його значення).\n\n"
+                "ЩО ЗНАЙТИ І ВКАЗАТИ:\n"
+                "- Ціна: акційна ціна товару = ціна оффера. Стару (закреслену) ціну рахуй як акційна × 2 (знижка завжди рівно 50%), у валюті оффера — НЕ перераховуй стару з вихідної валюти ленду. Приклад: акційна 199 грн, отже стара 398 грн. Не плутай ціну товару з іншими числами.\n"
+                "- Назва товару → на назву з оффера (по всьому тексту).\n"
+                "- Фото товару → на фото оффера (і в основному блоці, і у відгуках/коментарях, якщо є).\n"
+                "- Маска/валідація телефону → формат під гео оффера (з картки).\n"
+                "- Мова: якщо мова ленду НЕ збігається з гео оффера — «Перекласти ленд з {мова ленду} на {мова гео} за допомогою AI»; якщо збігається — не згадуй.\n"
+                "- Топоніми (міста/села/області) не з країни оффера → конкретні реальні міста/регіони країни оффера.\n"
+                "- Ім'я лікаря/експерта не з гео оффера → одним рядком «Замінити ім'я лікаря на місцеве для {гео}». Конкретне ім'я НЕ вигадуй — його підставить тех.\n"
+                "- ID товару / потік / API-токен: якщо є в картці — впиши; якщо ні — прочерк «—», баєр впише вручну. НЕ вигадуй ці значення.\n\n"
+                "ФОРМАТ ВІДПОВІДІ (строго так, українською, без зайвих рядків):\n"
+                "Скопіювати лендинг - архів\n"
+                "Назвати лендинг - [Оффер-Гео(ISO2)-Мітка-LP-НазваЛенду-ТипЦіни за стандартом ArkNet. "
+                + (("Мітка баєра: " + buyer_mark + ". ") if buyer_mark else "Мітку візьми з картки/коментаря, якщо нема — постав [мітка]. ")
+                + "НазваЛенду — за тематикою ленду (напр. Blog, MedNewsVSL, News). ТипЦіни low/free; якщо full — хвіст не пишемо]\n\n"
+                "Назва товару - [коротка назва з оффера]\n"
+                "ID в ПП товару - [з картки або —]\n"
+                "Поток ID товара в ПП - [з картки або —]\n"
+                "Апі Токен - [з картки або —]\n"
+                "Країна - [ISO2]\n\n"
+                "Почистити та оптимізувати ленд від зайвих та потенційно шкідливих скриптів. Залити на домен " + offer_domain + ", шляхи відносні.\n"
+                "Внести наступні правки:\n"
+                "1. Замінити ...\n2. ...\n"
+                "(тільки реальні правки під цей ленд; кожна — один рядок, конкретні значення, формат Замінити \"X\" НА \"Y\")"
+            )
+            content = []
+            offer_img = params.get('offer_image', '') or ''
+            mimg = _re2.match(r'data:(image/[\w.+-]+);base64,(.+)', offer_img, _re2.S)
+            if mimg:
+                content.append({"type": "image", "source": {"type": "base64", "media_type": mimg.group(1), "data": mimg.group(2)}})
+            offer_text = (params.get('offer_text') or '').strip()
+            comment = (params.get('comment') or '').strip()
+            user_text = ""
+            if comment:
+                user_text += ("ВКАЗІВКИ БАЄРА (ПРІОРИТЕТ — враховуй у першу чергу, вони важливіші за загальні правила): "
+                              + comment + "\n\n")
+            user_text += ("КАРТОЧКА ОФФЕРА:\n" + (offer_text if offer_text else "(см. изображение выше)")
+                          + "\n\nТЕКСТ ЛЕНДА (прокла):\n" + txt)
+            content.append({"type": "text", "text": user_text})
+            body = {
+                "model": "claude-opus-4-8",
+                "max_tokens": 8000,
+                "thinking": {"type": "adaptive"},
+                "system": system,
+                "messages": [{"role": "user", "content": content}],
+            }
+            try:
+                r = _rq.post("https://api.anthropic.com/v1/messages",
+                             headers={"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+                             json=body, timeout=180)
+            except Exception as e:
+                self.json({'error': f'Сеть: {e}'}); return
+            if r.status_code != 200:
+                detail = ''
+                try:
+                    detail = r.json().get('error', {}).get('message', '')
+                except Exception:
+                    detail = (r.text or '')[:200]
+                friendly = {401: 'Неверный API-ключ', 403: 'Нет доступа к модели', 400: 'Ошибка запроса',
+                            429: 'Лимит запросов — подожди минуту', 529: 'Claude перегружен — повтори'}.get(r.status_code, f'HTTP {r.status_code}')
+                self.json({'error': f'{friendly}. {detail}'}); return
+            try:
+                data = r.json()
+                task = ''.join(b.get('text', '') for b in data.get('content', []) if b.get('type') == 'text').strip()
+            except Exception as e:
+                self.json({'error': f'Не удалось разобрать ответ: {e}'}); return
+            self.json({'task': task or '(модель вернула пустой ответ)'})
         elif path == '/analyze_prokla':
             import zipfile, base64, re as _re, tempfile, shutil as _shutil2
             length = int(self.headers.get('Content-Length',0))
