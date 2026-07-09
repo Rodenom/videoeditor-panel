@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.15"
+VERSION = "5.16"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -728,6 +728,7 @@ def add_channel_auth(job_id, user='pavel', is_local=True, proxy='', login_hint='
         SCOPES = [
             'https://www.googleapis.com/auth/youtube.upload',
             'https://www.googleapis.com/auth/youtube.readonly',
+            'https://www.googleapis.com/auth/userinfo.email',
         ]
         UPLOAD_JOBS[job_id]['status'] = 'running'
 
@@ -772,6 +773,7 @@ def _finish_channel_auth(job_id, creds, user, proxy='', secret_file=None):
     ch_id = None
     ch_name = None
     ch_email = None
+    ch_name_error = ''
     try:
         ch_resp = yt.channels().list(part='snippet', mine=True).execute()
         if ch_resp.get('items'):
@@ -779,7 +781,11 @@ def _finish_channel_auth(job_id, creds, user, proxy='', secret_file=None):
             ch_id = ch['id']
             ch_name = ch['snippet']['title']
             UPLOAD_JOBS[job_id]['log'].append(f'📺 Канал: {ch_name}')
+        else:
+            ch_name_error = 'На этом аккаунте не найден YouTube-канал (создай канал на youtube.com, потом переавторизуй)'
+            UPLOAD_JOBS[job_id]['log'].append(f'⚠️ {ch_name_error}')
     except Exception as e:
+        ch_name_error = str(e)[:200]
         UPLOAD_JOBS[job_id]['log'].append(f'⚠️ Не удалось получить имя канала: {e}')
     # Always try to get email for identification
     try:
@@ -804,6 +810,8 @@ def _finish_channel_auth(job_id, creds, user, proxy='', secret_file=None):
     proj_id = get_proj_id_for_secret(secret_file, user)
     channels = load_channels(user)
     channels[ch_id] = {'name': ch_name, 'email': ch_email or '', 'token_file': token_file, 'project_id': proj_id, 'proxy': proxy, 'auth_time': time.time()}
+    if ch_name_error:
+        channels[ch_id]['name_lookup_error'] = ch_name_error
     save_channels(user, channels)
     record_oauth_seen(user, proj_id, ch_id, ch_email or '')
     if proxy:
@@ -2994,6 +3002,7 @@ async function loadChannels(){
     window.__chCache[ch.id] = ch;
     const color = ch.available ? '#16a34a' : '#dc2626';
     const errLabel = ch.last_error ? `<span style="font-size:10px;background:#fee2e2;color:#dc2626;border-radius:4px;padding:1px 6px;margin-left:6px;">❌ ${ch.last_error}</span>` : '';
+    const nameWarnLabel = ch.name_lookup_error ? `<span title="${ch.name_lookup_error.replace(/"/g,'&quot;')}" style="font-size:10px;background:#fef3c7;color:#92400e;border-radius:4px;padding:1px 6px;margin-left:6px;">⚠️ имя/канал не определён</span>` : '';
     const status = ch.available ? `${ch.uploads_today}/15 сегодня` : '❌ Лимит исчерпан';
     const proxyLabel = ch.proxy ? `<span style="font-size:10px;background:#d1fae5;color:#065f46;border-radius:4px;padding:1px 6px;margin-left:6px;">🔒 прокси</span>` : '';
     const projName = ch.project_id ? (projects.find(p=>p.id===ch.project_id)||{name:'?'}).name : null;
@@ -3011,7 +3020,7 @@ async function loadChannels(){
     const reauthBtn = `<button onclick="reauthChannel('${ch.id}')" style="padding:4px 10px;font-size:11px;border:1px solid ${needsReauth?'#f59e0b':'var(--border,#e5e5e5)'};border-radius:6px;background:${needsReauth?'#fffbeb':'transparent'};color:${needsReauth?'#b45309':'#666'};cursor:pointer;margin-right:6px;">🔄 Переавторизовать</button>`;
     const html = `<div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:var(--surface2,#f9f9f9);border-radius:8px;border:1px solid var(--border,#e5e5e5);">
       <div>
-        <div style="font-size:13px;font-weight:600;">📺 ${ch.name}${proxyLabel}${projLabel}${errLabel}</div>
+        <div style="font-size:13px;font-weight:600;">📺 ${ch.name}${proxyLabel}${projLabel}${errLabel}${nameWarnLabel}</div>
         ${ch.email ? `<div style="font-size:10px;color:#888;margin-top:1px;">${ch.email}</div>` : ''}
         <div style="font-size:11px;color:${color};margin-top:2px;">${status}</div>
         ${daysLabel}
@@ -6056,6 +6065,7 @@ class Handler(BaseHTTPRequestHandler):
                     'project_id': ch_info.get('project_id', ''),
                     'last_error': ch_info.get('last_error', ''),
                     'days_left': days_left,
+                    'name_lookup_error': ch_info.get('name_lookup_error', ''),
                 })
             self.json({'channels': result})
         elif path == '/add_channel_status/':
