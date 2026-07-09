@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.14"
+VERSION = "5.15"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -5612,8 +5612,8 @@ async function checkUpdate(){
       btn.textContent = `✓ Версия ${d.version} — актуальная`;
       setTimeout(()=>{btn.textContent='🔄 Обновить';btn.disabled=false;}, 3000);
     } else if(d.status === 'updated'){
-      btn.textContent = `✅ Оновлено ${d.old} → ${d.new}! Закрий термінал і запусти знову`;
-      
+      btn.textContent = `✅ ${d.old} → ${d.new}! Перезапускаем сервер...`;
+      reloadAfterUpdate(btn);
     } else {
       btn.textContent = '❌ Ошибка';
       btn.disabled = false;
