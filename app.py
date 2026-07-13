@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.19"
+VERSION = "5.20"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -1558,7 +1558,7 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
     <button class="tab-btn" onclick="switchTab('ads')">📢 Заголовки и описания</button>
     <button class="tab-btn" onclick="switchTab('upload')">📤 Загрузить на YouTube</button>
     <button class="tab-btn" onclick="switchTab('tasks')">📋 Таски</button>
-    <button class="tab-btn" onclick="switchTab('binom')">📊 Binom</button>
+    <button class="tab-btn" onclick="switchTab('binom')" style="display:none;">📊 Binom</button>
     <button class="tab-btn" onclick="switchTab('static')">🖼️ Статика</button>
     <div style="flex:1;"></div>
     <button onclick="addChannel()" style="padding:7px 14px;font-size:12px;font-weight:700;border:1.5px solid var(--accent1);border-radius:10px;background:transparent;cursor:pointer;color:var(--accent1);white-space:nowrap;">📺 + Канал</button>
