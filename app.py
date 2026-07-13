@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.16"
+VERSION = "5.17"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -7128,6 +7128,51 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+def ensure_deps():
+    """Self-heal: панель сама ставит недостающие Python-библиотеки при запуске,
+    чтобы байеру НИКОГДА не пришлось открывать терминал.
+    Ставим через sys.executable (не абстрактный 'python3') — гарантия, что
+    пакеты попадут именно в тот интерпретатор, которым запущена панель.
+    Перебираем флаги, потому что на part систем pip блокирует установку
+    (PEP 668 externally-managed) без --break-system-packages."""
+    import importlib
+    required = [
+        ('google.auth', 'google-auth'),
+        ('google_auth_oauthlib', 'google-auth-oauthlib'),
+        ('googleapiclient', 'google-api-python-client'),
+        ('httplib2', 'httplib2'),
+        ('socks', 'PySocks'),
+        ('requests', 'requests'),
+        ('anthropic', 'anthropic'),
+    ]
+    def missing_pkgs():
+        importlib.invalidate_caches()
+        out = []
+        for mod, pkg in required:
+            try:
+                importlib.import_module(mod)
+            except Exception:
+                out.append(pkg)
+        return out
+    missing = missing_pkgs()
+    if not missing:
+        return
+    print(f"► Не хватает библиотек: {' '.join(missing)}")
+    print("  Ставлю сама, разово (~минута). Терминал открывать НЕ нужно...")
+    for flags in ([], ['--break-system-packages'], ['--user'], ['--break-system-packages', '--user']):
+        cmd = [sys.executable, '-m', 'pip', 'install', '--quiet', '--disable-pip-version-check'] + flags + missing
+        try:
+            subprocess.run(cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+        missing = missing_pkgs()
+        if not missing:
+            print("✓ Библиотеки установлены — запускаю панель")
+            return
+    print(f"⚠ Не смог поставить автоматически: {' '.join(missing)}")
+    print(f"  Тогда выполни вручную: {sys.executable} -m pip install --break-system-packages {' '.join(missing)}")
+
+
 if __name__ == '__main__':
     # Auto-update install_mac.command to fix old versions
     try:
@@ -7163,6 +7208,8 @@ if __name__ == '__main__':
                 sys.exit(42)
     except Exception as _e2:
         pass
+    # Self-heal deps so buyers never get "No module named ..." in the panel
+    ensure_deps()
     if not shutil.which('ffmpeg'):
         print("❌ FFmpeg не найден. Установи: brew install ffmpeg-full")
         sys.exit(1)
