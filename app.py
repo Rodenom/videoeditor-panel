@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.18"
+VERSION = "5.19"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -899,7 +899,30 @@ def upload_to_youtube(upload_job_id, files, title, description, privacy, channel
         UPLOAD_JOBS[upload_job_id]['status'] = 'error'
         UPLOAD_JOBS[upload_job_id]['log'].append(f'❌ Ошибка: {str(e)}')
 
-def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user):
+def vary_text(base, idx, is_title=True):
+    """Slightly vary the buyer's own title/description per video for YouTube
+    uniqueization, KEEPING their wording intact. Adds tiny natural leading/
+    trailing decorations (emoji/punctuation). Every idx yields a distinct
+    result; past the natural-combo count it appends an invisible marker so no
+    two copies are ever byte-for-byte identical."""
+    base = (base or '').strip()
+    if not base:
+        return base
+    if is_title:
+        trailing = ['', ' ✨', '!', ' 🙂', ' 👀', ' 💯', ' 🔥', ' ✅', ' 😅', ' ✌️', ' 💪', ' 🙌']
+        leading  = ['', '✨ ', '🔥 ', '👉 ', '💭 ', '😅 ', '👀 ']
+    else:
+        trailing = ['', ' ✨', ' 🙂', ' 👀', ' 💯', ' 🔥', ' ✅', ' 😅', ' 🙌', ' 💪', ' 👇', ' 🎯']
+        leading  = ['', '✨ ', '👉 ', '💭 ', '🔥 ']
+    T, L = len(trailing), len(leading)
+    combos = T * L
+    out = f"{leading[(idx // T) % L]}{base}{trailing[idx % T]}"
+    if idx >= combos:  # extreme volumes — keep uniqueness invisibly
+        out += '\u200b' * (idx - combos + 1)
+    return out
+
+
+def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user, custom_title='', custom_desc=''):
     from googleapiclient.http import MediaFileUpload
     job = MASS_UPLOAD_JOBS[job_id]
     job['status'] = 'running'
@@ -942,6 +965,10 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user):
         failed_channels = set()
         sets_done = 0
         ch_index = 0
+        vid_idx = 0  # сквозной индекс видео по всем аккаунтам×форматам — для уникализации
+        use_custom = bool((custom_title or '').strip())
+        if use_custom:
+            log.append('✍️ Свой текст: заголовок/описание байера + лёгкая уникализация')
         while sets_done < n_sets:
             # cycle through channels, skip failed ones
             if len(failed_channels) >= len(ordered):
@@ -1063,8 +1090,13 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user):
 
             for fmt_name, _, label in formats:
                 fpath = converted[fmt_name]
-                fmt_title, fmt_desc = _gen_ai_title(log)
-                log.append(f'  🤖 {fmt_name}: {fmt_title}')
+                if use_custom:
+                    fmt_title = vary_text(custom_title, vid_idx, True)
+                    fmt_desc = vary_text(custom_desc, vid_idx, False)
+                else:
+                    fmt_title, fmt_desc = _gen_ai_title(log)
+                vid_idx += 1
+                log.append(f'  {"✍️" if use_custom else "🤖"} {fmt_name}: {fmt_title}')
                 log.append(f'  ⏳ Загружаем {fmt_name}...')
                 try:
                     body = {
@@ -1126,7 +1158,7 @@ def friendly_upload_error(err):
     return 'ошибка: ' + s[:120]
 
 
-def ready_upload_to_youtube(job_id, ready_files, n_sets, category, privacy, user):
+def ready_upload_to_youtube(job_id, ready_files, n_sets, category, privacy, user, custom_title='', custom_desc=''):
     """Upload already-converted videos directly to YouTube without re-encoding."""
     from googleapiclient.http import MediaFileUpload
     job = MASS_UPLOAD_JOBS[job_id]
@@ -1143,6 +1175,10 @@ def ready_upload_to_youtube(job_id, ready_files, n_sets, category, privacy, user
         failed_r = set()
         sets_done_r = 0
         ch_index_r = 0
+        vid_idx_r = 0  # сквозной индекс видео — для уникализации своего текста
+        use_custom_r = bool((custom_title or '').strip())
+        if use_custom_r:
+            log.append('✍️ Свой текст: заголовок/описание байера + лёгкая уникализация')
         while sets_done_r < n_sets:
             if len(failed_r) >= len(ordered_r):
                 log.append('⚠ Все каналы недоступны, выполнено: ' + str(sets_done_r) + '/' + str(n_sets))
@@ -1191,7 +1227,7 @@ def ready_upload_to_youtube(job_id, ready_files, n_sets, category, privacy, user
                         "DESCRIPTION: [description here]"
                     )
                     _key2 = get_anthropic_key()
-                    if _key2:
+                    if _key2 and not use_custom_r:
                         import requests as _req_lib
                         _sv_h = os.environ.pop('HTTPS_PROXY', None); _sv_hh = os.environ.pop('HTTP_PROXY', None)
                         _resp2 = _req_lib.post('https://api.anthropic.com/v1/messages',
@@ -1212,9 +1248,15 @@ def ready_upload_to_youtube(job_id, ready_files, n_sets, category, privacy, user
                 for rf in ready_files:
                     fpath = rf['path']
                     fmt = rf['fmt']
-                    log.append(f'  ⏳ Загружаем {fmt}...')
+                    if use_custom_r:
+                        up_title = vary_text(custom_title, vid_idx_r, True)
+                        up_desc = vary_text(custom_desc, vid_idx_r, False)
+                    else:
+                        up_title, up_desc = title_ai, desc_ai
+                    vid_idx_r += 1
+                    log.append(f'  ⏳ Загружаем {fmt}... ({up_title})')
                     body = {
-                        'snippet': {'title': title_ai, 'description': desc_ai, 'tags': [], 'categoryId': '22'},
+                        'snippet': {'title': up_title, 'description': up_desc, 'tags': [], 'categoryId': '22'},
                         'status': {'privacyStatus': privacy}
                     }
                     media = MediaFileUpload(fpath, mimetype='video/mp4', resumable=True, chunksize=1024*1024*5)
@@ -1907,6 +1949,14 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
       <div style="display:flex;gap:8px;margin-bottom:18px;">
         <button id="mode-auto-btn" onclick="setUploadMode('auto')" style="flex:1;padding:10px;border-radius:10px;border:2px solid #4f46e5;background:#4f46e5;color:#fff;font-weight:700;font-size:13px;cursor:pointer;">⚡ Авто (конвертация)</button>
         <button id="mode-ready-btn" onclick="setUploadMode('ready')" style="flex:1;padding:10px;border-radius:10px;border:2px solid #d1d5db;background:var(--surface2);color:var(--text3);font-weight:700;font-size:13px;cursor:pointer;">📁 Готовые видео</button>
+      </div>
+
+      <!-- Свой текст (работает в обоих режимах) -->
+      <div style="border:1.5px solid var(--border);border-radius:12px;padding:12px 14px;margin-bottom:18px;background:var(--surface2);">
+        <div style="font-size:13px;font-weight:700;color:var(--text);margin-bottom:4px;">✍️ Свой заголовок и описание <span style="font-weight:400;color:var(--text3);">— по желанию</span></div>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:10px;">Впиши свой текст — панель разложит его на все видео (аккаунты × 3 формата) с крошечными отличиями, чтобы YouTube не видел одинаковые. Оставишь пустым — заголовки сгенерит ИИ, как раньше.</div>
+        <input id="custom-up-title" placeholder="Свой заголовок (напр. I Tried Waking Up at 5AM for a Week)" maxlength="90" style="width:100%;padding:9px 11px;border-radius:8px;border:1.5px solid var(--border);background:var(--surface);color:var(--text);font-size:13px;outline:none;margin-bottom:8px;box-sizing:border-box;" oninput="localStorage.setItem('custom_up_title',this.value)">
+        <textarea id="custom-up-desc" placeholder="Своё описание (2-3 предложения)" rows="2" style="width:100%;padding:9px 11px;border-radius:8px;border:1.5px solid var(--border);background:var(--surface);color:var(--text);font-size:13px;outline:none;box-sizing:border-box;resize:vertical;" oninput="localStorage.setItem('custom_up_desc',this.value)"></textarea>
       </div>
 
       <!-- AUTO MODE -->
@@ -3166,6 +3216,9 @@ const ytObserver = new MutationObserver(() => {
 document.addEventListener('DOMContentLoaded', () => {
   const yt = document.getElementById('yt-section');
   if(yt) ytObserver.observe(yt, {attributes:true, attributeFilter:['style']});
+  const ct = document.getElementById('custom-up-title'); const cd = document.getElementById('custom-up-desc');
+  if(ct) ct.value = localStorage.getItem('custom_up_title') || '';
+  if(cd) cd.value = localStorage.getItem('custom_up_desc') || '';
 });
 
 let uploadCat = '';
@@ -5347,7 +5400,9 @@ async function startReadyUpload(){
   document.getElementById('ready-result').style.display = 'none';
   document.getElementById('ready-run-btn').disabled = true;
   const res = await fetch('/ready_upload',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({files, n_sets:n, category:readyCat, privacy:readyPrivacy})});
+    body:JSON.stringify({files, n_sets:n, category:readyCat, privacy:readyPrivacy,
+      custom_title:(document.getElementById('custom-up-title').value||'').trim(),
+      custom_desc:(document.getElementById('custom-up-desc').value||'').trim()})});
   const data = await res.json();
   readyJobId = data.job_id;
   readyPollTimer = setInterval(()=>pollReadyJob(), 1500);
@@ -5438,8 +5493,10 @@ async function startAutoUpload(){
   document.getElementById('auto-result').style.display = 'none';
   document.getElementById('auto-result-body').innerHTML = '';
 
+  const _ctitle = (document.getElementById('custom-up-title').value||'').trim() || (document.getElementById('auto-ai-title').textContent||'').trim();
+  const _cdesc = (document.getElementById('custom-up-desc').value||'').trim() || (document.getElementById('auto-ai-desc').textContent||'').trim();
   const res = await fetch('/auto_upload',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({src_video:autoVideoPath, n_sets:n, category:autoCat, privacy:autoPrivacy, custom_title:document.getElementById('auto-ai-title').textContent||'', custom_desc:document.getElementById('auto-ai-desc').textContent||''})});
+    body:JSON.stringify({src_video:autoVideoPath, n_sets:n, category:autoCat, privacy:autoPrivacy, custom_title:_ctitle, custom_desc:_cdesc})});
   const data = await res.json();
   autoJobId = data.job_id;
 
@@ -7110,7 +7167,8 @@ class Handler(BaseHTTPRequestHandler):
             MASS_UPLOAD_JOBS[job_id] = {'status':'pending','log':[],'sets':[],'total':0,'done':0}
             t = threading.Thread(target=auto_convert_and_upload, args=(
                 job_id, params['src_video'], params.get('n_sets', 1),
-                params.get('category','Видео'), params.get('privacy','unlisted'), user
+                params.get('category','Видео'), params.get('privacy','unlisted'), user,
+                params.get('custom_title',''), params.get('custom_desc','')
             ), daemon=True)
             t.start()
             self.json({'job_id': job_id})
@@ -7121,7 +7179,8 @@ class Handler(BaseHTTPRequestHandler):
             MASS_UPLOAD_JOBS[job_id] = {'status':'pending','log':[],'sets':[],'total':0,'done':0}
             t = threading.Thread(target=ready_upload_to_youtube, args=(
                 job_id, params['files'], params['n_sets'],
-                params.get('category',''), params.get('privacy','unlisted'), user
+                params.get('category',''), params.get('privacy','unlisted'), user,
+                params.get('custom_title',''), params.get('custom_desc','')
             ), daemon=True)
             t.start()
             self.json({'job_id': job_id})
