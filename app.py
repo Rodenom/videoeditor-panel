@@ -3,12 +3,20 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.17"
+VERSION = "5.18"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from urllib.parse import parse_qs, urlparse
+
+# Google auto-adds "openid" and reorders scopes when userinfo.email is requested;
+# oauthlib strictly compares requested vs returned scopes and raises
+# "Scope has changed from ... to ...". Relax that check globally so channel
+# auth doesn't break. INSECURE_TRANSPORT is needed for the http://localhost
+# redirect used in the manual (remote) auth flow.
+os.environ['OAUTHLIB_RELAX_TOKEN_SCOPE'] = '1'
+os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 
 JOBS = {}
 UPLOAD_JOBS = {}  # job_id -> {status, links}
