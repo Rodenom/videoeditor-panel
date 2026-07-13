@@ -55,9 +55,30 @@ else
   echo "⚠ ffmpeg установлен (текст на видео недоступен, остальное работает)"
 fi
 
-# Install Python dependencies
+# Install Python dependencies (robust — some systems block plain pip install
+# with "externally-managed-environment", so we verify and fall back)
 echo "► Устанавливаем Python библиотеки..."
-python3 -m pip install --quiet google-auth google-auth-oauthlib google-api-python-client anthropic httplib2 PySocks requests
+PY_DEPS="google-auth google-auth-oauthlib google-api-python-client anthropic httplib2 PySocks requests"
+check_deps() { python3 -c "import google_auth_oauthlib, googleapiclient, requests" 2>/dev/null; }
+
+python3 -m pip install --quiet $PY_DEPS 2>/dev/null
+if ! check_deps; then
+  echo "  ⚠ Обычная установка не сработала, пробуем ещё раз..."
+  python3 -m pip install --quiet --break-system-packages $PY_DEPS 2>/dev/null
+fi
+if ! check_deps; then
+  python3 -m pip install --quiet --user $PY_DEPS 2>/dev/null
+fi
+if ! check_deps; then
+  echo ""
+  echo "❌ Не удалось установить Python-библиотеки автоматически."
+  echo "   Открой терминал в этой папке и выполни вручную:"
+  echo "   python3 -m pip install --break-system-packages $PY_DEPS"
+  echo ""
+  read -p "Нажми Enter чтобы закрыть..."
+  exit 1
+fi
+echo "✓ Библиотеки установлены"
 
 # Install SSL certificates
 PY_CERT=$(find /Applications/Python* -name "Install Certificates.command" 2>/dev/null | head -1)
