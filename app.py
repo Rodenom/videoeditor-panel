@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.20"
+VERSION = "5.21"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -698,6 +698,16 @@ def get_youtube_service(token_file=None, proxy=''):
     SCOPES = ['https://www.googleapis.com/auth/youtube.upload']
     if token_file is None:
         token_file = TOKEN_FILE
+    # Set/clear proxy env BEFORE any network call (esp. token refresh) so it goes
+    # through THIS channel's own proxy — never a leftover from a previous channel.
+    # Without this, one dead proxy poisons the env and every following channel's
+    # refresh fails with the same SOCKS/token error (cascade bug).
+    if proxy:
+        os.environ['HTTPS_PROXY'] = proxy
+        os.environ['HTTP_PROXY'] = proxy
+    else:
+        os.environ.pop('HTTPS_PROXY', None)
+        os.environ.pop('HTTP_PROXY', None)
     creds = None
     if os.path.exists(token_file):
         creds = Credentials.from_authorized_user_file(token_file, SCOPES)
@@ -712,12 +722,8 @@ def get_youtube_service(token_file=None, proxy=''):
     if proxy:
         from urllib.parse import urlparse as _up
         parsed = _up(proxy)
-        proxy_url = proxy
-        os.environ['HTTPS_PROXY'] = proxy_url
-        os.environ['HTTP_PROXY'] = proxy_url
         print(f'[PROXY] Using proxy: {parsed.hostname}:{parsed.port}')
-        svc = build('youtube', 'v3', credentials=creds)
-        return svc
+        return build('youtube', 'v3', credentials=creds)
     # No proxy — show real IP
     try:
         import urllib.request as _ur
@@ -1153,8 +1159,10 @@ def friendly_upload_error(err):
         return 'токен отозван — удали канал и добавь заново'
     if 'quotaExceeded' in s:
         return 'квота API проекта исчерпана (сбросится в 10:00 МСК)'
-    if 'ProxyError' in s or 'Cannot connect to proxy' in s or 'Tunnel connection failed' in s:
-        return 'прокси не отвечает'
+    if ('ProxyError' in s or 'Cannot connect to proxy' in s or 'Tunnel connection failed' in s
+            or 'SOCKS' in s or 'Max retries exceeded' in s or 'NewConnectionError' in s
+            or 'Connection refused' in s or 'Failed to establish' in s):
+        return 'прокси не отвечает — проверь/смени прокси этого канала (токен живой)'
     return 'ошибка: ' + s[:120]
 
 
