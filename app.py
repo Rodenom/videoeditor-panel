@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.22"
+VERSION = "5.23"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -2063,7 +2063,10 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
       </div>
       <div id="auto-log" style="display:none;background:#0d0d1a;color:#7eff7e;border-radius:10px;padding:10px;font-size:11px;font-family:monospace;max-height:160px;overflow-y:auto;white-space:pre-wrap;margin-top:10px;"></div>
       <div id="auto-result" style="margin-top:12px;display:none;">
-        <div style="font-size:13px;font-weight:800;color:var(--text);margin-bottom:8px;">📋 Результаты:</div>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;flex-wrap:wrap;">
+          <div style="font-size:13px;font-weight:800;color:var(--text);">📋 Результаты:</div>
+          <button onclick="copyResultLinks('auto-result-body',this)" style="font-size:12px;font-weight:700;padding:7px 13px;border-radius:8px;border:1.5px solid var(--accent1);background:var(--surface2);color:var(--accent1);cursor:pointer;">📋 Скопировать все ссылки</button>
+        </div>
         <table class="mass-result-table" id="auto-result-table">
           <thead><tr><th>#</th><th>Канал</th><th>9:16</th><th>1:1</th><th>16:9</th></tr></thead>
           <tbody id="auto-result-body"></tbody>
@@ -2164,7 +2167,10 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
         </div>
         <div id="ready-log" style="display:none;background:#0d0d1a;color:#7eff7e;border-radius:10px;padding:10px;font-size:11px;font-family:monospace;max-height:160px;overflow-y:auto;white-space:pre-wrap;margin-top:10px;"></div>
         <div id="ready-result" style="margin-top:12px;display:none;">
-          <div style="font-size:13px;font-weight:800;color:var(--text);margin-bottom:8px;">📋 Результаты:</div>
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;flex-wrap:wrap;">
+            <div style="font-size:13px;font-weight:800;color:var(--text);">📋 Результаты:</div>
+            <button onclick="copyResultLinks('ready-result-body',this)" style="font-size:12px;font-weight:700;padding:7px 13px;border-radius:8px;border:1.5px solid var(--accent1);background:var(--surface2);color:var(--accent1);cursor:pointer;">📋 Скопировать все ссылки</button>
+          </div>
           <table class="mass-result-table" id="ready-result-table">
             <thead><tr><th>#</th><th>Канал</th><th>Формат</th><th>Ссылка</th></tr></thead>
             <tbody id="ready-result-body"></tbody>
@@ -5470,6 +5476,17 @@ function pollReadyJob(){
       }
     }
   });
+}
+
+function copyResultLinks(tbodyId, btn){
+  const tb = document.getElementById(tbodyId);
+  if(!tb) return;
+  const links = [...tb.querySelectorAll('a[href]')].map(a=>a.href).filter(h=>/^https?:\/\//.test(h));
+  if(!links.length){ const o=btn.textContent; btn.textContent='Ссылок нет'; setTimeout(()=>btn.textContent=o,1500); return; }
+  navigator.clipboard.writeText(links.join('\n')).then(()=>{
+    const o=btn.textContent; btn.textContent='✅ Скопировано ('+links.length+')';
+    setTimeout(()=>btn.textContent=o,1900);
+  }).catch(()=>{ const o=btn.textContent; btn.textContent='❌ Не вышло'; setTimeout(()=>btn.textContent=o,1900); });
 }
 
 // ─── Auto upload mode ───────────────────────────────────────────
