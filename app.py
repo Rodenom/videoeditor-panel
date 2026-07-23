@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.21"
+VERSION = "5.22"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -689,6 +689,35 @@ def process_video(job_id, params):
         JOBS[job_id]['status'] = 'error'
         JOBS[job_id]['log'].append(f'❌ Ошибка: {str(e)}')
 
+def normalize_proxy(p):
+    """Принять любой ходовой формат прокси и вернуть рабочий socks5-URL.
+    Продавцы выдают прокси по-разному — не заставляем байера переформатировать:
+      host:port:user:pass   -> socks5://user:pass@host:port  (самый частый)
+      user:pass:host:port   -> socks5://user:pass@host:port
+      user:pass@host:port   -> socks5://user:pass@host:port
+      host:port             -> socks5://host:port
+      socks5://... / http://... / socks5h://...  -> как есть
+    """
+    p = (p or '').strip()
+    if not p:
+        return ''
+    if '://' in p:
+        return p
+    if '@' in p:
+        return 'socks5://' + p
+    parts = p.split(':')
+    if len(parts) == 4:
+        a, b, c, d = parts
+        if b.isdigit():            # host:port:user:pass
+            return f'socks5://{c}:{d}@{a}:{b}'
+        if d.isdigit():            # user:pass:host:port
+            return f'socks5://{a}:{b}@{c}:{d}'
+        return 'socks5://' + p
+    if len(parts) == 2:            # host:port (без авторизации)
+        return 'socks5://' + p
+    return p
+
+
 def get_youtube_service(token_file=None, proxy=''):
     from google.oauth2.credentials import Credentials
     from google_auth_oauthlib.flow import InstalledAppFlow
@@ -696,6 +725,7 @@ def get_youtube_service(token_file=None, proxy=''):
     from googleapiclient.discovery import build
     import httplib2
     SCOPES = ['https://www.googleapis.com/auth/youtube.upload']
+    proxy = normalize_proxy(proxy)  # принимаем любой формат прокси, чинит уже сохранённые кривые
     if token_file is None:
         token_file = TOKEN_FILE
     # Set/clear proxy env BEFORE any network call (esp. token refresh) so it goes
@@ -1159,6 +1189,8 @@ def friendly_upload_error(err):
         return 'токен отозван — удали канал и добавь заново'
     if 'quotaExceeded' in s:
         return 'квота API проекта исчерпана (сбросится в 10:00 МСК)'
+    if 'Failed to parse' in s or 'InvalidURL' in s or 'Invalid URL' in s:
+        return 'прокси в неправильном формате — вставь host:port:user:pass или socks5://user:pass@host:port'
     if ('ProxyError' in s or 'Cannot connect to proxy' in s or 'Tunnel connection failed' in s
             or 'SOCKS' in s or 'Max retries exceeded' in s or 'NewConnectionError' in s
             or 'Connection refused' in s or 'Failed to establish' in s):
@@ -3153,8 +3185,8 @@ async function addChannel(prefill){
       </div>
       <div style="margin-bottom:16px;">
         <label style="font-size:12px;color:#aaa;display:block;margin-bottom:4px;">ПРОКСИ КАНАЛА <span style="color:#ff6b6b;">*</span></label>
-        <input id="ch-proxy-inp" type="text" placeholder="socks5://user:pass@host:port" value="${prefill.proxy||''}" style="width:100%;padding:8px 10px;border-radius:8px;border:1.5px solid #444;background:#222;color:#fff;font-size:13px;outline:none;" />
-        <div style="font-size:11px;color:#666;margin-top:4px;">Формат: socks5://user:pass@host:port</div>
+        <input id="ch-proxy-inp" type="text" placeholder="host:port:user:pass" value="${prefill.proxy||''}" style="width:100%;padding:8px 10px;border-radius:8px;border:1.5px solid #444;background:#222;color:#fff;font-size:13px;outline:none;" />
+        <div style="font-size:11px;color:#666;margin-top:4px;">Любой формат: host:port:user:pass · user:pass@host:port · socks5://... — панель поймёт сама</div>
       </div>
       <button id="ch-start-btn" style="width:100%;padding:10px;background:#4f46e5;color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:600;cursor:pointer;">Продолжить →</button>
     </div>`;
@@ -6980,7 +7012,7 @@ class Handler(BaseHTTPRequestHandler):
         elif path == '/add_channel':
             length = int(self.headers.get('Content-Length', 0))
             ch_params = json.loads(self.rfile.read(length)) if length else {}
-            proxy = ch_params.get('proxy', '').strip()
+            proxy = normalize_proxy(ch_params.get('proxy', ''))
             force_manual = ch_params.get('force_manual', False)
             login_hint = ch_params.get('login_hint', '').strip()
             job_id = uuid.uuid4().hex[:8]
