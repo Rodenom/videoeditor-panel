@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.23"
+VERSION = "5.24"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -958,6 +958,50 @@ def vary_text(base, idx, is_title=True):
     return out
 
 
+def uniqueize_file(src, dst, idx=0):
+    """Сделать УНИКАЛЬНЫЙ вариант уже готового видео под каждую копию: лёгкий
+    грейн, джиттер цвета/гаммы, микро-кроп-сдвиг (пан/зум), питч/темп и тихий
+    румтон. Только уникализация для дедупа + чуть качества — без атак на
+    алгоритмы. Возвращает dst при успехе, иначе src (чтобы сбой ffmpeg не ронял
+    всю заливку — просто зальётся исходник)."""
+    import subprocess as _sp, random as _rnd
+    try:
+        w, h, has_audio = get_video_info(src)
+    except Exception:
+        w, h, has_audio = 0, 0, True
+    r = _rnd.Random('%s-%s' % (idx, os.path.basename(src)))
+    c = r.choice([2, 4, 6]); ox = r.randint(0, c); oy = r.randint(0, c)
+    br = round(r.uniform(-0.02, 0.02), 4)
+    sat = round(r.uniform(0.97, 1.03), 4)
+    gm = round(r.uniform(0.97, 1.03), 4)
+    grain = r.randint(5, 11)
+    if w and h:
+        vf = ('crop=iw-%d:ih-%d:%d:%d,scale=%d:%d,eq=brightness=%s:saturation=%s:gamma=%s,'
+              'noise=alls=%d:allf=t,setsar=1' % (c, c, ox, oy, w, h, br, sat, gm, grain))
+    else:
+        vf = 'eq=brightness=%s:saturation=%s:gamma=%s,noise=alls=%d:allf=t,setsar=1' % (br, sat, gm, grain)
+    rate = round(r.uniform(0.985, 1.015), 5)
+    tempo = round(min(max(1.0 / rate, 0.94), 1.06), 5)
+    feq = r.randint(200, 1800); fg = round(r.uniform(-1.5, 1.5), 2)
+    rtvol = round(r.uniform(0.004, 0.009), 4)
+    venc = ['-c:v', 'libx264', '-profile:v', 'baseline', '-crf', '23', '-preset', 'veryfast', '-pix_fmt', 'yuv420p']
+    if has_audio:
+        af = ('[0:a]asetrate=44100*%s,aresample=44100,atempo=%s,equalizer=f=%d:width_type=o:width=1:g=%s[a0];'
+              '[1:a]volume=%s[a1];[a0][a1]amix=inputs=2:duration=first:normalize=0[aout]' % (rate, tempo, feq, fg, rtvol))
+        cmd = (['ffmpeg', '-y', '-i', src, '-f', 'lavfi', '-i', 'anoisesrc=color=brown:sample_rate=44100',
+                '-filter_complex', '[0:v]%s[v];%s' % (vf, af), '-map', '[v]', '-map', '[aout]']
+               + venc + ['-c:a', 'aac', '-b:a', '128k', '-map_metadata', '-1', '-shortest', dst])
+    else:
+        cmd = ['ffmpeg', '-y', '-i', src, '-vf', vf] + venc + ['-an', '-map_metadata', '-1', dst]
+    try:
+        res = _sp.run(cmd, capture_output=True, text=True, timeout=180)
+        if res.returncode == 0 and os.path.exists(dst) and os.path.getsize(dst) > 0:
+            return dst
+    except Exception:
+        pass
+    return src
+
+
 def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user, custom_title='', custom_desc=''):
     from googleapiclient.http import MediaFileUpload
     job = MASS_UPLOAD_JOBS[job_id]
@@ -1125,7 +1169,9 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user, 
                 return _t, _d
 
             for fmt_name, _, label in formats:
-                fpath = converted[fmt_name]
+                base_fpath = converted[fmt_name]
+                _uq = os.path.join(tmp_dir, 'uq_%d_%d_%s.mp4' % (sets_done, vid_idx, fmt_name.replace(':', 'x')))
+                fpath = uniqueize_file(base_fpath, _uq, vid_idx)  # своя уникальная копия под этот аккаунт
                 if use_custom:
                     fmt_title = vary_text(custom_title, vid_idx, True)
                     fmt_desc = vary_text(custom_desc, vid_idx, False)
@@ -1162,6 +1208,9 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user, 
                     log[-1] = f'  ❌ {fmt_name} ошибка: {err_msg}'
                     ch_error = err_msg
                     job['done'] += 1
+                if fpath == _uq:  # чистим временную уникальную копию
+                    try: os.remove(_uq)
+                    except Exception: pass
             if ch_error:
                 channels = load_channels(user); channels[ch_id]['last_error'] = ch_error; save_channels(user, channels)
                 log.append(f'  ⚠ Канал {ch_info["name"]} — ошибка, переходим к следующему каналу')
@@ -1205,6 +1254,7 @@ def ready_upload_to_youtube(job_id, ready_files, n_sets, category, privacy, user
     job['status'] = 'running'
     log = job['log']
     try:
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
         total = n_sets * len(ready_files)
         job['total'] = total
         job['done'] = 0
@@ -1286,8 +1336,9 @@ def ready_upload_to_youtube(job_id, ready_files, n_sets, category, privacy, user
                 except Exception as _e2:
                     log.append(f'  ⚠ AI ошибка: {_e2}')
                 for rf in ready_files:
-                    fpath = rf['path']
                     fmt = rf['fmt']
+                    _uqr = os.path.join(OUTPUT_DIR, 'uq_%s_%d_%s.mp4' % (job_id, vid_idx_r, fmt.replace(':', 'x')))
+                    fpath = uniqueize_file(rf['path'], _uqr, vid_idx_r)  # своя уникальная копия под этот аккаунт
                     if use_custom_r:
                         up_title = vary_text(custom_title, vid_idx_r, True)
                         up_desc = vary_text(custom_desc, vid_idx_r, False)
@@ -1317,6 +1368,9 @@ def ready_upload_to_youtube(job_id, ready_files, n_sets, category, privacy, user
                     if proj_id:
                         increment_project_upload(user, proj_id)
                     job['done'] += 1
+                    if fpath == _uqr:  # чистим временную уникальную копию
+                        try: os.remove(_uqr)
+                        except Exception: pass
                 job['sets'].append({'set_idx': sets_done_r+1, 'channel': ch_info['name'], 'links': set_links})
                 sets_done_r += 1
             except Exception as _ch_err_r:
