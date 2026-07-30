@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.25"
+VERSION = "5.26"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -3889,9 +3889,18 @@ function aiSaveTask(){
   let geoCode = geoM ? geoM[1].toUpperCase() : '';
   const geoName = geoCode;
   const offerFull = (nameM ? nameM[1].trim() : (landM ? landM[1].trim() : 'AI-таска'));
+  // Из нейминга «Оффер-Гео-Мітка-LP-НазваЛенду-ТипЦіни» достаём метку и, если нет, гео
+  let marker = (localStorage.getItem('ai_mark')||'').trim();
+  const landName = landM ? landM[1].trim() : '';
+  const lp = landName.split('-');
+  if(!marker && lp.length >= 3) marker = lp[2].trim();
+  if(!geoCode && lp.length >= 2 && /^[A-Za-z]{2}$/.test(lp[1].trim())) geoCode = lp[1].trim().toUpperCase();
+  const shortName = (nameM ? nameM[1].trim() : (lp[0]||'').trim()) || offerFull;
+  const domain = (binomTarget && binomTarget()==='swaticu') ? 'mybeauty.day' : 'gvita.beauty';
   const tasks = JSON.parse(localStorage.getItem('tk_saved_tasks')||'[]');
-  tasks.unshift({ id: Date.now(), isAI: true, aiText: txt, offerFull: offerFull, offerShort: offerFull,
-    geoName: geoName, geoCode: geoCode, geoFlag: aiFlag(geoCode), thumb: aiProductImage||aiOfferImage||'', savedAt: new Date().toLocaleString('ru') });
+  tasks.unshift({ id: Date.now(), isAI: true, aiText: txt, offerFull: offerFull, offerShort: shortName,
+    marker: marker||'po', num: '1', domain: domain, landName: landName,
+    geoName: geoCode, geoCode: geoCode, geoFlag: aiFlag(geoCode), thumb: aiProductImage||aiOfferImage||'', savedAt: new Date().toLocaleString('ru') });
   localStorage.setItem('tk_saved_tasks', JSON.stringify(tasks.slice(0,80)));
   tkRenderSaved();
   const b = document.getElementById('ai-save-btn'); if(b){ const o=b.textContent; b.textContent='✅ Сохранено'; setTimeout(()=>b.textContent=o,1800); }
@@ -4746,12 +4755,17 @@ function tkRenderSaved(){
             <div class="tk-saved-btns">
               <button class="tk-saved-btn" onclick="aiToggleText(${t.id})">📄 Текст таски</button>
               <button class="tk-saved-btn green" onclick="aiCopySaved(${t.id},this)">📋 Копировать</button>
+              <button class="tk-saved-btn" onclick="tkToggleBinom(${t.id})">📊 Бином</button>
               <button class="tk-saved-btn tk-saved-btn-del" onclick="tkDeleteTask(${t.id})" style="color:#ef4444;border-color:#fca5a5;">✕ Удалить</button>
             </div>
           </div>
         </div>
         <div class="tk-binom-panel" id="tk-aitext-${t.id}">
           <pre style="white-space:pre-wrap;font-family:monospace;font-size:12px;color:var(--text);margin:0;">${aiEsc(t.aiText)}</pre>
+        </div>
+        <div class="tk-binom-panel" id="tk-binom-${t.id}">
+          <div style="font-size:11px;font-weight:800;color:var(--accent1);text-transform:uppercase;margin-bottom:10px;letter-spacing:.06em;">📊 Поля для Бинома</div>
+          ${tkBinomRows(t)}
         </div>
       </div>
     </div>`).join('');
