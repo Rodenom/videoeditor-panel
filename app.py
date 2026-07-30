@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.24"
+VERSION = "5.26"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -2898,6 +2898,33 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
         </div>
         <div id="tk-sunduk-fields" style="display:none;padding:14px;border:2px solid #7c3aed;border-top:none;border-radius:0 0 14px 14px;background:#12082a;display:flex;flex-direction:column;gap:12px;">
 
+          <div style="padding:10px 12px;border-radius:10px;background:#1e0b3a;border:1.5px solid #5b21b6;">
+            <div class="tk-label" style="color:#c4b5fd;">Тип интерактива — нейминг ArkNet: <b>Оффер-Гео-Метка-RD-Тип</b></div>
+            <input class="tk-input" id="tk-sunduk-rd-type" placeholder="Chest" value="Chest" oninput="tkUpdateUrlPreview()" autocomplete="off">
+            <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;" id="tk-sunduk-rd-btns">
+              <button class="tk-scat on" onclick="tkPickSundukRd('Chest',this)">Chest</button>
+              <button class="tk-scat" onclick="tkPickSundukRd('Boxes',this)">Boxes</button>
+              <button class="tk-scat" onclick="tkPickSundukRd('Wheel',this)">Wheel</button>
+              <button class="tk-scat" onclick="tkPickSundukRd('Form',this)">Form</button>
+              <button class="tk-scat" onclick="tkPickSundukRd('Aids',this)">Aids</button>
+            </div>
+            <div class="tk-row" style="margin-top:10px;">
+              <div class="tk-col">
+                <div class="tk-label" style="color:#c4b5fd;">Номер (если сундук не первый)</div>
+                <input class="tk-input" id="tk-sunduk-num" type="number" min="2" placeholder="—" oninput="tkUpdateUrlPreview()">
+              </div>
+              <div class="tk-col">
+                <div class="tk-label" style="color:#c4b5fd;">Назвать лендинг</div>
+                <div style="padding:9px 12px;background:#12082a;border-radius:10px;border-left:3px solid #7c3aed;">
+                  <div class="tk-url-preview" id="tk-sunduk-name-preview" style="margin-top:0;color:#c4b5fd;"></div>
+                </div>
+              </div>
+            </div>
+            <label style="display:flex;align-items:center;gap:8px;margin-top:10px;cursor:pointer;font-size:13px;font-weight:700;color:#c4b5fd;">
+              <input type="checkbox" id="tk-sunduk-only" style="accent-color:#7c3aed;"> Только сундук — без ТЗ на ленд
+            </label>
+          </div>
+
           <div>
             <div class="tk-label" style="color:#c4b5fd;">Откуда копировать сундук (URL источника)</div>
             <input class="tk-input" id="tk-sunduk-src-url" placeholder="https://gvita.beauty/landers/official-...">
@@ -2965,80 +2992,30 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
       </div>
     </div>
 
-    <!-- Step 3: ArkNet naming -->
+    <!-- Step 3: ArkNet naming + сплит лендов -->
     <div class="tk-step" id="tk-step-3">
-      <div class="tk-step-title"><span class="tk-step-num">3</span>Название ленда (стандарт ArkNet)</div>
-      <div style="font-size:12px;color:var(--text3);margin-bottom:16px;">Формат: <b style="color:var(--text)">Оффер-Гео-Метка-LP-Название-ТипЦены</b><br>напр. <b style="color:var(--accent1)">Slimoxil-UA-VG-LP-MedicalArticle-low</b></div>
-
-      <div class="tk-mb">
-        <div class="tk-label">Тип ленда</div>
-        <div style="display:flex;gap:8px;">
-          <label style="flex:1;display:flex;align-items:center;gap:8px;padding:10px 14px;border:1.5px solid var(--border);border-radius:10px;cursor:pointer;font-size:13px;font-weight:600;">
-            <input type="radio" name="tk-land-type" value="LP" checked onchange="tkLandTypeChange();tkUpdateUrlPreview()" style="accent-color:var(--accent1);"> 📄 LP — лендинг
-          </label>
-          <label style="flex:1;display:flex;align-items:center;gap:8px;padding:10px 14px;border:1.5px solid var(--border);border-radius:10px;cursor:pointer;font-size:13px;font-weight:600;">
-            <input type="radio" name="tk-land-type" value="RD" onchange="tkLandTypeChange();tkUpdateUrlPreview()" style="accent-color:var(--accent1);"> 🎁 RD — редирект
-          </label>
-        </div>
-      </div>
-
-      <div id="tk-lp-fields">
-        <div class="tk-mb">
-          <div class="tk-label">Название ленда (тематика)</div>
-          <input class="tk-input" id="tk-land-name" placeholder="MedicalArticle" oninput="tkUpdateUrlPreview()" autocomplete="off">
-          <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;">
-            <button type="button" class="tk-scat" onclick="tkPickName('MedicalArticle')">MedicalArticle</button>
-            <button type="button" class="tk-scat" onclick="tkPickName('NewsVSL')">NewsVSL</button>
-            <button type="button" class="tk-scat" onclick="tkPickName('MedicalBlog')">MedicalBlog</button>
-            <button type="button" class="tk-scat" onclick="tkPickName('BlogVSL')">BlogVSL</button>
-            <button type="button" class="tk-scat" onclick="tkPickName('News')">News</button>
-            <button type="button" class="tk-scat" onclick="tkPickName('Blog')">Blog</button>
-            <button type="button" class="tk-scat" onclick="tkPickName('Article')">Article</button>
-          </div>
-        </div>
-        <div class="tk-mb">
-          <div class="tk-label">Тип цены</div>
-          <div style="display:flex;gap:8px;" id="tk-price-type-btns">
-            <button type="button" class="tk-scat on" data-pt="low" onclick="tkPickPrice('low',this)">low</button>
-            <button type="button" class="tk-scat" data-pt="free" onclick="tkPickPrice('free',this)">free</button>
-            <button type="button" class="tk-scat" data-pt="full" onclick="tkPickPrice('full',this)">full (без хвоста)</button>
-          </div>
-          <input type="hidden" id="tk-price-type" value="low">
-        </div>
-      </div>
-
-      <div id="tk-rd-fields" style="display:none;">
-        <div class="tk-mb">
-          <div class="tk-label">Тип интерактива</div>
-          <input class="tk-input" id="tk-rd-type" placeholder="Chest" oninput="tkUpdateUrlPreview()" autocomplete="off">
-          <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;">
-            <button type="button" class="tk-scat" onclick="tkPickRd('Boxes')">Boxes</button>
-            <button type="button" class="tk-scat" onclick="tkPickRd('Chest')">Chest</button>
-            <button type="button" class="tk-scat" onclick="tkPickRd('Form')">Form</button>
-            <button type="button" class="tk-scat" onclick="tkPickRd('Wheel')">Wheel</button>
-            <button type="button" class="tk-scat" onclick="tkPickRd('Aids')">Aids</button>
-          </div>
-        </div>
-      </div>
+      <div class="tk-step-title"><span class="tk-step-num">3</span>Ленды на оффер (стандарт ArkNet)</div>
+      <div style="font-size:12px;color:var(--text3);margin-bottom:16px;">Формат: <b style="color:var(--text)">Оффер-Гео-Метка-LP-Название-ТипЦены</b><br>напр. <b style="color:var(--accent1)">Slimoxil-UA-VG-LP-MedicalArticle-low</b><br>Несколько лендов на один оффер = сплит-тест: на каждый будет своё ТЗ со своей долей трафика.</div>
 
       <div class="tk-row">
         <div class="tk-col">
           <div class="tk-label">Моя метка</div>
           <input class="tk-input" id="tk-url-marker" placeholder="po" value="po" oninput="tkUpdateUrlPreview()">
         </div>
-        <div class="tk-col" id="tk-split-wrap">
-          <div class="tk-label">Номер (сплит, если &gt;1)</div>
-          <input class="tk-input" id="tk-url-num" placeholder="—" type="number" min="2" oninput="tkUpdateUrlPreview()">
+        <div class="tk-col">
+          <div class="tk-label">Ваш домен</div>
+          <input class="tk-input" id="tk-domain" placeholder="gvita.beauty" value="gvita.beauty">
         </div>
       </div>
-      <div class="tk-mb">
-        <div class="tk-label">Ваш домен</div>
-        <input class="tk-input" id="tk-domain" placeholder="gvita.beauty" value="gvita.beauty">
+
+      <div id="tk-lands"></div>
+
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px;">
+        <button type="button" class="tk-scat" style="padding:8px 16px;font-size:13px;" onclick="tkAddLand()">➕ Добавить ленд (сплит)</button>
+        <button type="button" class="tk-scat" style="padding:8px 16px;font-size:13px;" onclick="tkEqualizeShares(true)">⚖️ Поделить трафик ровно</button>
+        <div id="tk-share-sum" style="font-size:12px;font-weight:700;margin-left:auto;"></div>
       </div>
-      <div style="padding:12px 16px;background:var(--surface2);border-radius:10px;border-left:3px solid var(--accent1);">
-        <div style="font-size:11px;color:var(--text3);font-weight:700;margin-bottom:4px;">НАЗВАНИЕ ЛЕНДА:</div>
-        <div class="tk-url-preview" id="tk-url-preview"></div>
-      </div>
+
       <div class="tk-nav">
         <button class="tk-btn tk-btn-back" onclick="tkBack(3)">← Назад</button>
         <button class="tk-btn tk-btn-next" onclick="tkNext(3)">Сгенерировать таску →</button>
@@ -3051,7 +3028,7 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
       <div class="tk-result">
         <div class="tk-result-text" id="tk-result-text"></div>
         <div style="display:flex;gap:8px;margin-top:12px;">
-          <button class="tk-copy-btn" style="margin-top:0;flex:1;" onclick="tkCopy()">📋 Скопировать</button>
+          <button class="tk-copy-btn" style="margin-top:0;flex:1;" onclick="tkCopy(this)">📋 Скопировать</button>
           <button class="tk-copy-btn" style="margin-top:0;background:var(--accent3);width:140px;flex-shrink:0;" onclick="tkSaveTask()">💾 Сохранить</button>
         </div>
         <div id="tk-result-photos" style="display:none;margin-top:16px;">
@@ -4032,8 +4009,8 @@ function tkInit(){
       if(sub) sub.classList.toggle('show', cb.checked);
     };
   });
-  tkUpdateUrlPreview();
-  ['tk-offer-name-short','tk-url-marker','tk-url-num'].forEach(id=>{
+  tkRenderLands();
+  ['tk-offer-name-short','tk-url-marker'].forEach(id=>{
     const el=document.getElementById(id);
     if(el) el.oninput=tkUpdateUrlPreview;
   });
@@ -4151,36 +4128,197 @@ function tkCalcDiscount(){
 }
 
 // ── ArkNet naming standard: Offer-Geo-Mark-LP-Name-PriceType (or -RD-Interactive) ──
-function tkArkName(){
+// Несколько лендов на один оффер = сплит-тест: у каждого своё имя, номер и доля трафика.
+let tkLands=[{type:'LP',name:'',price:'low',rd:'',num:'',share:100}];
+const TK_LAND_NAMES=['MedicalArticle','NewsVSL','MedicalBlog','BlogVSL','News','Blog','Article'];
+const TK_RD_TYPES=['Boxes','Chest','Form','Wheel','Aids'];
+
+function tkLandEl(id,i){ return document.getElementById(id+'-'+i); }
+function tkEsc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;'); }
+
+// DOM — источник правды пока блоки на экране; читаем перед перерисовкой/генерацией
+function tkReadLands(){
+  tkLands.forEach((L,i)=>{
+    const tEl=document.querySelector(`input[name="tk-land-type-${i}"]:checked`);
+    if(tEl) L.type=tEl.value;
+    const nm=tkLandEl('tk-land-name',i); if(nm) L.name=nm.value;
+    const pt=tkLandEl('tk-price-type',i); if(pt) L.price=pt.value;
+    const rd=tkLandEl('tk-rd-type',i); if(rd) L.rd=rd.value;
+    const nu=tkLandEl('tk-url-num',i); if(nu) L.num=nu.value;
+    const sh=tkLandEl('tk-share',i); if(sh) L.share=sh.value;
+  });
+}
+
+function tkEqualizeShares(fromClick){
+  if(fromClick) tkReadLands();
+  const n=tkLands.length;
+  const base=Math.floor(100/n);
+  tkLands.forEach(L=>{ L.share=base; });
+  tkLands[0].share=100-base*(n-1);
+  if(fromClick) tkRenderLands();
+}
+
+function tkAddLand(){
+  tkReadLands();
+  const next=Math.max(...tkLands.map((L,i)=>parseInt(L.num)||i+1))+1;
+  tkLands.push({type:'LP',name:'',price:'low',rd:'',num:String(next),share:0});
+  tkEqualizeShares(false);
+  tkRenderLands();
+}
+
+function tkRemoveLand(i){
+  if(tkLands.length<2) return;
+  tkReadLands();
+  tkLands.splice(i,1);
+  tkEqualizeShares(false);
+  tkRenderLands();
+}
+
+function tkRenderLands(){
+  const wrap=document.getElementById('tk-lands');
+  if(!wrap) return;
+  const n=tkLands.length, multi=n>1;
+  const radioLbl='flex:1;display:flex;align-items:center;gap:8px;padding:10px 14px;border:1.5px solid var(--border);border-radius:10px;cursor:pointer;font-size:13px;font-weight:600;';
+  wrap.innerHTML=tkLands.map((L,i)=>`
+    <div style="border:1.5px solid ${multi?'var(--accent1)':'var(--border)'};border-radius:14px;padding:14px 16px;margin-bottom:12px;background:var(--surface);">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px;">
+        <div style="font-size:14px;font-weight:800;color:var(--text);">Ленд ${i+1}${multi?` <span style="color:var(--text3);font-weight:600;">из ${n}</span>`:''}</div>
+        ${multi?`<div style="display:flex;align-items:center;gap:6px;margin-left:auto;">
+          <span style="font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;">Доля трафика</span>
+          <input class="tk-input" id="tk-share-${i}" type="number" min="0" max="100" value="${tkEsc(L.share)}" oninput="tkUpdateUrlPreview()" style="width:74px;padding:6px 8px;text-align:center;">
+          <span style="font-size:13px;font-weight:700;color:var(--text2);">%</span>
+          <button type="button" onclick="tkRemoveLand(${i})" title="Убрать этот ленд" style="border:1.5px solid #fca5a5;background:transparent;color:#ef4444;border-radius:8px;padding:5px 10px;font-size:12px;font-weight:700;cursor:pointer;">✕</button>
+        </div>`:`<div style="margin-left:auto;font-size:11px;color:var(--text3);">100% трафика</div>`}
+      </div>
+      <div class="tk-mb">
+        <div class="tk-label">Тип ленда</div>
+        <div style="display:flex;gap:8px;">
+          <label style="${radioLbl}">
+            <input type="radio" name="tk-land-type-${i}" value="LP" ${L.type==='RD'?'':'checked'} onchange="tkLandTypeChange(${i});tkUpdateUrlPreview()" style="accent-color:var(--accent1);"> 📄 LP — лендинг
+          </label>
+          <label style="${radioLbl}">
+            <input type="radio" name="tk-land-type-${i}" value="RD" ${L.type==='RD'?'checked':''} onchange="tkLandTypeChange(${i});tkUpdateUrlPreview()" style="accent-color:var(--accent1);"> 🎁 RD — редирект
+          </label>
+        </div>
+      </div>
+      <div id="tk-lp-fields-${i}" style="display:${L.type==='RD'?'none':'block'};">
+        <div class="tk-mb">
+          <div class="tk-label">Название ленда (тематика)</div>
+          <input class="tk-input" id="tk-land-name-${i}" placeholder="MedicalArticle" value="${tkEsc(L.name)}" oninput="tkUpdateUrlPreview()" autocomplete="off">
+          <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;">
+            ${TK_LAND_NAMES.map(v=>`<button type="button" class="tk-scat" onclick="tkPickName(${i},'${v}')">${v}</button>`).join('')}
+          </div>
+        </div>
+        <div class="tk-mb">
+          <div class="tk-label">Тип цены</div>
+          <div style="display:flex;gap:8px;" id="tk-price-type-btns-${i}">
+            ${[['low','low'],['free','free'],['full','full (без хвоста)']].map(([v,lbl])=>`<button type="button" class="tk-scat${(L.price||'low')===v?' on':''}" data-pt="${v}" onclick="tkPickPrice(${i},'${v}',this)">${lbl}</button>`).join('')}
+          </div>
+          <input type="hidden" id="tk-price-type-${i}" value="${tkEsc(L.price||'low')}">
+        </div>
+      </div>
+      <div id="tk-rd-fields-${i}" style="display:${L.type==='RD'?'block':'none'};">
+        <div class="tk-mb">
+          <div class="tk-label">Тип интерактива</div>
+          <input class="tk-input" id="tk-rd-type-${i}" placeholder="Chest" value="${tkEsc(L.rd)}" oninput="tkUpdateUrlPreview()" autocomplete="off">
+          <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;">
+            ${TK_RD_TYPES.map(v=>`<button type="button" class="tk-scat" onclick="tkPickRd(${i},'${v}')">${v}</button>`).join('')}
+          </div>
+        </div>
+      </div>
+      <div class="tk-row">
+        <div class="tk-col">
+          <div class="tk-label">Номер (сплит, если &gt;1)</div>
+          <input class="tk-input" id="tk-url-num-${i}" placeholder="—" type="number" min="2" value="${tkEsc(L.num)}" oninput="tkUpdateUrlPreview()">
+        </div>
+        <div class="tk-col">
+          <div class="tk-label">Название ленда</div>
+          <div style="padding:9px 12px;background:var(--surface2);border-radius:10px;border-left:3px solid var(--accent1);">
+            <div class="tk-url-preview" id="tk-url-preview-${i}" style="margin-top:0;"></div>
+          </div>
+        </div>
+      </div>
+    </div>`).join('');
+  tkUpdateUrlPreview();
+}
+
+function tkLandShare(i){
+  if(tkLands.length<2) return 100;
+  const el=tkLandEl('tk-share',i);
+  return parseInt(el?el.value:(tkLands[i]||{}).share)||0;
+}
+
+function tkArkName(i){
+  i=i||0;
+  const L=tkLands[i]||{};
   const offer=(document.getElementById('tk-offer-name-short').value||'Offer').trim().replace(/\s+/g,'');
   const geo=(tkGeoCode||'XX').toUpperCase();
   const mark=(document.getElementById('tk-url-marker').value||'po').trim();
-  const landType=(document.querySelector('input[name="tk-land-type"]:checked')||{}).value||'LP';
-  const num=(document.getElementById('tk-url-num').value||'').trim();
+  const tEl=document.querySelector(`input[name="tk-land-type-${i}"]:checked`);
+  const landType=tEl?tEl.value:(L.type||'LP');
+  const numEl=tkLandEl('tk-url-num',i);
+  const num=((numEl?numEl.value:L.num)||'').trim();
+  const suffix=(num && num!=='1')?num:'';
   if(landType==='RD'){
-    const rt=(document.getElementById('tk-rd-type').value||'Interactive').trim().replace(/\s+/g,'');
-    return `${offer}-${geo}-${mark}-RD-${rt}`;
+    const rdEl=tkLandEl('tk-rd-type',i);
+    const rt=((rdEl?rdEl.value:L.rd)||'Interactive').trim().replace(/\s+/g,'');
+    return `${offer}-${geo}-${mark}-RD-${rt}${suffix}`;
   }
-  let nm=(document.getElementById('tk-land-name').value||'Landing').trim().replace(/\s+/g,'');
-  if(num && num!=='1') nm+=num;
-  const pt=(document.getElementById('tk-price-type').value||'full');
+  const nmEl=tkLandEl('tk-land-name',i);
+  const nm=((nmEl?nmEl.value:L.name)||'Landing').trim().replace(/\s+/g,'')+suffix;
+  const ptEl=tkLandEl('tk-price-type',i);
+  const pt=((ptEl?ptEl.value:L.price)||'full');
   const ptSuffix=(pt==='full')?'':`-${pt}`;
   return `${offer}-${geo}-${mark}-LP-${nm}${ptSuffix}`;
 }
+
+// Сундук/бек-батон — это редирект: Оффер-Гео-Метка-RD-ТипИнтерактива (без хвоста цены)
+function tkSundukArkName(){
+  const offer=(document.getElementById('tk-offer-name-short').value||'Offer').trim().replace(/\s+/g,'');
+  const geo=(tkGeoCode||'XX').toUpperCase();
+  const mark=(document.getElementById('tk-url-marker').value||'po').trim();
+  const rdEl=document.getElementById('tk-sunduk-rd-type');
+  const rt=((rdEl?rdEl.value:'')||'Chest').trim().replace(/\s+/g,'');
+  const numEl=document.getElementById('tk-sunduk-num');
+  const num=((numEl?numEl.value:'')||'').trim();
+  return `${offer}-${geo}-${mark}-RD-${rt}${(num&&num!=='1')?num:''}`;
+}
+
 function tkUpdateUrlPreview(){
-  const el=document.getElementById('tk-url-preview');
-  if(el) el.textContent=tkArkName();
+  tkLands.forEach((L,i)=>{
+    const el=document.getElementById('tk-url-preview-'+i);
+    if(el) el.textContent=tkArkName(i);
+  });
+  const sndPrev=document.getElementById('tk-sunduk-name-preview');
+  if(sndPrev) sndPrev.textContent=tkSundukArkName();
+  const sumEl=document.getElementById('tk-share-sum');
+  if(sumEl){
+    if(tkLands.length<2){ sumEl.textContent=''; return; }
+    const sum=tkLands.reduce((s,L,i)=>s+tkLandShare(i),0);
+    sumEl.textContent=`Сумма долей: ${sum}%`+(sum===100?' ✓':' — должно быть 100%');
+    sumEl.style.color = sum===100 ? 'var(--accent3)' : '#ef4444';
+  }
 }
-function tkLandTypeChange(){
-  const t=(document.querySelector('input[name="tk-land-type"]:checked')||{}).value||'LP';
-  document.getElementById('tk-lp-fields').style.display = t==='LP'?'block':'none';
-  document.getElementById('tk-rd-fields').style.display = t==='RD'?'block':'none';
+
+function tkLandTypeChange(i){
+  const tEl=document.querySelector(`input[name="tk-land-type-${i}"]:checked`);
+  const t=tEl?tEl.value:'LP';
+  const lp=document.getElementById('tk-lp-fields-'+i), rd=document.getElementById('tk-rd-fields-'+i);
+  if(lp) lp.style.display = t==='LP'?'block':'none';
+  if(rd) rd.style.display = t==='RD'?'block':'none';
 }
-function tkPickName(v){ document.getElementById('tk-land-name').value=v; tkUpdateUrlPreview(); }
-function tkPickRd(v){ document.getElementById('tk-rd-type').value=v; tkUpdateUrlPreview(); }
-function tkPickPrice(v,btn){
-  document.getElementById('tk-price-type').value=v;
-  document.querySelectorAll('#tk-price-type-btns .tk-scat').forEach(b=>b.classList.toggle('on', b===btn));
+function tkPickSundukRd(v,btn){
+  const el=document.getElementById('tk-sunduk-rd-type');
+  if(el) el.value=v;
+  document.querySelectorAll('#tk-sunduk-rd-btns .tk-scat').forEach(b=>b.classList.toggle('on', b===btn));
+  tkUpdateUrlPreview();
+}
+function tkPickName(i,v){ const el=tkLandEl('tk-land-name',i); if(el) el.value=v; tkUpdateUrlPreview(); }
+function tkPickRd(i,v){ const el=tkLandEl('tk-rd-type',i); if(el) el.value=v; tkUpdateUrlPreview(); }
+function tkPickPrice(i,v,btn){
+  const el=tkLandEl('tk-price-type',i);
+  if(el) el.value=v;
+  document.querySelectorAll('#tk-price-type-btns-'+i+' .tk-scat').forEach(b=>b.classList.toggle('on', b===btn));
   tkUpdateUrlPreview();
 }
 
@@ -4267,7 +4405,7 @@ const TK_SUNDUK_TEMPLATES = {
   prostate: `Искрени поздравления! Вие сте един от късметлиите, които могат да получат до 50% отстъпка за натуралното средство срещу простатит! 🔥 Кликнете върху аптечната чанта и се възползвайте от своя шанс:`,
 };
 function tkSundukCat(cat, btn){
-  document.querySelectorAll('.tk-scat').forEach(b=>b.classList.remove('on'));
+  document.querySelectorAll('#tk-sunduk-cats .tk-scat').forEach(b=>b.classList.remove('on'));
   btn.classList.add('on');
   document.getElementById('tk-sunduk-old-text').value = TK_SUNDUK_TEMPLATES[cat]||'';
 }
@@ -4360,6 +4498,7 @@ function tkToggleSunduk(){
     badge.textContent='ДА'; badge.style.background='#5b21b6'; badge.style.color='#e9d5ff'; badge.style.borderColor='#a78bfa';
     toggle.style.borderColor='#a78bfa'; toggle.style.background='linear-gradient(135deg,#2e1065,#4c1d95)';
     fields.style.display='flex';
+    tkUpdateUrlPreview();
   } else {
     badge.textContent='НЕТ'; badge.style.background='#3b1d6e'; badge.style.color='#a78bfa'; badge.style.borderColor='#7c3aed';
     toggle.style.borderColor='#7c3aed'; toggle.style.background='linear-gradient(135deg,#1a0a2e,#2d1060)';
@@ -4392,7 +4531,8 @@ function tkUpdateProgress(){
 
 function tkGenerate(){
   tkSaveOffer();
-  tkCurrentTaskData = null;
+  tkReadLands();
+  tkCurrentTasks = [];
   const offerUrl=document.getElementById('tk-offer-url').value.trim();
   const offerFull=document.getElementById('tk-offer-name-full').value.trim();
   const geoName=tkGeoName||document.getElementById('tk-geo-name').value.trim();
@@ -4402,128 +4542,48 @@ function tkGenerate(){
   const name=document.getElementById('tk-offer-name-short').value.trim();
   const marker=document.getElementById('tk-url-marker').value.trim()||'po';
   const geo=tkGeoCode||'geo';
-  const num=document.getElementById('tk-url-num').value.trim()||'1';
   const domain=(document.getElementById('tk-domain').value.trim())||'gvita.beauty';
-  const finalUrl=tkArkName();
   const proklaType=document.querySelector('input[name="tk-prokla-type"]:checked').value;
   const copyUrl=document.getElementById('tk-copy-url').value.trim();
 
   // Title
   const typeLabel=proklaType==='download'?'Скачать проклу и внести правки':'Скопировать проклу и внести правки';
-  let lines=[`${typeLabel}${offerFull?' '+offerFull:''}`, ''];
-
-  if(offerUrl) lines.push(offerUrl,'');
-  if(geoName) lines.push(`Гео: ${geoName}`);
-  if(offerFull) lines.push(`Офер: ${offerFull}`);
-  if(offerId) lines.push(`ID: ${offerId}`);
-  if(streamId) lines.push(`id потока: ${streamId}`);
-  if(apiToken) lines.push(`API токен: ${apiToken}`);
-  lines.push('','ПРОКЛА','');
-  if(proklaType==='download'){
-    lines.push('1)Выкачать проклу (ниже добавил)');
-  } else {
-    lines.push(`1)Скопировать проклу: ${copyUrl||'[ссылка на проклу]'}`);
-  }
-  lines.push('1. Залить на домен gvita.beauty');
-  lines.push('2. Удалить все редиректы и бекбаттоны');
-  lines.push('3. Заменить ID , ID потоку , и api токен');
-  lines.push('4. Все пути должны быть исключительно относительными!');
-  lines.push('5. На прокле сделать камбекер');
-
-  let idx=6;
-  if(document.getElementById('tk-ch-name').checked){
-    const oldN=document.getElementById('tk-old-name').value.trim();
-    const newN=document.getElementById('tk-new-name-field').value.trim()||name;
-    if(oldN&&newN) lines.push(`${idx++}. заменить название офера ${oldN} на ${newN}`);
-  }
-  if(document.getElementById('tk-ch-photo').checked){
-    const inp=document.getElementById('tk-photo-clip');
-    const clip=inp.value.trim();
-    const hasImg=inp.dataset.imgData;
-    if(hasImg){ lines.push(`${idx++}. заменить фото товара (фото прикреплено)`); }
-    else if(clip){ lines.push(`${idx++}. заменить фото товара на ${clip}`); }
-  }
-  if(document.getElementById('tk-ch-price').checked){
-    const np=document.getElementById('tk-new-price').value.trim();
-    const op=document.getElementById('tk-old-price').value.trim();
-    const disc=document.getElementById('tk-discount').value.trim();
-    const changeCur=document.getElementById('tk-ch-currency').checked;
-    const cur=document.getElementById('tk-currency').value||'EUR';
-    if(np){
-      lines.push(`${idx++}) старая цена ${op} ${cur}\nНовая цена ${np} ${cur}\nСкидка ${disc}`);
-      if(changeCur) lines.push(`   (изменить валюту на ${cur})`);
-    }
-  }
-  if(document.getElementById('tk-ch-mask').checked){
-    const mask=document.getElementById('tk-mask').value.trim();
-    if(mask) lines.push(`${idx++}. поставить маску на номер ${mask}`);
-  }
-  if(document.getElementById('tk-ch-cert').checked){
-    const cert=document.getElementById('tk-cert-file').value.trim();
-    lines.push(`${idx++}. заменить сертификат${cert?' на '+cert:' (файл прикреплён)'}`);
-  }
-  if(document.getElementById('tk-ch-comments').checked){
-    const action=document.querySelector('input[name="tk-comment-action"]:checked').value;
-    if(action==='delete'){
-      lines.push(`${idx++}. удалить все фото с комментов`);
-    } else if(action==='upload'){
-      const clips=document.getElementById('tk-comment-clips').value.trim();
-      lines.push(`${idx++}. загрузить фото в коменты с новым офером${clips?': '+clips:' (файлы прикреплены)'}`);
-    }
-    // 'keep' — ничего не добавляем в таску
-  }
-
-  lines.push('','назвать как:');
-  lines.push(finalUrl);
 
   // Build rich HTML output
   const cur = document.getElementById('tk-currency').value || 'EUR';
-  let html = '';
 
-  // Title
-  html += `<div style="font-size:15px;font-weight:800;color:var(--text);margin-bottom:16px;padding-bottom:10px;border-bottom:2px solid var(--accent1);">${lines[0]}</div>`;
-
-  // Naming (ArkNet) — top block
-  html += `<div style="background:var(--surface);border:1.5px solid var(--border);border-radius:10px;padding:12px 16px;margin-bottom:14px;line-height:2;">`;
-  if(proklaType==='download'){
-    html += `<div><span style="color:var(--text3);">Скопіювати лендинг:</span> <b>архів (додано нижче)</b></div>`;
-  } else {
-    html += `<div><span style="color:var(--text3);">Скопіювати лендинг:</span> <b style="color:var(--accent1);">${copyUrl||'[посилання]'}</b></div>`;
-  }
-  html += `<div><span style="color:var(--text3);">Назвати лендинг:</span> <b style="color:var(--accent3);">${finalUrl}</b></div>`;
-  html += `</div>`;
-
-  // Offer data block (ArkNet field labels)
-  html += `<div style="background:var(--surface);border:1.5px solid var(--border);border-radius:10px;padding:12px 16px;margin-bottom:14px;line-height:2;">`;
-  if(offerUrl) html += `<div style="color:var(--accent1);font-size:12px;">${offerUrl}</div>`;
-  html += `<div><span style="color:var(--text3);">Ваш домен:</span> <b>${domain}</b></div>`;
-  if(offerFull) html += `<div><span style="color:var(--text3);">Назва товару:</span> <b>${offerFull}</b></div>`;
-  if(offerId) html += `<div><span style="color:var(--text3);">ID в ПП товару:</span> <b>${offerId}</b></div>`;
-  if(streamId) html += `<div><span style="color:var(--text3);">Поток ID товара в ПП:</span> <b>${streamId}</b></div>`;
-  if(apiToken) html += `<div><span style="color:var(--text3);">Апі Токен:</span> <b>${apiToken}</b></div>`;
-  if(geoName) html += `<div><span style="color:var(--text3);">Країна:</span> <b>${(tkGeoCode||'').toUpperCase()} (${geoName})</b></div>`;
-  html += `</div>`;
+  // ── Общая часть ТЗ: данные оффера + правки (одинаковы для всех лендов сплита) ──
+  let offerBlock = `<div style="background:var(--surface);border:1.5px solid var(--border);border-radius:10px;padding:12px 16px;margin-bottom:14px;line-height:2;">`;
+  if(offerUrl) offerBlock += `<div style="color:var(--accent1);font-size:12px;">${offerUrl}</div>`;
+  offerBlock += `<div><span style="color:var(--text3);">Ваш домен:</span> <b>${domain}</b></div>`;
+  if(offerFull) offerBlock += `<div><span style="color:var(--text3);">Назва товару:</span> <b>${offerFull}</b></div>`;
+  if(offerId) offerBlock += `<div><span style="color:var(--text3);">ID в ПП товару:</span> <b>${offerId}</b></div>`;
+  if(streamId) offerBlock += `<div><span style="color:var(--text3);">Поток ID товара в ПП:</span> <b>${streamId}</b></div>`;
+  if(apiToken) offerBlock += `<div><span style="color:var(--text3);">Апі Токен:</span> <b>${apiToken}</b></div>`;
+  if(geoName) offerBlock += `<div><span style="color:var(--text3);">Країна:</span> <b>${(tkGeoCode||'').toUpperCase()} (${geoName})</b></div>`;
+  offerBlock += `</div>`;
 
   // Edits section
+  let html = '';
   html += `<div style="font-size:12px;font-weight:800;color:var(--text3);text-transform:uppercase;letter-spacing:.07em;margin-bottom:10px;">ПРАВКИ</div>`;
   html += `<div style="line-height:2.1;margin-bottom:14px;">`;
 
-  // Fixed items
-  const proklaType2 = document.querySelector('input[name="tk-prokla-type"]:checked').value;
-  const copyUrl2 = document.getElementById('tk-copy-url').value.trim();
-  html += `<div>Почистити та оптимізувати ленд від зайвих та потенційно шкідливих скриптів</div>`;
-  html += `<div>1. Залити на домен <b>${domain}</b></div>`;
-  html += `<div>2. Видалити всі зайві редіректи та бекбаттони</div>`;
-  html += `<div>3. Замінити ID товару, Поток ID та Апі Токен</div>`;
-  html += `<div>4. Всі шляхи мають бути виключно відносними!</div>`;
+  // Fixed items — одинаковы для ленда и для сундука
+  const fixedEdits =
+    `<div>Почистити та оптимізувати ленд від зайвих та потенційно шкідливих скриптів</div>`
+    + `<div>1. Залити на домен <b>${domain}</b></div>`
+    + `<div>2. Видалити всі зайві редіректи та бекбаттони</div>`
+    + `<div>3. Замінити ID товару, Поток ID та Апі Токен</div>`
+    + `<div>4. Всі шляхи мають бути виключно відносними!</div>`;
+  html += fixedEdits;
 
   // Variable items
   let vidx = 5;
-  if(document.getElementById('tk-ch-name').checked){
-    const oldN=document.getElementById('tk-old-name').value.trim();
-    const newN=document.getElementById('tk-new-name-field').value.trim()||name;
-    if(oldN&&newN) html += `<div>${vidx++}. заменить название офера <b>${oldN}</b> на <b>${newN}</b></div>`;
-  }
+  const nameOldN=document.getElementById('tk-old-name').value.trim();
+  const nameNewN=document.getElementById('tk-new-name-field').value.trim()||name;
+  const nameEdit=(document.getElementById('tk-ch-name').checked && nameOldN && nameNewN)
+    ? `заменить название офера <b>${nameOldN}</b> на <b>${nameNewN}</b>` : '';
+  if(nameEdit) html += `<div>${vidx++}. ${nameEdit}</div>`;
   if(document.getElementById('tk-ch-photo').checked){
     const inp=document.getElementById('tk-photo-clip');
     const clip=inp.value.trim();
@@ -4541,7 +4601,7 @@ function tkGenerate(){
     const changeCur=document.getElementById('tk-ch-currency').checked;
     const curVal=document.getElementById('tk-currency').value||'EUR';
     if(np){
-      html += `<div style="margin:4px 0;">${vidx++}) <span style="color:var(--text3);">старая цена</span> <b>${op} ${curVal}</b> &nbsp;→&nbsp; <span style="color:var(--accent3);font-weight:800;">Новая цена ${np} ${curVal}</span> &nbsp;·&nbsp; Скидка <b>${disc}</b>${changeCur?` &nbsp;·&nbsp; <span style="color:var(--accent4);">изменить валюту на ${curVal}</span>`:''}</div>`;
+      html += `<div style="margin:4px 0;">${vidx++}. <span style="color:var(--text3);">старая цена</span> <b>${op} ${curVal}</b> &nbsp;→&nbsp; <span style="color:var(--accent3);font-weight:800;">Новая цена ${np} ${curVal}</span> &nbsp;·&nbsp; Скидка <b>${disc}</b>${changeCur?` &nbsp;·&nbsp; <span style="color:var(--accent4);">изменить валюту на ${curVal}</span>`:''}</div>`;
     }
   }
   if(document.getElementById('tk-ch-mask').checked){
@@ -4567,12 +4627,7 @@ function tkGenerate(){
     }
   }
   html += `</div>`;
-
-  // Final name reminder
-  html += `<div style="padding:12px 16px;background:var(--surface2);border-radius:10px;border-left:3px solid var(--accent1);">`;
-  html += `<div style="font-size:11px;color:var(--text3);font-weight:700;margin-bottom:4px;">НАЗВАТИ ЛЕНДИНГ:</div>`;
-  html += `<div style="color:var(--accent1);font-weight:700;word-break:break-all;">${finalUrl}</div>`;
-  html += `</div>`;
+  const editsBlock = html;
 
   // SUNDUK section
   const sundukOldText = document.getElementById('tk-sunduk-old-text').value.trim();
@@ -4582,57 +4637,159 @@ function tkGenerate(){
   const sundukFlagClip = document.getElementById('tk-sunduk-flag-clip');
   const sundukFlagVal = sundukFlagClip.value.trim();
   const sundukFlagHasImg = !!sundukFlagClip.dataset.imgData;
-  const sundukUrl = `https://gvita.beauty/landers/official-${name}-backbutton-${marker}-${geo}-sunduk/`;
+  const sundukRdType = (document.getElementById('tk-sunduk-rd-type').value||'Chest').trim().replace(/\s+/g,'');
+  const sundukNum = (document.getElementById('tk-sunduk-num').value||'').trim();
+  const sundukOnly = tkSundukOn && document.getElementById('tk-sunduk-only').checked;
+  const sundukName = tkSundukArkName();
+  const sundukSuffix = (sundukNum && sundukNum!=='1') ? sundukNum : '';
+  const sundukUrl = `https://${domain}/landers/official-${name}-${marker}-${geo}-sunduk${sundukSuffix}/`;
+  // Сундук — отдельное самодостаточное ТЗ: нейминг ArkNet (RD) + данные оффера + все правки
+  let sundukBlock = '';
   if(tkSundukOn){
-    html += `<div style="margin-top:20px;padding:16px;border-radius:14px;border:2px solid #7c3aed;background:#12082a;">`;
-    html += `<div style="font-size:13px;font-weight:800;color:#c4b5fd;text-transform:uppercase;letter-spacing:.08em;margin-bottom:12px;">🎁 СУНДУК / БЕК-БАТОН</div>`;
-    html += `<div style="font-size:13px;line-height:1.8;color:var(--text);">`;
+    sundukBlock += `<div class="tk-tz" id="tk-tz-sunduk" data-tzlabel="ТЗ на сундук (бек-батон)" style="border-color:#7c3aed;">`;
+    sundukBlock += `<div style="font-size:15px;font-weight:800;color:#e9d5ff;margin-bottom:16px;padding-bottom:10px;border-bottom:2px solid #7c3aed;">🎁 Скопіювати бек-батон (сундук) та внести правки${offerFull?' — '+offerFull:''}</div>`;
+    // Naming (ArkNet) — top block
+    sundukBlock += `<div style="background:var(--surface);border:1.5px solid var(--border);border-radius:10px;padding:12px 16px;margin-bottom:14px;line-height:2;">`;
     if(sundukSrcUrl){
-      html += `<b>Скопировать сундук:</b> <span style="color:#a78bfa;">${sundukSrcUrl}</span><br><br>`;
+      sundukBlock += `<div><span style="color:var(--text3);">Скопіювати лендинг:</span> <b style="color:var(--accent1);">${sundukSrcUrl}</b></div>`;
     } else {
-      html += `<b>Скопировать сундук и внести правки:</b><br>`;
+      sundukBlock += `<div><span style="color:var(--text3);">Скопіювати лендинг:</span> <b class="tk-highlight">[вкажи URL джерела сундука на кроці 2]</b></div>`;
     }
-    let pIdx = 1;
+    sundukBlock += `<div><span style="color:var(--text3);">Назвати лендинг:</span> <b style="color:var(--accent3);">${sundukName}</b></div>`;
+    sundukBlock += `<div><span style="color:var(--text3);">Тип:</span> <b>RD — редірект (бек-батон), інтерактив ${sundukRdType}</b></div>`;
+    sundukBlock += `</div>`;
+    sundukBlock += offerBlock;
+    // Правки: те же фиксированные пункты, что и на ленде, + правки самого сундука
+    sundukBlock += `<div style="font-size:12px;font-weight:800;color:var(--text3);text-transform:uppercase;letter-spacing:.07em;margin-bottom:10px;">ПРАВКИ</div>`;
+    sundukBlock += `<div style="line-height:2.1;margin-bottom:14px;">`;
+    sundukBlock += fixedEdits;
+    let pIdx = 5;
+    if(nameEdit) sundukBlock += `<div>${pIdx++}. ${nameEdit}</div>`;
     // Flag
-    html += `${pIdx++}) заменить флаг страны (картинка вверху)`;
-    if(sundukFlagVal && sundukFlagVal !== '[фото вставлено]') html += ` → <b>${sundukFlagVal}</b>`;
-    else if(sundukFlagHasImg) html += ` <span class="tk-highlight">(фото флага прикреплено)</span>`;
-    html += `<br>`;
+    sundukBlock += `<div>${pIdx++}. заменить флаг страны (картинка вверху)`;
+    if(sundukFlagVal && sundukFlagVal !== '[фото вставлено]') sundukBlock += ` → <b>${sundukFlagVal}</b>`;
+    else if(sundukFlagHasImg) sundukBlock += ` <span class="tk-highlight">(фото флага прикреплено)</span>`;
+    else sundukBlock += ` <b>на флаг ${geoName||(tkGeoCode||'').toUpperCase()}</b>`;
+    sundukBlock += `</div>`;
     // Photo of product
     if(sundukReplacePhoto){
       const photoInput = document.getElementById('tk-photo-clip');
-      html += `${pIdx++}) заменить фото товара`;
-      if(photoInput && photoInput.value && photoInput.value!=='[фото вставлено]') html += ` → <b>${photoInput.value}</b>`;
-      else if(photoInput && photoInput.dataset.imgData) html += ` <span class="tk-highlight">(фото прикреплено)</span>`;
-      html += `<br>`;
+      sundukBlock += `<div>${pIdx++}. заменить фото товара`;
+      if(photoInput && photoInput.value && photoInput.value!=='[фото вставлено]') sundukBlock += ` → <b>${photoInput.value}</b>`;
+      else if(photoInput && photoInput.dataset.imgData) sundukBlock += ` <span class="tk-highlight">(фото прикреплено)</span>`;
+      sundukBlock += `</div>`;
     }
     // Text replacement
     if(sundukOldText && sundukNewText){
-      html += `${pIdx++}) заменить текст:<br><span style="color:var(--text3);font-style:italic;">${sundukOldText.replace(/\n/g,'<br>')}</span><br><b>на:</b><br><span style="color:#c4b5fd;">${sundukNewText.replace(/\n/g,'<br>')}</span><br>`;
+      sundukBlock += `<div>${pIdx++}. заменить текст:<br><span style="color:var(--text3);font-style:italic;">${sundukOldText.replace(/\n/g,'<br>')}</span><br><b>на:</b><br><span style="color:#c4b5fd;">${sundukNewText.replace(/\n/g,'<br>')}</span></div>`;
     }
-    html += `</div>`;
-    html += `<div style="margin-top:12px;padding:10px 14px;background:#1e0b3a;border-radius:10px;border-left:3px solid #7c3aed;">`;
-    html += `<div style="font-size:11px;color:#a78bfa;font-weight:700;margin-bottom:4px;">НАЗВАТЬ КАК:</div>`;
-    html += `<div style="color:#c4b5fd;font-weight:700;word-break:break-all;">${sundukUrl}</div>`;
-    html += `</div></div>`;
+    sundukBlock += `</div>`;
+    sundukBlock += `<div style="padding:12px 16px;background:#1e0b3a;border-radius:10px;border-left:3px solid #7c3aed;">`;
+    sundukBlock += `<div style="font-size:11px;color:#a78bfa;font-weight:700;margin-bottom:4px;">НАЗВАТИ ЛЕНДИНГ:</div>`;
+    sundukBlock += `<div style="color:#c4b5fd;font-weight:700;word-break:break-all;">${sundukName}</div>`;
+    sundukBlock += `</div>`;
+    sundukBlock += `</div>`;
   }
 
-  document.getElementById('tk-result-text').innerHTML = html;
-
-  // Save task data for later
+  // ── Отдельное ТЗ на каждый ленд сплита ──
+  const n = tkLands.length, multi = n > 1;
   const geoEntry = TK_COUNTRIES.find(c=>c.c===tkGeoCode);
-  tkCurrentTaskData = {
-    offerUrl, offerFull, offerShort: name, geoName, geoCode: tkGeoCode,
-    geoFlag: geoEntry?geoEntry.flag:'', geoCur: document.getElementById('tk-currency').value,
-    offerId, streamId, apiToken, marker, num, finalUrl,
-    proklaType, copyUrl,
-    newPrice: document.getElementById('tk-new-price').value,
-    oldPrice: document.getElementById('tk-old-price').value,
-    sunduk: tkSundukOn, sundukOldText, sundukNewText, sundukUrl, sundukSrcUrl,
-    sundukReplacePhoto, sundukFlagImg: sundukFlagClip.dataset.imgData||'', sundukFlagVal,
-  };
+  const shareSum = tkLands.reduce((s,L,i)=>s+tkLandShare(i),0);
+  let out = '';
+
+  if(multi && !sundukOnly){
+    out += `<div style="padding:10px 14px;border-radius:10px;margin-bottom:16px;background:${shareSum===100?'var(--surface2)':'#3f1d1d'};border-left:3px solid ${shareSum===100?'var(--accent1)':'#ef4444'};">`;
+    out += `<div style="font-size:12px;font-weight:800;color:var(--text);">Сплит-тест: ${n} ленда на один оффер · ${tkLands.map((L,i)=>tkLandShare(i)+'%').join(' / ')}</div>`;
+    out += `<div style="font-size:11px;color:${shareSum===100?'var(--text3)':'#fca5a5'};margin-top:3px;">${shareSum===100?'Ниже — отдельное ТЗ на каждый ленд. Копируй по одному в свою таску техам.':'Сумма долей '+shareSum+'% — поправь доли на шаге 3.'}</div>`;
+    out += `</div>`;
+  }
+
+  if(!sundukOnly) tkLands.forEach((L,i)=>{
+    const finalUrl = tkArkName(i);
+    const share = tkLandShare(i);
+    const numVal = ((tkLandEl('tk-url-num',i)||{}).value||L.num||'').trim() || String(i+1);
+    const tEl = document.querySelector(`input[name="tk-land-type-${i}"]:checked`);
+    const landType = tEl?tEl.value:(L.type||'LP');
+    const landName = ((tkLandEl('tk-land-name',i)||{}).value||L.name||'').trim();
+    const rdType = ((tkLandEl('tk-rd-type',i)||{}).value||L.rd||'').trim();
+    const priceType = ((tkLandEl('tk-price-type',i)||{}).value||L.price||'low');
+
+    if(multi){
+      out += `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:${i?'26':'0'}px 0 10px;padding-top:${i?'18':'0'}px;${i?'border-top:2px dashed var(--border);':''}">`;
+      out += `<div style="font-size:12px;font-weight:800;color:var(--accent1);text-transform:uppercase;letter-spacing:.06em;">ТЗ ${i+1} из ${n} · доля трафика ${share}%</div>`;
+      out += `<button onclick="tkCopyOne(${i},this)" style="margin-left:auto;padding:6px 14px;font-size:12px;font-weight:700;border:1.5px solid var(--accent1);border-radius:8px;background:var(--surface);color:var(--accent1);cursor:pointer;">📋 Скопировать ТЗ ${i+1}</button>`;
+      out += `</div>`;
+    }
+
+    out += `<div class="tk-tz" id="tk-tz-${i}" data-tzlabel="${multi?('ТЗ '+(i+1)+' из '+n):'ТЗ на ленд'}">`;
+    // Title
+    out += `<div style="font-size:15px;font-weight:800;color:var(--text);margin-bottom:16px;padding-bottom:10px;border-bottom:2px solid var(--accent1);">${typeLabel}${offerFull?' '+offerFull:''}${multi?` — ленд ${i+1}/${n} (${share}% трафіку)`:''}</div>`;
+    // Naming (ArkNet) — top block
+    out += `<div style="background:var(--surface);border:1.5px solid var(--border);border-radius:10px;padding:12px 16px;margin-bottom:14px;line-height:2;">`;
+    if(proklaType==='download'){
+      out += `<div><span style="color:var(--text3);">Скопіювати лендинг:</span> <b>архів (додано нижче)</b></div>`;
+    } else {
+      out += `<div><span style="color:var(--text3);">Скопіювати лендинг:</span> <b style="color:var(--accent1);">${copyUrl||'[посилання]'}</b></div>`;
+    }
+    out += `<div><span style="color:var(--text3);">Назвати лендинг:</span> <b style="color:var(--accent3);">${finalUrl}</b></div>`;
+    if(multi) out += `<div><span style="color:var(--text3);">Спліт-тест:</span> <b>ленд ${i+1} з ${n} — доля трафіку ${share}%</b></div>`;
+    out += `</div>`;
+    out += offerBlock;
+    out += editsBlock;
+    // Final name reminder
+    out += `<div style="padding:12px 16px;background:var(--surface2);border-radius:10px;border-left:3px solid var(--accent1);">`;
+    out += `<div style="font-size:11px;color:var(--text3);font-weight:700;margin-bottom:4px;">НАЗВАТИ ЛЕНДИНГ:</div>`;
+    out += `<div style="color:var(--accent1);font-weight:700;word-break:break-all;">${finalUrl}</div>`;
+    out += `</div>`;
+    out += `</div>`;
+
+    tkCurrentTasks.push({
+      offerUrl, offerFull, offerShort: name, geoName, geoCode: tkGeoCode,
+      geoFlag: geoEntry?geoEntry.flag:'', geoCur: document.getElementById('tk-currency').value,
+      offerId, streamId, apiToken, marker, num: numVal, finalUrl, domain,
+      landType, landName, rdType, priceType,
+      share, splitTotal: n,
+      proklaType, copyUrl,
+      newPrice: document.getElementById('tk-new-price').value,
+      oldPrice: document.getElementById('tk-old-price').value,
+      sunduk: (i===0 && tkSundukOn), sundukOldText, sundukNewText, sundukUrl, sundukSrcUrl,
+      sundukReplacePhoto, sundukFlagImg: sundukFlagClip.dataset.imgData||'', sundukFlagVal,
+      sundukName, sundukRdType, sundukNum,
+    });
+  });
+
+  // Сундук — своё ТЗ, отдельным блоком со своей кнопкой копирования
+  if(tkSundukOn){
+    out += `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:${sundukOnly?'0':'26'}px 0 10px;padding-top:${sundukOnly?'0':'18'}px;${sundukOnly?'':'border-top:2px dashed var(--border);'}">`;
+    out += `<div style="font-size:12px;font-weight:800;color:#a78bfa;text-transform:uppercase;letter-spacing:.06em;">🎁 ТЗ на сундук (бек-батон)</div>`;
+    out += `<button onclick="tkCopyOne('sunduk',this)" style="margin-left:auto;padding:6px 14px;font-size:12px;font-weight:700;border:1.5px solid #7c3aed;border-radius:8px;background:#1e0b3a;color:#c4b5fd;cursor:pointer;">📋 Скопировать ТЗ сундука</button>`;
+    out += `</div>`;
+    out += sundukBlock;
+    if(sundukOnly){
+      tkCurrentTasks.push({
+        offerUrl, offerFull, offerShort: name, geoName, geoCode: tkGeoCode,
+        geoFlag: geoEntry?geoEntry.flag:'', geoCur: document.getElementById('tk-currency').value,
+        offerId, streamId, apiToken, marker, num: sundukNum||'1', finalUrl: sundukName, domain,
+        landType: 'RD', landName: '', rdType: sundukRdType, priceType: '',
+        share: 100, splitTotal: 1,
+        proklaType, copyUrl,
+        newPrice: document.getElementById('tk-new-price').value,
+        oldPrice: document.getElementById('tk-old-price').value,
+        sunduk: true, sundukOnly: true, sundukOldText, sundukNewText, sundukUrl, sundukSrcUrl,
+        sundukReplacePhoto, sundukFlagImg: sundukFlagClip.dataset.imgData||'', sundukFlagVal,
+        sundukName, sundukRdType, sundukNum,
+      });
+    }
+  }
+
+  document.getElementById('tk-result-text').innerHTML = out;
+
+  const tzCount = (sundukOnly?0:n) + (tkSundukOn?1:0);
+  const copyBtn = document.querySelector('[onclick="tkCopy(this)"]');
+  if(copyBtn) copyBtn.textContent = tzCount>1 ? `📋 Скопировать все ${tzCount} ТЗ` : '📋 Скопировать';
   const saveBtn = document.querySelector('[onclick="tkSaveTask()"]');
-  saveBtn.textContent = '💾 Сохранить'; saveBtn.disabled = false; saveBtn.style.opacity = '';
+  saveBtn.textContent = tkCurrentTasks.length>1 ? `💾 Сохранить все (${tkCurrentTasks.length})` : '💾 Сохранить';
+  saveBtn.disabled = false; saveBtn.style.opacity = '';
 
   // Show attached photos
   const photosWrap=document.getElementById('tk-result-photos');
@@ -4655,19 +4812,34 @@ function tkGenerate(){
   photosWrap.style.display=hasPhotos?'block':'none';
 }
 
-function tkCopy(){
-  // Get plain text — strip HTML tags
-  const el=document.getElementById('tk-result-text');
-  const text=el.innerText.replace(/ {2,}/g,' ').trim();
+function tkTzText(el){ return el.innerText.replace(/ {2,}/g,' ').trim(); }
+
+function tkCopy(btn){
+  // Все ТЗ подряд — каждый ленд отдельным блоком
+  const cards=[...document.querySelectorAll('#tk-result-text .tk-tz')];
+  const text = cards.length
+    ? cards.map((d,i)=>(cards.length>1?`── ${d.dataset.tzlabel||('ТЗ '+(i+1)+' из '+cards.length)} ──\n`:'')+tkTzText(d)).join('\n\n')
+    : tkTzText(document.getElementById('tk-result-text'));
   navigator.clipboard.writeText(text).then(()=>{
-    const btn=document.querySelector('.tk-copy-btn');
+    const b=btn||document.querySelector('.tk-copy-btn');
+    const orig=b.textContent;
+    b.textContent='✅ Скопировано!';
+    setTimeout(()=>b.textContent=orig,2000);
+  });
+}
+
+function tkCopyOne(i,btn){
+  const el=document.getElementById('tk-tz-'+i);
+  if(!el) return;
+  navigator.clipboard.writeText(tkTzText(el)).then(()=>{
+    const orig=btn.textContent;
     btn.textContent='✅ Скопировано!';
-    setTimeout(()=>btn.textContent='📋 Скопировать таску',2000);
+    setTimeout(()=>btn.textContent=orig,2000);
   });
 }
 
 // ===== SAVED TASKS =====
-let tkCurrentTaskData = null;
+let tkCurrentTasks = [];
 
 function tkThumbFromInput(inp){
   if(!inp||!inp.dataset.imgData) return null;
@@ -4683,21 +4855,29 @@ function tkThumbFromInput(inp){
 }
 
 function tkSaveTask(){
-  if(!tkCurrentTaskData) return;
+  if(!tkCurrentTasks || !tkCurrentTasks.length) return;
   const btn = document.querySelector('[onclick="tkSaveTask()"]');
   if(btn && btn.disabled) return;
   // Attach thumbnail from photo field
   const photoInp = document.getElementById('tk-photo-clip');
-  if(photoInp && photoInp.dataset.imgData){
-    tkCurrentTaskData.thumb = tkThumbFromInput(photoInp) || photoInp.dataset.imgData;
-  }
+  const thumb = (photoInp && photoInp.dataset.imgData)
+    ? (tkThumbFromInput(photoInp) || photoInp.dataset.imgData) : null;
   const tasks = JSON.parse(localStorage.getItem('tk_saved_tasks')||'[]');
-  tkCurrentTaskData.savedAt = new Date().toLocaleString('ru');
-  tkCurrentTaskData.id = Date.now();
-  tasks.unshift(tkCurrentTaskData);
+  const stamp = new Date().toLocaleString('ru');
+  const base = Date.now();
+  // Каждый ленд сплита — своя карточка под общим оффером
+  tkCurrentTasks.forEach((t,i)=>{
+    if(thumb) t.thumb = thumb;
+    t.savedAt = stamp;
+    t.id = base + i;
+    tasks.unshift(t);
+  });
   localStorage.setItem('tk_saved_tasks', JSON.stringify(tasks.slice(0,50)));
   tkRenderSaved();
-  if(btn){ btn.textContent='✅ Сохранено!'; btn.disabled=true; btn.style.opacity='0.5'; }
+  if(btn){
+    btn.textContent = tkCurrentTasks.length>1 ? `✅ Сохранено (${tkCurrentTasks.length})` : '✅ Сохранено!';
+    btn.disabled=true; btn.style.opacity='0.5';
+  }
 }
 
 let tkFilterGeo = '';
@@ -4755,10 +4935,15 @@ function tkRenderSaved(){
   });
 
   list.innerHTML = aiHtml + Object.entries(groups).map(([name,g])=>{
-    const lastTask = g.tasks[g.tasks.length-1];
-    const sundukTask = g.tasks.find(t=>t.sunduk);
-    const sid = sundukTask ? 'sd-'+sundukTask.id : '';
-    const count = g.tasks.length;
+    g.tasks.sort((a,b)=>(parseInt(a.num)||1)-(parseInt(b.num)||1));
+    // Таска «только сундук» не прокла — своей карточки в списке проклов не получает
+    const proklaTasks = g.tasks.filter(t=>!t.sundukOnly);
+    const lastTask = proklaTasks.length ? proklaTasks[proklaTasks.length-1] : g.tasks[g.tasks.length-1];
+    const sundukTasks = g.tasks.filter(t=>t.sunduk);
+    const count = proklaTasks.length;
+    // Доли трафика сплита — показываем в шапке оффера
+    const shares = proklaTasks.map(t=>t.share).filter(s=>s);
+    const shareInfo = (count>1 && shares.length===count) ? ` &nbsp;·&nbsp; трафик ${shares.join('/')}%` : '';
     return `
     <div class="tk-saved-group">
       <div class="tk-saved-group-hdr">
@@ -4766,7 +4951,7 @@ function tkRenderSaved(){
           <span style="font-size:22px;">${g.flag||'📦'}</span>
           <div>
             <div>${name}</div>
-            <div class="tk-ghdr-geo">${g.geo} &nbsp;·&nbsp; ${count} прокл${count===1?'а':count<5?'ы':''}</div>
+            <div class="tk-ghdr-geo">${g.geo} &nbsp;·&nbsp; ${count} прокл${count===1?'а':count<5?'ы':''}${shareInfo}${sundukTasks.length?` &nbsp;·&nbsp; 🎁 ${sundukTasks.length>1?sundukTasks.length+' сундука':'сундук'}`:''}</div>
           </div>
         </div>
         <div class="tk-ghdr-right">
@@ -4774,7 +4959,7 @@ function tkRenderSaved(){
           <button class="tk-ghdr-btn sunduk" onclick="tkNewSunduk(${lastTask.id})">🎁 Сундук</button>
         </div>
       </div>
-      ${g.tasks.sort((a,b)=>(parseInt(a.num)||1)-(parseInt(b.num)||1)).map((t,i)=>`
+      ${proklaTasks.map((t,i)=>`
         <div class="tk-saved-card" id="tk-card-${t.id}">
           <div class="tk-saved-card-inner">
             ${t.thumb?`<img class="tk-saved-thumb" src="${t.thumb}">`:`<div class="tk-saved-thumb-ph">📦</div>`}
@@ -4782,11 +4967,13 @@ function tkRenderSaved(){
               <div class="tk-saved-title">
                 <span class="tk-saved-num">Прокла ${t.num||'1'}</span>${t.offerFull||name}
               </div>
+              ${t.finalUrl?`<div style="font-family:monospace;font-size:11px;color:var(--text3);word-break:break-all;margin-bottom:4px;">${t.finalUrl}</div>`:''}
               <div class="tk-saved-meta">
                 <span class="tk-saved-meta-flag">${t.geoFlag||''}</span>
                 <span>${t.geoName||''}</span>
                 <span style="opacity:.5;">·</span>
                 <span>${t.savedAt||''}</span>
+                ${(t.share && t.splitTotal>1)?`<span style="opacity:.5;">·</span><span style="color:var(--accent1);font-weight:700;">${t.share}% трафика</span>`:''}
               </div>
               <div class="tk-saved-btns">
                 <button class="tk-saved-btn" onclick="tkToggleBinom(${t.id})">📊 Бином</button>
@@ -4800,44 +4987,46 @@ function tkRenderSaved(){
           </div>
         </div>
       `).join('')}
-      ${sundukTask ? `<div class="tk-saved-card" style="border-left-color:#8b5cf6;background:linear-gradient(135deg,#13072a 0%,#1a0b38 100%);" id="tk-card-${sid}">
+      ${sundukTasks.map(st=>{ const sid='sd-'+st.id; return `<div class="tk-saved-card" style="border-left-color:#8b5cf6;background:linear-gradient(135deg,#13072a 0%,#1a0b38 100%);" id="tk-card-${sid}">
           <div class="tk-saved-card-inner">
             <div class="tk-saved-thumb-ph" style="background:#2e1065;color:#c4b5fd;border-color:#5b21b6;font-size:30px;">🎁</div>
             <div style="flex:1;min-width:0;">
               <div class="tk-saved-title" style="color:#e9d5ff;">
-                <span style="display:inline-block;background:#3b0764;color:#c4b5fd;border-radius:6px;padding:1px 8px;font-size:12px;font-weight:800;margin-right:6px;">Сундук</span>${sundukTask.offerFull||name}
+                <span style="display:inline-block;background:#3b0764;color:#c4b5fd;border-radius:6px;padding:1px 8px;font-size:12px;font-weight:800;margin-right:6px;">Сундук${(st.sundukNum&&st.sundukNum!=='1')?' '+st.sundukNum:''}</span>${st.offerFull||name}
               </div>
+              ${st.sundukName?`<div style="font-family:monospace;font-size:11px;color:#a78bfa;word-break:break-all;margin-bottom:4px;">${st.sundukName}</div>`:''}
               <div class="tk-saved-meta" style="color:#a78bfa;">
-                <span class="tk-saved-meta-flag">${sundukTask.geoFlag||''}</span>
-                <span>${sundukTask.geoName||''}</span>
+                <span class="tk-saved-meta-flag">${st.geoFlag||''}</span>
+                <span>${st.geoName||''}</span>
                 <span style="opacity:.5;">·</span>
-                <span>${sundukTask.savedAt||''}</span>
+                <span>${st.savedAt||''}</span>
               </div>
               <div class="tk-saved-btns">
-                <button class="tk-saved-btn" onclick="tkSplitFrom(${sundukTask.id})" style="border-color:#7c3aed;color:#c4b5fd;background:#1e0b3a;">🔄 Открыть</button>
+                <button class="tk-saved-btn" onclick="tkSplitFrom(${st.id})" style="border-color:#7c3aed;color:#c4b5fd;background:#1e0b3a;">🔄 Открыть</button>
                 <button class="tk-saved-btn" onclick="tkToggleBinom('${sid}')" style="border-color:#7c3aed;color:#c4b5fd;background:#1e0b3a;">📊 Бином</button>
-                <button class="tk-saved-btn tk-saved-btn-del" onclick="tkDeleteTask(${sundukTask.id})" style="color:#ef4444;border-color:#7f1d1d;">✕ Удалить</button>
+                <button class="tk-saved-btn tk-saved-btn-del" onclick="tkDeleteTask(${st.id})" style="color:#ef4444;border-color:#7f1d1d;">✕ Удалить</button>
               </div>
             </div>
           </div>
           <div class="tk-binom-panel" id="tk-binom-${sid}" style="background:#1e0b3a;border-color:#5b21b6;">
             <div style="font-size:11px;font-weight:800;color:#a78bfa;text-transform:uppercase;margin-bottom:10px;letter-spacing:.06em;">🎁 Бином — Сундук</div>
-            ${tkBinomRows(sundukTask)}
+            ${tkBinomRows(st, true)}
           </div>
-        </div>` : ''}
+        </div>`; }).join('')}
     </div>`;
   }).join('');
 }
 
-function tkBinomRows(t){
+function tkBinomRows(t, onlySunduk){
   const short = t.offerShort || '';
   const marker = t.marker || 'po';
   const geo = t.geoCode || '';
   const num = t.num || '1';
+  const dom = t.domain || 'gvita.beauty';
   const offerName = `${short}_prokla${num}_${geo}_${marker}`;
-  const offerUrl = `https://gvita.beauty/landers/official-${short}-${marker}-${geo}-lend${num}/?clickid={clickid}`;
+  const offerUrl = `https://${dom}/landers/official-${short}-${marker}-${geo}-lend${num}/?clickid={clickid}`;
   const campaignName = `${short}_${geo.toUpperCase()}`;
-  const fields = [
+  const fields = onlySunduk ? [] : [
     {label:'Offer Name', val: offerName},
     {label:'Offer URL', val: offerUrl},
     {label:'Campaign Name', val: campaignName},
@@ -4850,10 +5039,11 @@ function tkBinomRows(t){
     </div>
   `).join('');
   if(t.sunduk){
-    const sundukName = `${short}_sunduk_${geo}`;
-    const sundukUrl = `https://gvita.beauty/landers/official-${short}-${marker}-${geo}-sunduk/?clickid={clickid}`;
-    html += `<div style="font-size:11px;font-weight:800;color:#a78bfa;text-transform:uppercase;margin:10px 0 6px;border-top:1px solid #3b1d6e;padding-top:8px;">🎁 Сундук</div>`;
-    [{label:'Offer Name', val:sundukName},{label:'Offer URL', val:sundukUrl}].forEach(f=>{
+    const sNum = (t.sundukNum && t.sundukNum!=='1') ? t.sundukNum : '';
+    const sundukName = `${short}_sunduk${sNum}_${geo}`;
+    const sundukUrl = (t.sundukUrl ? t.sundukUrl.replace(/\/?$/,'/') : `https://${dom}/landers/official-${short}-${marker}-${geo}-sunduk${sNum}/`) + '?clickid={clickid}';
+    html += `<div style="font-size:11px;font-weight:800;color:#a78bfa;text-transform:uppercase;margin:10px 0 6px;${onlySunduk?'':'border-top:1px solid #3b1d6e;padding-top:8px;'}">🎁 Сундук</div>`;
+    [{label:'Назвати лендинг (ArkNet)', val:t.sundukName||''},{label:'Offer Name', val:sundukName},{label:'Offer URL', val:sundukUrl}].filter(f=>f.val).forEach(f=>{
       html += `<div class="tk-binom-row"><div class="tk-binom-label">${f.label}</div><div class="tk-binom-val" onclick="tkCopyText('${f.val.replace(/'/g,"\\'")}',this)">${f.val}</div><button class="tk-binom-copy" onclick="tkCopyText('${f.val.replace(/'/g,"\\'")}',this)">Копировать</button></div>`;
     });
   }
@@ -4885,6 +5075,19 @@ function tkNewSunduk(id){
   tkSplitFrom(id);
   // Enable sunduk toggle if not already on
   if(!tkSundukOn) tkToggleSunduk();
+  // Кнопка «Сундук» = нужен только сундук, ТЗ на новую проклу не генерим
+  document.getElementById('tk-sunduk-only').checked = true;
+  // Второй и следующий сундуки на том же оффере+гео получают номер
+  const tasks = JSON.parse(localStorage.getItem('tk_saved_tasks')||'[]');
+  const src = tasks.find(t=>t.id===id);
+  if(src){
+    const prev = tasks.filter(t=>t.sunduk && t.offerShort===src.offerShort && t.geoCode===src.geoCode);
+    if(prev.length){
+      const maxN = prev.reduce((m,t)=>Math.max(m, parseInt(t.sundukNum)||1), 1);
+      document.getElementById('tk-sunduk-num').value = String(maxN+1);
+    }
+  }
+  tkUpdateUrlPreview();
   // Go to step 2 instead of step 1
   setTimeout(()=>{
     document.querySelectorAll('.tk-step').forEach(s=>s.classList.remove('active'));
@@ -4915,7 +5118,10 @@ function tkSplitFrom(id){
   // Auto-increment: next lend number after max existing for this offer+geo
   const sameOffer = tasks.filter(x=>x.offerShort===t.offerShort && x.geoCode===t.geoCode);
   const maxNum = sameOffer.reduce((m,x)=>Math.max(m,parseInt(x.num)||1),0);
-  document.getElementById('tk-url-num').value = maxNum+1;
+  // Один новый ленд на базе выбранного; доли добавляются, если нажать «Добавить ленд»
+  tkLands=[{type:t.landType||'LP', name:t.landName||'', price:t.priceType||'low',
+            rd:t.rdType||'', num:String(maxNum+1), share:100}];
+  tkRenderLands();
   // Restore geo
   if(t.geoCode){ const ge=TK_COUNTRIES.find(c=>c.c===t.geoCode); tkPickGeo(t.geoName||'', t.geoCode, ge?ge.flag:'', t.geoCur||'EUR'); }
   tkUpdateUrlPreview();
@@ -4929,10 +5135,14 @@ function tkSplitFrom(id){
   // Restore sunduk
   if(t.sunduk !== undefined){
     if(t.sunduk !== tkSundukOn) tkToggleSunduk();
+    document.getElementById('tk-sunduk-only').checked = !!t.sundukOnly;
     if(t.sunduk){
       document.getElementById('tk-sunduk-old-text').value = t.sundukOldText||'';
       document.getElementById('tk-sunduk-new-text').value = t.sundukNewText||'';
       document.getElementById('tk-sunduk-src-url').value = t.sundukSrcUrl||'';
+      document.getElementById('tk-sunduk-rd-type').value = t.sundukRdType||'Chest';
+      document.getElementById('tk-sunduk-num').value = t.sundukNum||'';
+      document.querySelectorAll('#tk-sunduk-rd-btns .tk-scat').forEach(b=>b.classList.toggle('on', b.textContent===(t.sundukRdType||'Chest')));
       const chPhoto = document.getElementById('tk-sunduk-ch-photo');
       chPhoto.checked = !!t.sundukReplacePhoto;
       document.getElementById('tk-sunduk-photo-field').style.display = chPhoto.checked?'block':'none';
