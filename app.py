@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.26"
+VERSION = "5.27"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -4756,6 +4756,7 @@ function tkRenderSaved(){
               <button class="tk-saved-btn" onclick="aiToggleText(${t.id})">📄 Текст таски</button>
               <button class="tk-saved-btn green" onclick="aiCopySaved(${t.id},this)">📋 Копировать</button>
               <button class="tk-saved-btn" onclick="tkToggleBinom(${t.id})">📊 Бином</button>
+              <button class="tk-saved-btn" onclick="tkSplitFrom(${t.id})" title="Новая прокла на этот же оффер — номер подставится следующий">➕ Ещё прокла</button>
               <button class="tk-saved-btn tk-saved-btn-del" onclick="tkDeleteTask(${t.id})" style="color:#ef4444;border-color:#fca5a5;">✕ Удалить</button>
             </div>
           </div>
@@ -4937,6 +4938,7 @@ function tkSplitFrom(id){
   if(t.oldPrice) document.getElementById('tk-old-price').value = t.oldPrice;
   if(t.proklaType){ const r=document.querySelector(`input[name="tk-prokla-type"][value="${t.proklaType}"]`); if(r){ r.checked=true; tkTypeChange(); } }
   if(t.copyUrl) document.getElementById('tk-copy-url').value = t.copyUrl;
+  if(t.domain){ const de=document.getElementById('tk-domain'); if(de) de.value = t.domain; }
   // Auto-increment: next lend number after max existing for this offer+geo
   const sameOffer = tasks.filter(x=>x.offerShort===t.offerShort && x.geoCode===t.geoCode);
   const maxNum = sameOffer.reduce((m,x)=>Math.max(m,parseInt(x.num)||1),0);
