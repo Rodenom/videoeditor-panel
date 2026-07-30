@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.24"
+VERSION = "5.25"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -2918,6 +2918,9 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
             <div id="tk-sunduk-photo-field" style="display:none;">
               <div style="font-size:11px;color:#a78bfa;margin-bottom:4px;">Фото товара уже прикреплено из прокла</div>
             </div>
+            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;font-weight:700;color:#c4b5fd;margin-top:8px;">
+              <input type="checkbox" id="tk-sunduk-ch-adapt" style="accent-color:#7c3aed;"> Адаптировать под мою категорию
+            </label>
           </div>
 
           <div>
@@ -4424,7 +4427,7 @@ function tkGenerate(){
   } else {
     lines.push(`1)Скопировать проклу: ${copyUrl||'[ссылка на проклу]'}`);
   }
-  lines.push('1. Залить на домен gvita.beauty');
+  lines.push(`1. Залить на домен ${domain}`);
   lines.push('2. Удалить все редиректы и бекбаттоны');
   lines.push('3. Заменить ID , ID потоку , и api токен');
   lines.push('4. Все пути должны быть исключительно относительными!');
@@ -4582,7 +4585,7 @@ function tkGenerate(){
   const sundukFlagClip = document.getElementById('tk-sunduk-flag-clip');
   const sundukFlagVal = sundukFlagClip.value.trim();
   const sundukFlagHasImg = !!sundukFlagClip.dataset.imgData;
-  const sundukUrl = `https://gvita.beauty/landers/official-${name}-backbutton-${marker}-${geo}-sunduk/`;
+  const sundukUrl = `https://${domain}/landers/official-${name}-backbutton-${marker}-${geo}-sunduk/`;
   if(tkSundukOn){
     html += `<div style="margin-top:20px;padding:16px;border-radius:14px;border:2px solid #7c3aed;background:#12082a;">`;
     html += `<div style="font-size:13px;font-weight:800;color:#c4b5fd;text-transform:uppercase;letter-spacing:.08em;margin-bottom:12px;">🎁 СУНДУК / БЕК-БАТОН</div>`;
@@ -4606,6 +4609,13 @@ function tkGenerate(){
       else if(photoInput && photoInput.dataset.imgData) html += ` <span class="tk-highlight">(фото прикреплено)</span>`;
       html += `<br>`;
     }
+    // Adapt to category
+    const sundukAdapt = document.getElementById('tk-sunduk-ch-adapt');
+    if(sundukAdapt && sundukAdapt.checked){
+      const catBtn = document.querySelector('#tk-sunduk-cats .tk-scat.on');
+      const catName = catBtn ? catBtn.textContent.trim() : '';
+      html += `${pIdx++}) адаптировать сундук под категорию${catName?` <b>${catName}</b>`:' оффера'} (тексты и картинки по смыслу)<br>`;
+    }
     // Text replacement
     if(sundukOldText && sundukNewText){
       html += `${pIdx++}) заменить текст:<br><span style="color:var(--text3);font-style:italic;">${sundukOldText.replace(/\n/g,'<br>')}</span><br><b>на:</b><br><span style="color:#c4b5fd;">${sundukNewText.replace(/\n/g,'<br>')}</span><br>`;
@@ -4624,7 +4634,7 @@ function tkGenerate(){
   tkCurrentTaskData = {
     offerUrl, offerFull, offerShort: name, geoName, geoCode: tkGeoCode,
     geoFlag: geoEntry?geoEntry.flag:'', geoCur: document.getElementById('tk-currency').value,
-    offerId, streamId, apiToken, marker, num, finalUrl,
+    offerId, streamId, apiToken, marker, num, finalUrl, domain,
     proklaType, copyUrl,
     newPrice: document.getElementById('tk-new-price').value,
     oldPrice: document.getElementById('tk-old-price').value,
@@ -4834,8 +4844,9 @@ function tkBinomRows(t){
   const marker = t.marker || 'po';
   const geo = t.geoCode || '';
   const num = t.num || '1';
+  const dom = t.domain || 'gvita.beauty';
   const offerName = `${short}_prokla${num}_${geo}_${marker}`;
-  const offerUrl = `https://gvita.beauty/landers/official-${short}-${marker}-${geo}-lend${num}/?clickid={clickid}`;
+  const offerUrl = `https://${dom}/landers/official-${short}-${marker}-${geo}-lend${num}/?clickid={clickid}`;
   const campaignName = `${short}_${geo.toUpperCase()}`;
   const fields = [
     {label:'Offer Name', val: offerName},
@@ -4851,7 +4862,7 @@ function tkBinomRows(t){
   `).join('');
   if(t.sunduk){
     const sundukName = `${short}_sunduk_${geo}`;
-    const sundukUrl = `https://gvita.beauty/landers/official-${short}-${marker}-${geo}-sunduk/?clickid={clickid}`;
+    const sundukUrl = `https://${dom}/landers/official-${short}-${marker}-${geo}-sunduk/?clickid={clickid}`;
     html += `<div style="font-size:11px;font-weight:800;color:#a78bfa;text-transform:uppercase;margin:10px 0 6px;border-top:1px solid #3b1d6e;padding-top:8px;">🎁 Сундук</div>`;
     [{label:'Offer Name', val:sundukName},{label:'Offer URL', val:sundukUrl}].forEach(f=>{
       html += `<div class="tk-binom-row"><div class="tk-binom-label">${f.label}</div><div class="tk-binom-val" onclick="tkCopyText('${f.val.replace(/'/g,"\\'")}',this)">${f.val}</div><button class="tk-binom-copy" onclick="tkCopyText('${f.val.replace(/'/g,"\\'")}',this)">Копировать</button></div>`;
