@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.35"
+VERSION = "5.36"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -2089,7 +2089,7 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
       <div style="border:1.5px solid var(--border);border-radius:12px;padding:12px 14px;margin-bottom:18px;background:var(--surface2);">
         <div style="font-size:13px;font-weight:700;color:var(--text);margin-bottom:4px;">✍️ Свой заголовок и описание <span style="font-weight:400;color:var(--text3);">— по желанию</span></div>
         <div style="font-size:11px;color:var(--text3);margin-bottom:10px;">Впиши свой текст — панель разложит его на все видео (аккаунты × 3 формата) с крошечными отличиями, чтобы YouTube не видел одинаковые. Оставишь пустым — заголовки сгенерит ИИ, как раньше.</div>
-        <input id="custom-up-title" placeholder="Свой заголовок (напр. I Tried Waking Up at 5AM for a Week)" maxlength="90" style="width:100%;padding:9px 11px;border-radius:8px;border:1.5px solid var(--border);background:var(--surface);color:var(--text);font-size:13px;outline:none;margin-bottom:8px;box-sizing:border-box;" oninput="localStorage.setItem('custom_up_title',this.value)">
+        <input id="custom-up-title" placeholder="Свой заголовок (напр. I Tried Waking Up at 5AM for a Week)" maxlength="90" style="width:100%;padding:9px 11px;border-radius:8px;border:1.5px solid var(--border);background:var(--surface);color:var(--text);font-size:13px;outline:none;margin-bottom:8px;box-sizing:border-box;" oninput="localStorage.setItem('custom_up_title',this.value); if(typeof updateAutoRunBtn==='function') updateAutoRunBtn();">
         <textarea id="custom-up-desc" placeholder="Своё описание (2-3 предложения)" rows="2" style="width:100%;padding:9px 11px;border-radius:8px;border:1.5px solid var(--border);background:var(--surface);color:var(--text);font-size:13px;outline:none;box-sizing:border-box;resize:vertical;" oninput="localStorage.setItem('custom_up_desc',this.value)"></textarea>
       </div>
 
@@ -5692,7 +5692,17 @@ function updateAutoInfo(){
 }
 
 function updateAutoRunBtn(){
-  document.getElementById('auto-run-btn').disabled = !(autoVideoPath && autoCat);
+  const btn = document.getElementById('auto-run-btn');
+  // Тематика нужна только для AI-генерации заголовков. Если байер вписал свой
+  // заголовок — она не требуется, иначе кнопка «залипала» неактивной без причины.
+  const ct = document.getElementById('custom-up-title');
+  const hasOwnTitle = !!(ct && ct.value.trim());
+  btn.disabled = !(autoVideoPath && (autoCat || hasOwnTitle));
+  // Подсказать, чего именно не хватает
+  if(btn.disabled){
+    btn.title = !autoVideoPath ? 'Сначала выбери видео'
+              : 'Выбери тематику или впиши свой заголовок выше';
+  } else { btn.title = ''; }
 }
 
 async function startAutoUpload(){
