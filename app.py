@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.31"
+VERSION = "5.32"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -3915,6 +3915,16 @@ function aiCopyResult(){
 }
 function aiEsc(s){ return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 function aiFlag(cc){ if(!cc||cc.length!==2) return ''; try{ return String.fromCodePoint(...[...cc.toUpperCase()].map(c=>0x1F1E6+c.charCodeAt(0)-65)); }catch(e){ return ''; } }
+// Домен для ТЗ: берём из видимого поля во вкладке «Таски» (вкладка Binom скрыта,
+// полагаться на её селектор нельзя). Фоллбэк — активный домен заливки.
+function tkTaskDomain(){
+  const el = document.getElementById('tk-domain');
+  const v = el && el.value.trim();
+  if(v) return v;
+  try { return binomTarget()==='swaticu' ? 'mybeauty.day' : 'gvita.beauty'; }
+  catch(e){ return 'gvita.beauty'; }
+}
+
 function aiSaveTask(){
   if(!aiCurrentTask){ alert('Сначала сгенерируй таску'); return; }
   const txt = aiCurrentTask;
@@ -3931,7 +3941,7 @@ function aiSaveTask(){
   if(!marker && lp.length >= 3) marker = lp[2].trim();
   if(!geoCode && lp.length >= 2 && /^[A-Za-z]{2}$/.test(lp[1].trim())) geoCode = lp[1].trim().toUpperCase();
   const shortName = (nameM ? nameM[1].trim() : (lp[0]||'').trim()) || offerFull;
-  const domain = (binomTarget && binomTarget()==='swaticu') ? 'mybeauty.day' : 'gvita.beauty';
+  const domain = tkTaskDomain();
   const tasks = JSON.parse(localStorage.getItem('tk_saved_tasks')||'[]');
   tasks.unshift({ id: Date.now(), isAI: true, aiText: txt, offerFull: offerFull, offerShort: shortName,
     marker: marker||'po', num: '1', domain: domain, landName: landName,
@@ -3964,7 +3974,7 @@ function aiTaskGenerate(){
       offer_text: offerText,
       comment: (document.getElementById('ai-comment').value||'').trim(),
       mark: (document.getElementById('ai-mark').value||'').trim(),
-      domain: binomTarget()==='swaticu' ? 'mybeauty.day' : 'gvita.beauty'
+      domain: tkTaskDomain()
     })
   }).then(r=>r.json()).then(d=>{
     btn.disabled = false; btn.textContent = '✨ Разобрать → таска';
