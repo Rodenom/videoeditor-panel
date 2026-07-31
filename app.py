@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.27"
+VERSION = "5.28"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -2247,7 +2247,11 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
     </div>
 
     <div class="up-section">
-      <div class="up-section-title">📺 Мои каналы</div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:10px;">
+        <div class="up-section-title" style="margin:0;">📺 Мои каналы</div>
+        <button onclick="checkAllTokens(this)" title="Реально проверить, живы ли токены — не дожидаясь падения заливки" style="font-size:12px;font-weight:700;padding:7px 13px;border-radius:8px;border:1.5px solid var(--accent1);background:var(--surface2);color:var(--accent1);cursor:pointer;">🩺 Проверить все токены</button>
+      </div>
+      <div id="check-tokens-result" style="font-size:12px;margin-bottom:8px;"></div>
       <div id="channels-list-top" style="display:flex;flex-direction:column;gap:8px;"></div>
     </div>
 
@@ -3195,6 +3199,29 @@ async function loadChannels(){
     if(sel){ const opt=document.createElement('option'); opt.value=ch.id; opt.textContent=`📺 ${ch.name}`; sel.appendChild(opt); }
   });
   updateAutoInfo();
+}
+
+async function checkAllTokens(btn){
+  const box = document.getElementById('check-tokens-result');
+  const orig = btn.textContent;
+  btn.disabled = true; btn.textContent = '⏳ Проверяем...';
+  box.innerHTML = '<span style="color:var(--text3);">Проверяем каждый канал через его прокси — это может занять минуту...</span>';
+  try {
+    const r = await fetch('/check_tokens');
+    const d = await r.json();
+    const dead = (d.results||[]).filter(x=>!x.alive);
+    let html = `<b style="color:${dead.length?'#dc2626':'#16a34a'};">Живых ${d.alive} из ${d.checked}</b>`;
+    if(dead.length){
+      html += '<div style="margin-top:6px;">' + dead.map(x=>
+        `<div style="color:#dc2626;">✕ ${x.name} — ${x.reason||'мёртв'}</div>`).join('') + '</div>';
+      html += '<div style="color:var(--text3);margin-top:4px;">Нажми «Переавторизовать» у этих каналов.</div>';
+    }
+    box.innerHTML = html;
+    loadChannels();
+  } catch(e){
+    box.innerHTML = '<span style="color:#dc2626;">❌ ' + e.message + '</span>';
+  }
+  btn.disabled = false; btn.textContent = orig;
 }
 
 async function deleteChannel(chId){
@@ -6271,6 +6298,46 @@ class Handler(BaseHTTPRequestHandler):
                     'name_lookup_error': ch_info.get('name_lookup_error', ''),
                 })
             self.json({'channels': result})
+        elif path == '/check_tokens':
+            # Реальная проверка живости каждого канала: пробуем обновить токен
+            # через ЕГО прокси. Счётчик дней — только оценка; Google может
+            # отозвать токен раньше, и до этой кнопки байер узнавал об этом
+            # лишь когда падала заливка.
+            from google.oauth2.credentials import Credentials as _Cr
+            from google.auth.transport.requests import Request as _Rq
+            _SC = ['https://www.googleapis.com/auth/youtube.upload']
+            channels = load_channels(user)
+            out = []
+            changed = False
+            for ch_id, ch_info in channels.items():
+                tf = ch_info.get('token_file', '')
+                res = {'id': ch_id, 'name': ch_info.get('name', '')}
+                if not tf or not os.path.exists(tf):
+                    res.update(alive=False, reason='нет файла токена — добавь канал заново')
+                else:
+                    _p = normalize_proxy(ch_info.get('proxy', ''))
+                    if _p:
+                        os.environ['HTTPS_PROXY'] = _p; os.environ['HTTP_PROXY'] = _p
+                    else:
+                        os.environ.pop('HTTPS_PROXY', None); os.environ.pop('HTTP_PROXY', None)
+                    try:
+                        creds = _Cr.from_authorized_user_file(tf, _SC)
+                        if creds.expired and creds.refresh_token:
+                            creds.refresh(_Rq())
+                            with open(tf, 'w') as _f:
+                                _f.write(creds.to_json())
+                        res.update(alive=bool(creds.valid), reason='' if creds.valid else 'токен невалиден')
+                    except Exception as e:
+                        res.update(alive=False, reason=friendly_upload_error(e))
+                # синхронизируем метку ошибки со свежей правдой
+                if res['alive'] and ch_info.get('last_error'):
+                    ch_info.pop('last_error', None); changed = True
+                elif not res['alive'] and ch_info.get('last_error') != res['reason']:
+                    ch_info['last_error'] = res['reason']; changed = True
+                out.append(res)
+            if changed:
+                save_channels(user, channels)
+            self.json({'checked': len(out), 'alive': sum(1 for r in out if r['alive']), 'results': out})
         elif path == '/add_channel_status/':
             pass
         elif path.startswith('/add_channel_status/'):
