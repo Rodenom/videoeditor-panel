@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.39"
+VERSION = "5.40"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -1097,7 +1097,10 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user, 
             ch_proxy = ch_info.get('proxy', '')
             log.append(f'📦 Набор {sets_done+1}/{n_sets} → канал: {ch_info["name"]}' + (' 🔒 прокси' if ch_proxy else ''))
             try:
+                log.append('  🔐 Подключаемся к каналу (через прокси)...')
+                _ta = time.time()
                 yt = get_youtube_service(ch_info['token_file'], proxy=ch_proxy)
+                log[-1] = '  🔐 Канал подключён (%.0f сек)' % (time.time() - _ta)
             except Exception as _auth_err:
                 _auth_msg = friendly_upload_error(_auth_err)
                 log.append(f'  ❌ Ошибка авторизации: {_auth_msg} — пропускаем канал')
@@ -1205,7 +1208,9 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user, 
             for fmt_name, _, label in formats:
                 base_fpath = converted[fmt_name]
                 _uq = os.path.join(tmp_dir, 'uq_%d_%d_%s.mp4' % (sets_done, vid_idx, fmt_name.replace(':', 'x')))
-                fpath = uniqueize_file(base_fpath, _uq, vid_idx)  # своя уникальная копия под этот аккаунт
+                log.append(f'  🎨 {fmt_name}: делаем уникальную копию...')
+                fpath = uniqueize_file(base_fpath, _uq, vid_idx)
+                log[-1] = f'  🎨 {fmt_name}: уникальная копия готова'
                 if use_custom:
                     fmt_title = vary_text(custom_title, vid_idx, True)
                     fmt_desc = vary_text(custom_desc, vid_idx, False)
@@ -1321,7 +1326,10 @@ def ready_upload_to_youtube(job_id, ready_files, n_sets, category, privacy, user
                 i = sets_done_r
                 ch_proxy = ch_info.get('proxy', '')
                 log.append(f'📦 Набор {i+1}/{n_sets} → канал: {ch_info["name"]}' + (' 🔒 прокси' if ch_proxy else ''))
+                log.append('  🔐 Подключаемся к каналу (через прокси)...')
+                _ta = time.time()
                 yt = get_youtube_service(ch_info['token_file'], proxy=ch_proxy)
+                log[-1] = '  🔐 Канал подключён (%.0f сек)' % (time.time() - _ta)
                 if not ch_proxy:
                     os.environ.pop('HTTPS_PROXY', None)
                     os.environ.pop('HTTP_PROXY', None)
@@ -1373,7 +1381,11 @@ def ready_upload_to_youtube(job_id, ready_files, n_sets, category, privacy, user
                 for rf in ready_files:
                     fmt = rf['fmt']
                     _uqr = os.path.join(OUTPUT_DIR, 'uq_%s_%d_%s.mp4' % (job_id, vid_idx_r, fmt.replace(':', 'x')))
-                    fpath = uniqueize_file(rf['path'], _uqr, vid_idx_r)  # своя уникальная копия под этот аккаунт
+                    # Уникализация занимает секунды-минуты и раньше шла молча —
+                    # байеру казалось, что панель зависла. Пишем в лог.
+                    log.append(f'  🎨 {fmt}: делаем уникальную копию...')
+                    fpath = uniqueize_file(rf['path'], _uqr, vid_idx_r)
+                    log[-1] = f'  🎨 {fmt}: уникальная копия готова'
                     if use_custom_r:
                         up_title = vary_text(custom_title, vid_idx_r, True)
                         up_desc = vary_text(custom_desc, vid_idx_r, False)
@@ -1454,14 +1466,19 @@ def mass_upload_to_youtube(job_id, files, n_sets, title, description, privacy, u
                 i = sets_done_m
                 ch_proxy = ch_info.get('proxy', '')
                 log.append(f'📦 Набор {i+1}/{n_sets} → канал: {ch_info["name"]}' + (f' 🔒 прокси' if ch_proxy else ''))
+                log.append('  🔐 Подключаемся к каналу (через прокси)...')
+                _ta = time.time()
                 yt = get_youtube_service(ch_info['token_file'], proxy=ch_proxy)
+                log[-1] = '  🔐 Канал подключён (%.0f сек)' % (time.time() - _ta)
                 if not ch_proxy:
                     os.environ.pop('HTTPS_PROXY', None)
                     os.environ.pop('HTTP_PROXY', None)
                 set_links = []
                 for f in files:
                     _uqm = os.path.join(OUTPUT_DIR, 'uq_%s_%d_%s.mp4' % (job_id, vid_idx_m, str(f['fmt']).replace(':', 'x')))
-                    fpath = uniqueize_file(f['path'], _uqm, vid_idx_m)  # своя копия под этот аккаунт
+                    log.append(f'  🎨 {f["fmt"]}: делаем уникальную копию...')
+                    fpath = uniqueize_file(f['path'], _uqm, vid_idx_m)
+                    log[-1] = f'  🎨 {f["fmt"]}: уникальная копия готова'
                     ftitle = vary_text(f.get('title', title), vid_idx_m, True)
                     fdesc = vary_text(description, vid_idx_m, False)
                     vid_idx_m += 1
