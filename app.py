@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.37"
+VERSION = "5.38"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -6344,8 +6344,12 @@ class Handler(BaseHTTPRequestHandler):
         elif path == '/update':
             import urllib.request as _ur
             try:
-                update_url = 'https://raw.githubusercontent.com/Rodenom/videoeditor-panel/main/app.py'
-                req = _ur.Request(update_url)
+                # ?cb= + no-cache обязательны: raw.githubusercontent кэшируется
+                # на CDN до 5 минут, и у каждого байера свой узел — без обхода
+                # кэша «Обновить» молча возвращает старую версию.
+                update_url = ('https://raw.githubusercontent.com/Rodenom/videoeditor-panel/main/app.py?cb=%d'
+                              % int(time.time()))
+                req = _ur.Request(update_url, headers={'Cache-Control': 'no-cache', 'Pragma': 'no-cache'})
                 new_code = _ur.urlopen(req, timeout=10).read()
                 current_file = os.path.abspath(__file__)
                 with open(current_file, 'rb') as f:
@@ -7564,10 +7568,11 @@ if __name__ == '__main__':
     # Auto-update install_mac.command to fix old versions
     try:
         import urllib.request as _ur3
-        _cmd_url = 'https://raw.githubusercontent.com/Rodenom/videoeditor-panel/main/install_mac.command'
+        _cmd_url = ('https://raw.githubusercontent.com/Rodenom/videoeditor-panel/main/install_mac.command?cb=%d'
+                    % int(time.time()))
         _cmd_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'install_mac.command')
         if os.path.exists(_cmd_path):
-            _cmd_new = _ur3.urlopen(_ur3.Request(_cmd_url), timeout=8).read()
+            _cmd_new = _ur3.urlopen(_ur3.Request(_cmd_url, headers={'Cache-Control': 'no-cache'}), timeout=8).read()
             with open(_cmd_path, 'rb') as _f3:
                 _cmd_cur = _f3.read()
             if _cmd_new != _cmd_cur:
@@ -7580,8 +7585,9 @@ if __name__ == '__main__':
     # Auto-update on startup
     try:
         import urllib.request as _ur2
-        _url2 = 'https://raw.githubusercontent.com/Rodenom/videoeditor-panel/main/app.py'
-        _new2 = _ur2.urlopen(_ur2.Request(_url2), timeout=8).read()
+        _url2 = ('https://raw.githubusercontent.com/Rodenom/videoeditor-panel/main/app.py?cb=%d'
+                 % int(time.time()))
+        _new2 = _ur2.urlopen(_ur2.Request(_url2, headers={'Cache-Control': 'no-cache'}), timeout=8).read()
         import re as _re2
         _nver2 = (_re2.search(rb'VERSION = "([^"]+)"', _new2) or [None,None])[1]
         if _nver2:
