@@ -120,7 +120,7 @@ def main():
         app.save_channels = lambda *a, **k: None
 
         for mode_name, fn, kwargs in [
-            ('ready_upload', app.ready_upload_to_youtube, dict(custom_title='T', custom_desc='D')),
+            ('ready_upload', app.ready_upload_to_youtube, dict(custom_title='T', custom_desc='D', uniqueize=True)),
             ('mass_upload', app.mass_upload_to_youtube, None),
         ]:
             cap = []
@@ -136,7 +136,7 @@ def main():
                 if kwargs is not None:
                     fn(jid, files, 2, 'Cat', 'unlisted', 'pavel', **kwargs)
                 else:
-                    fn(jid, files, 2, 'T', 'D', 'unlisted', 'pavel')
+                    fn(jid, files, 2, 'T', 'D', 'unlisted', 'pavel', uniqueize=True)
                 check('%s: 4 файла уникальны' % mode_name, len(set(h for h, _ in cap)) == 4, '%d уник.' % len(set(h for h, _ in cap)))
                 check('%s: 4 заголовка уникальны' % mode_name, len(set(t for _, t in cap)) == 4)
                 left = [f for f in os.listdir(app.OUTPUT_DIR) if f.startswith('uq_' + jid)]

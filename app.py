@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.41"
+VERSION = "5.42"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -1046,7 +1046,7 @@ def uniqueize_file(src, dst, idx=0):
     return src
 
 
-def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user, custom_title='', custom_desc=''):
+def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user, custom_title='', custom_desc='', uniqueize=False):
     from googleapiclient.http import MediaFileUpload
     job = MASS_UPLOAD_JOBS[job_id]
     job['status'] = 'running'
@@ -1223,9 +1223,12 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user, 
             for fmt_name, _, label in formats:
                 base_fpath = converted[fmt_name]
                 _uq = os.path.join(tmp_dir, 'uq_%d_%d_%s.mp4' % (sets_done, vid_idx, fmt_name.replace(':', 'x')))
-                log.append(f'  🎨 {fmt_name}: делаем уникальную копию...')
-                fpath = uniqueize_file(base_fpath, _uq, vid_idx)
-                log[-1] = f'  🎨 {fmt_name}: уникальная копия готова'
+                if uniqueize:
+                    log.append(f'  🎨 {fmt_name}: делаем уникальную копию...')
+                    fpath = uniqueize_file(base_fpath, _uq, vid_idx)
+                    log[-1] = f'  🎨 {fmt_name}: уникальная копия готова'
+                else:
+                    fpath = base_fpath
                 if use_custom:
                     fmt_title = vary_text(custom_title, vid_idx, True)
                     fmt_desc = vary_text(custom_desc, vid_idx, False)
@@ -1300,7 +1303,7 @@ def friendly_upload_error(err):
     return 'ошибка: ' + s[:120]
 
 
-def ready_upload_to_youtube(job_id, ready_files, n_sets, category, privacy, user, custom_title='', custom_desc=''):
+def ready_upload_to_youtube(job_id, ready_files, n_sets, category, privacy, user, custom_title='', custom_desc='', uniqueize=False):
     """Upload already-converted videos directly to YouTube without re-encoding."""
     from googleapiclient.http import MediaFileUpload
     job = MASS_UPLOAD_JOBS[job_id]
@@ -1398,9 +1401,12 @@ def ready_upload_to_youtube(job_id, ready_files, n_sets, category, privacy, user
                     _uqr = os.path.join(OUTPUT_DIR, 'uq_%s_%d_%s.mp4' % (job_id, vid_idx_r, fmt.replace(':', 'x')))
                     # Уникализация занимает секунды-минуты и раньше шла молча —
                     # байеру казалось, что панель зависла. Пишем в лог.
-                    log.append(f'  🎨 {fmt}: делаем уникальную копию...')
-                    fpath = uniqueize_file(rf['path'], _uqr, vid_idx_r)
-                    log[-1] = f'  🎨 {fmt}: уникальная копия готова'
+                    if uniqueize:
+                        log.append(f'  🎨 {fmt}: делаем уникальную копию...')
+                        fpath = uniqueize_file(rf['path'], _uqr, vid_idx_r)
+                        log[-1] = f'  🎨 {fmt}: уникальная копия готова'
+                    else:
+                        fpath = rf['path']
                     if use_custom_r:
                         up_title = vary_text(custom_title, vid_idx_r, True)
                         up_desc = vary_text(custom_desc, vid_idx_r, False)
@@ -1444,7 +1450,7 @@ def ready_upload_to_youtube(job_id, ready_files, n_sets, category, privacy, user
         log.append(f'❌ Ошибка: {str(e)}')
 
 
-def mass_upload_to_youtube(job_id, files, n_sets, title, description, privacy, user):
+def mass_upload_to_youtube(job_id, files, n_sets, title, description, privacy, user, uniqueize=False):
     from googleapiclient.http import MediaFileUpload
     job = MASS_UPLOAD_JOBS[job_id]
     job['status'] = 'running'
@@ -1491,9 +1497,12 @@ def mass_upload_to_youtube(job_id, files, n_sets, title, description, privacy, u
                 set_links = []
                 for f in files:
                     _uqm = os.path.join(OUTPUT_DIR, 'uq_%s_%d_%s.mp4' % (job_id, vid_idx_m, str(f['fmt']).replace(':', 'x')))
-                    log.append(f'  🎨 {f["fmt"]}: делаем уникальную копию...')
-                    fpath = uniqueize_file(f['path'], _uqm, vid_idx_m)
-                    log[-1] = f'  🎨 {f["fmt"]}: уникальная копия готова'
+                    if uniqueize:
+                        log.append(f'  🎨 {f["fmt"]}: делаем уникальную копию...')
+                        fpath = uniqueize_file(f['path'], _uqm, vid_idx_m)
+                        log[-1] = f'  🎨 {f["fmt"]}: уникальная копия готова'
+                    else:
+                        fpath = f['path']
                     ftitle = vary_text(f.get('title', title), vid_idx_m, True)
                     fdesc = vary_text(description, vid_idx_m, False)
                     vid_idx_m += 1
@@ -2123,6 +2132,11 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
         <div style="font-size:11px;color:var(--text3);margin-bottom:10px;">Впиши свой текст — панель разложит его на все видео (аккаунты × 3 формата) с крошечными отличиями, чтобы YouTube не видел одинаковые. Оставишь пустым — заголовки сгенерит ИИ, как раньше.</div>
         <input id="custom-up-title" placeholder="Свой заголовок (напр. I Tried Waking Up at 5AM for a Week)" maxlength="90" style="width:100%;padding:9px 11px;border-radius:8px;border:1.5px solid var(--border);background:var(--surface);color:var(--text);font-size:13px;outline:none;margin-bottom:8px;box-sizing:border-box;" oninput="localStorage.setItem('custom_up_title',this.value); if(typeof updateAutoRunBtn==='function') updateAutoRunBtn();">
         <textarea id="custom-up-desc" placeholder="Своё описание (2-3 предложения)" rows="2" style="width:100%;padding:9px 11px;border-radius:8px;border:1.5px solid var(--border);background:var(--surface);color:var(--text);font-size:13px;outline:none;box-sizing:border-box;resize:vertical;" oninput="localStorage.setItem('custom_up_desc',this.value)"></textarea>
+        <label style="display:flex;align-items:center;gap:7px;margin-top:10px;font-size:12px;color:var(--text2);cursor:pointer;">
+          <input type="checkbox" id="uq-copies" style="accent-color:var(--accent1);" onchange="localStorage.setItem('uq_copies', this.checked?'1':'0')">
+          🎨 Уникализировать каждую копию видео
+          <span style="color:var(--text3);">— защита от дублей, но заметно дольше на длинных роликах</span>
+        </label>
       </div>
 
       <!-- AUTO MODE -->
@@ -3479,6 +3493,8 @@ document.addEventListener('DOMContentLoaded', () => {
   const ct = document.getElementById('custom-up-title'); const cd = document.getElementById('custom-up-desc');
   if(ct) ct.value = localStorage.getItem('custom_up_title') || '';
   if(cd) cd.value = localStorage.getItem('custom_up_desc') || '';
+  const uq = document.getElementById('uq-copies');
+  if(uq) uq.checked = localStorage.getItem('uq_copies') === '1';
 });
 
 let uploadCat = '';
@@ -5693,7 +5709,8 @@ async function startReadyUpload(){
   const res = await fetch('/ready_upload',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({files, n_sets:n, category:readyCat, privacy:readyPrivacy,
       custom_title:(document.getElementById('custom-up-title').value||'').trim(),
-      custom_desc:(document.getElementById('custom-up-desc').value||'').trim()})});
+      custom_desc:(document.getElementById('custom-up-desc').value||'').trim(),
+      uniqueize:(document.getElementById('uq-copies')||{}).checked||false})});
   const data = await res.json();
   readyJobId = data.job_id;
   readyPollTimer = setInterval(()=>pollReadyJob(), 1500);
@@ -5808,7 +5825,8 @@ async function startAutoUpload(){
   const _ctitle = (document.getElementById('custom-up-title').value||'').trim() || (document.getElementById('auto-ai-title').textContent||'').trim();
   const _cdesc = (document.getElementById('custom-up-desc').value||'').trim() || (document.getElementById('auto-ai-desc').textContent||'').trim();
   const res = await fetch('/auto_upload',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({src_video:autoVideoPath, n_sets:n, category:autoCat, privacy:autoPrivacy, custom_title:_ctitle, custom_desc:_cdesc})});
+    body:JSON.stringify({src_video:autoVideoPath, n_sets:n, category:autoCat, privacy:autoPrivacy, custom_title:_ctitle, custom_desc:_cdesc,
+      uniqueize:(document.getElementById('uq-copies')||{}).checked||false})});
   const data = await res.json();
   autoJobId = data.job_id;
 
@@ -7530,7 +7548,7 @@ class Handler(BaseHTTPRequestHandler):
             t = threading.Thread(target=auto_convert_and_upload, args=(
                 job_id, params['src_video'], params.get('n_sets', 1),
                 params.get('category','Видео'), params.get('privacy','unlisted'), user,
-                params.get('custom_title',''), params.get('custom_desc','')
+                params.get('custom_title',''), params.get('custom_desc',''), bool(params.get('uniqueize'))
             ), daemon=True)
             t.start()
             self.json({'job_id': job_id})
@@ -7542,7 +7560,7 @@ class Handler(BaseHTTPRequestHandler):
             t = threading.Thread(target=ready_upload_to_youtube, args=(
                 job_id, params['files'], params['n_sets'],
                 params.get('category',''), params.get('privacy','unlisted'), user,
-                params.get('custom_title',''), params.get('custom_desc','')
+                params.get('custom_title',''), params.get('custom_desc',''), bool(params.get('uniqueize'))
             ), daemon=True)
             t.start()
             self.json({'job_id': job_id})
