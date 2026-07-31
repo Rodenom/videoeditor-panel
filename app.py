@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.38"
+VERSION = "5.39"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -6363,6 +6363,11 @@ class Handler(BaseHTTPRequestHandler):
                     with open(current_file, 'wb') as f:
                         f.write(new_code)
                     self.json({'ok': True, 'status': 'updated', 'old': VERSION, 'new': new_ver})
+                    # Файл на диске обновлён, но процесс всё ещё крутит СТАРЫЙ код
+                    # в памяти — без этого выхода панель продолжала показывать
+                    # прежнюю версию, и байер думал, что обновление не сработало.
+                    # Код 42 — сигнал лаунчеру (install_mac.command) перезапустить.
+                    threading.Timer(1.0, lambda: os._exit(42)).start()
                 else:
                     self.json({'ok': True, 'status': 'latest', 'version': VERSION})
             except Exception as e:
