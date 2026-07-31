@@ -141,14 +141,52 @@ def main():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
-    print('\n6. Понятные тексты ошибок')
+    print('\n6. Прокси не теряется, если упал AI-запрос')
+    # Регрессия из практики: AI-вызов снимал прокси, а восстанавливал ПОСЛЕ
+    # запроса. Падение Claude (таймаут/429) оставляло окружение без прокси —
+    # и видео уходило с реального IP панели вместо прокси аккаунта.
+    tmp = tempfile.mkdtemp(prefix='vepx_')
+    try:
+        vid = mk_video(os.path.join(tmp, 'p.mp4'), '320x180', 1)
+        PROXY = 'socks5://user:pass@1.2.3.4:1080'
+        seen = []
+        class FR2:
+            def __init__(s, *a): seen.append(os.environ.get('HTTPS_PROXY')); s._i = 'v%d' % len(seen)
+            def next_chunk(s): return (None, {'id': s._i})
+        import googleapiclient.http as gh2
+        gh2.MediaFileUpload = lambda path, **k: type('M', (), {'_p': path})()
+        def _svc(token_file=None, proxy=''):
+            if proxy:
+                os.environ['HTTPS_PROXY'] = app.normalize_proxy(proxy)
+            return type('Y', (), {'videos': lambda s: type('V', (), {'insert': lambda s2, **kw: FR2()})()})()
+        app.get_youtube_service = _svc
+        app.load_channels = lambda user='pavel': {'A': {'name': 'A', 'token_file': 'x', 'proxy': PROXY, 'project_id': None}}
+        app.save_channels = lambda *a, **k: None
+        app.get_anthropic_key = lambda: 'sk-fake'
+        import requests as _rq2
+        _orig_post = _rq2.post
+        _rq2.post = lambda *a, **k: (_ for _ in ()).throw(_rq2.exceptions.Timeout('fail'))
+        try:
+            jid2 = 'st_proxy'
+            app.MASS_UPLOAD_JOBS[jid2] = {'status': 'pending', 'log': [], 'sets': [], 'total': 0, 'done': 0}
+            os.environ['HTTPS_PROXY'] = PROXY
+            app.ready_upload_to_youtube(jid2, [{'path': vid, 'fmt': '9:16'}], 1, 'C', 'unlisted', 'pavel')
+            check('прокси пережил падение AI-запроса', bool(seen) and seen[0] == PROXY,
+                  'в момент заливки было: %s' % (seen or 'заливки не было'))
+        finally:
+            _rq2.post = _orig_post
+            os.environ.pop('HTTPS_PROXY', None)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    print('\n7. Понятные тексты ошибок')
     fe = app.friendly_upload_error
     check('SOCKS -> «прокси не отвечает»', 'прокси не отвечает' in fe(Exception("SOCKSHTTPSConnectionPool ... Max retries exceeded")))
     check('Failed to parse -> про формат', 'формат' in fe(Exception("Failed to parse: 1.2.3.4:80:u:p")))
     check('invalid_grant -> про токен', 'токен' in fe(Exception("invalid_grant: Token has been expired")))
     check('uploadLimitExceeded -> про лимит', 'лимит' in fe(Exception("uploadLimitExceeded")))
 
-    print('\n7. Домен не захардкожен в генерации ТЗ')
+    print('\n8. Домен не захардкожен в генерации ТЗ')
     src = open(os.path.join(HERE, 'app.py'), encoding='utf-8').read()
     bad_lines = [l.strip()[:90] for l in src.splitlines()
                  if 'gvita.beauty' in l and 'landers/official-${' in l]
