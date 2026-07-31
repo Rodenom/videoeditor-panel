@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.28"
+VERSION = "5.29"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -1396,9 +1396,11 @@ def mass_upload_to_youtube(job_id, files, n_sets, title, description, privacy, u
         ordered_m = list(all_channels_m.items())
         if not ordered_m:
             raise Exception('Нет каналов. Добавь хотя бы один канал.')
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
         failed_m = set()
         sets_done_m = 0
         ch_index_m = 0
+        vid_idx_m = 0  # сквозной индекс видео — уникализация файла и заголовка
         while sets_done_m < n_sets:
             if len(failed_m) >= len(ordered_m):
                 log.append('⚠ Все каналы недоступны, выполнено: ' + str(sets_done_m) + '/' + str(n_sets))
@@ -1425,11 +1427,14 @@ def mass_upload_to_youtube(job_id, files, n_sets, title, description, privacy, u
                 set_links = []
                 today_data = load_uploads_today()
                 for f in files:
-                    fpath = f['path']
-                    ftitle = f.get('title', title)
+                    _uqm = os.path.join(OUTPUT_DIR, 'uq_%s_%d_%s.mp4' % (job_id, vid_idx_m, str(f['fmt']).replace(':', 'x')))
+                    fpath = uniqueize_file(f['path'], _uqm, vid_idx_m)  # своя копия под этот аккаунт
+                    ftitle = vary_text(f.get('title', title), vid_idx_m, True)
+                    fdesc = vary_text(description, vid_idx_m, False)
+                    vid_idx_m += 1
                     log.append(f'  ⏳ Загружаем {f["fmt"]}...')
                     body = {
-                        'snippet': {'title': ftitle, 'description': description, 'tags': [], 'categoryId': '22'},
+                        'snippet': {'title': ftitle, 'description': fdesc, 'tags': [], 'categoryId': '22'},
                         'status': {'privacyStatus': privacy}
                     }
                     media = MediaFileUpload(fpath, mimetype='video/mp4', resumable=True, chunksize=1024*1024*5)
@@ -1450,6 +1455,9 @@ def mass_upload_to_youtube(job_id, files, n_sets, title, description, privacy, u
                     if proj_id:
                         increment_project_upload(user, proj_id)
                     job['done'] += 1
+                    if fpath == _uqm:  # чистим временную уникальную копию
+                        try: os.remove(_uqm)
+                        except Exception: pass
                 job['sets'].append({'set_idx': sets_done_m+1, 'channel': ch_info['name'], 'links': set_links})
                 sets_done_m += 1
             except Exception as _ch_err_m:
