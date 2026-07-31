@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.40"
+VERSION = "5.41"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -796,7 +796,7 @@ def get_youtube_service(token_file=None, proxy=''):
 
 CHANNEL_AUTH_FLOWS = {}  # job_id -> flow (waiting for code)
 
-def add_channel_auth(job_id, user='pavel', is_local=True, proxy='', login_hint=''):
+def add_channel_auth(job_id, user='pavel', is_local=True, proxy='', login_hint='', project_id=''):
     try:
         from google_auth_oauthlib.flow import InstalledAppFlow, Flow
         from googleapiclient.discovery import build
@@ -807,7 +807,22 @@ def add_channel_auth(job_id, user='pavel', is_local=True, proxy='', login_hint='
         ]
         UPLOAD_JOBS[job_id]['status'] = 'running'
 
-        secret_file = get_best_project_secret(user) or CREDENTIALS_FILE
+        # При ПЕРЕавторизации берём проект, к которому канал уже привязан.
+        # Иначе панель уходила в проект с наименьшим расходом за день: аккаунт
+        # не в его Test users -> Google блокирует вход, и вдобавок сгорает слот
+        # в пожизненном лимите 100 юзеров чужого проекта.
+        secret_file = ''
+        if project_id:
+            _projs = load_projects(user)
+            if project_id in _projs:
+                secret_file = _projs[project_id].get('file', '')
+                if secret_file and not os.path.exists(secret_file):
+                    secret_file = ''
+                if secret_file:
+                    UPLOAD_JOBS[job_id]['log'].append(
+                        '🔑 Проект канала: %s' % _projs[project_id].get('name', project_id))
+        if not secret_file:
+            secret_file = get_best_project_secret(user) or CREDENTIALS_FILE
         if is_local:
             # Pavel on localhost — fully automatic
             UPLOAD_JOBS[job_id]['log'].append('🔐 Открываем браузер для авторизации...')
@@ -3329,7 +3344,7 @@ async function assignProject(chId){
 function reauthChannel(chId){
   const ch = (window.__chCache || {})[chId];
   if(!ch){ alert('Канал не найден, обнови страницу'); return; }
-  addChannel({email: ch.email || '', proxy: ch.proxy || '', reauth: true});
+  addChannel({email: ch.email || '', proxy: ch.proxy || '', reauth: true, project_id: ch.project_id || ''});
 }
 
 let addChTimer = null;
@@ -3355,7 +3370,7 @@ async function reauthAll(btn){
     const ch = need[i];
     btn.textContent = `🔄 ${i+1} из ${need.length}...`;
     box.innerHTML = `<b>Канал ${i+1} из ${need.length}:</b> ${ch.name} — пройди вход Google в окне справа.`;
-    const res = await addChannel({email: ch.email || '', proxy: ch.proxy || '', reauth: true});
+    const res = await addChannel({email: ch.email || '', proxy: ch.proxy || '', reauth: true, project_id: ch.project_id || ''});
     if(res && res.ok) ok++;
   }
   btn.disabled = false; btn.textContent = orig;
@@ -3403,7 +3418,7 @@ async function addChannel(prefill){
     };
   });
 
-  const resp = await fetch('/add_channel', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({proxy: proxyStr, force_manual: useOcto, login_hint: loginHint})});
+  const resp = await fetch('/add_channel', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({proxy: proxyStr, force_manual: useOcto, login_hint: loginHint, project_id: prefill.project_id || ''})});
   const data = await resp.json();
   const jobId = data.job_id;
   let logLen = 0;
@@ -7321,10 +7336,11 @@ class Handler(BaseHTTPRequestHandler):
             proxy = normalize_proxy(ch_params.get('proxy', ''))
             force_manual = ch_params.get('force_manual', False)
             login_hint = ch_params.get('login_hint', '').strip()
+            ch_project_id = ch_params.get('project_id', '').strip()
             job_id = uuid.uuid4().hex[:8]
             UPLOAD_JOBS[job_id] = {'status':'pending','log':[],'channel':None,'auth_url':None,'proxy':proxy}
             is_local = self.client_address[0] in ('127.0.0.1', '::1') and not force_manual
-            t = threading.Thread(target=add_channel_auth, args=(job_id, user, is_local, proxy, login_hint), daemon=True)
+            t = threading.Thread(target=add_channel_auth, args=(job_id, user, is_local, proxy, login_hint, ch_project_id), daemon=True)
             t.start()
             self.json({'job_id': job_id})
         elif path == '/add_channel_code':
