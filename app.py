@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.36"
+VERSION = "5.37"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -2289,7 +2289,10 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
     <div class="up-section">
       <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:10px;">
         <div class="up-section-title" style="margin:0;">📺 Мои каналы</div>
-        <button onclick="checkAllTokens(this)" title="Реально проверить, живы ли токены — не дожидаясь падения заливки" style="font-size:12px;font-weight:700;padding:7px 13px;border-radius:8px;border:1.5px solid var(--accent1);background:var(--surface2);color:var(--accent1);cursor:pointer;">🩺 Проверить все токены</button>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button onclick="checkAllTokens(this)" title="Реально проверить, живы ли токены — не дожидаясь падения заливки" style="font-size:12px;font-weight:700;padding:7px 13px;border-radius:8px;border:1.5px solid var(--accent1);background:var(--surface2);color:var(--accent1);cursor:pointer;">🩺 Проверить все токены</button>
+          <button onclick="reauthAll(this)" title="Пройти по всем каналам, которым нужна переавторизация, по очереди" style="font-size:12px;font-weight:700;padding:7px 13px;border-radius:8px;border:1.5px solid #f59e0b;background:#fffbeb;color:#b45309;cursor:pointer;">🔄 Переавторизовать все</button>
+        </div>
       </div>
       <div id="check-tokens-result" style="font-size:12px;margin-bottom:8px;"></div>
       <div id="channels-list-top" style="display:flex;flex-direction:column;gap:8px;"></div>
@@ -3218,7 +3221,8 @@ async function loadChannels(){
     if(ch.days_left !== null && ch.days_left !== undefined){
       const d = ch.days_left;
       const dColor = d <= 0 ? '#dc2626' : d <= 1 ? '#dc2626' : d <= 2 ? '#f59e0b' : '#16a34a';
-      const dText = d <= 0 ? '⏳ токен истёк' : `⏳ ${d} дн. до переавторизации`;
+      const dText = d <= 0 ? '⏳ токен истёк — нужна переавторизация'
+                           : `⏳ осталось ${humanLeft(d)}`;
       daysLabel = `<div style="font-size:11px;color:${dColor};margin-top:2px;font-weight:600;">${dText}</div>`;
     }
     const needsReauth = (ch.days_left !== null && ch.days_left !== undefined && ch.days_left <= 2) || !!ch.last_error;
@@ -3239,6 +3243,26 @@ async function loadChannels(){
     if(sel){ const opt=document.createElement('option'); opt.value=ch.id; opt.textContent=`📺 ${ch.name}`; sel.appendChild(opt); }
   });
   updateAutoInfo();
+}
+
+function plural(n, one, few, many){
+  const n10 = n % 10, n100 = n % 100;
+  if(n10 === 1 && n100 !== 11) return one;
+  if(n10 >= 2 && n10 <= 4 && (n100 < 10 || n100 >= 20)) return few;
+  return many;
+}
+
+// «0.1 дн.» ни о чём не говорит — переводим в «6 дней 18 часов».
+function humanLeft(daysFloat){
+  const totalMin = Math.max(0, Math.round(daysFloat * 24 * 60));
+  const d = Math.floor(totalMin / 1440);
+  const h = Math.floor((totalMin % 1440) / 60);
+  const m = totalMin % 60;
+  if(d > 0) return h > 0 ? `${d} ${plural(d,'день','дня','дней')} ${h} ${plural(h,'час','часа','часов')}`
+                         : `${d} ${plural(d,'день','дня','дней')}`;
+  if(h > 0) return m > 0 ? `${h} ${plural(h,'час','часа','часов')} ${m} мин`
+                         : `${h} ${plural(h,'час','часа','часов')}`;
+  return `${m} мин`;
 }
 
 async function checkAllTokens(btn){
@@ -3292,6 +3316,36 @@ function reauthChannel(chId){
 }
 
 let addChTimer = null;
+let addChDone = null;   // резолвер промиса текущего добавления/переавторизации
+
+// Пройти по всем каналам, которым нужна переавторизация, по очереди.
+// Полностью автоматически это сделать нельзя: каждый канал — отдельный
+// Google-аккаунт, и согласие нужно давать вручную. Здесь мы убираем всё
+// остальное: список, порядок, подстановку email/прокси, переход к следующему.
+async function reauthAll(btn){
+  const cache = window.__chCache || {};
+  const need = Object.values(cache).filter(ch =>
+    !!ch.last_error || (ch.days_left !== null && ch.days_left !== undefined && ch.days_left <= 1));
+  const box = document.getElementById('check-tokens-result');
+  if(!need.length){
+    box.innerHTML = '<span style="color:#16a34a;">Переавторизация пока никому не нужна.</span>';
+    return;
+  }
+  if(!confirm(`Переавторизовать ${need.length} канал(ов) по очереди?\n\nДля каждого откроется вход Google — email и прокси подставятся сами.`)) return;
+  const orig = btn.textContent; btn.disabled = true;
+  let ok = 0;
+  for(let i = 0; i < need.length; i++){
+    const ch = need[i];
+    btn.textContent = `🔄 ${i+1} из ${need.length}...`;
+    box.innerHTML = `<b>Канал ${i+1} из ${need.length}:</b> ${ch.name} — пройди вход Google в окне справа.`;
+    const res = await addChannel({email: ch.email || '', proxy: ch.proxy || '', reauth: true});
+    if(res && res.ok) ok++;
+  }
+  btn.disabled = false; btn.textContent = orig;
+  box.innerHTML = `<b style="color:${ok===need.length?'#16a34a':'#f59e0b'};">Переавторизовано ${ok} из ${need.length}</b>`;
+  loadChannels();
+}
+
 async function addChannel(prefill){
   prefill = prefill || {};
   let modal = document.getElementById('add-ch-modal');
@@ -3361,11 +3415,15 @@ async function addChannel(prefill){
       clearInterval(addChTimer);
       loadChannels();
       setTimeout(() => { modal.remove(); }, 3000);
+      if(addChDone){ addChDone({ok:true}); addChDone = null; }
     } else if(sd.status === 'error'){
       clearInterval(addChTimer);
       modal.style.borderColor = '#ef4444';
+      if(addChDone){ addChDone({ok:false}); addChDone = null; }
     }
   }, 1000);
+  // Позволяет очереди «Переавторизовать все» дождаться этого канала
+  return new Promise(res => { addChDone = res; });
 }
 
 async function submitAuthCode(jobId){
