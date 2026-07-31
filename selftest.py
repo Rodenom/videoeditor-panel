@@ -14,7 +14,7 @@ YouTube-загрузка замокана, временные файлы в /tmp
   • дружелюбные тексты ошибок (прокси/токен/лимит)
   • генерация ТЗ не хардкодит домен
 """
-import os, sys, subprocess, hashlib, importlib.util, tempfile, shutil, traceback
+import os, sys, subprocess, hashlib, importlib.util, tempfile, shutil, traceback, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OK, FAIL = [], []
@@ -97,6 +97,13 @@ def main():
 
     print('\n5. Все массовые режимы: уникальные файлы И заголовки')
     tmp = tempfile.mkdtemp(prefix='vemode_')
+    # ВАЖНО: изолируем счётчики загрузок — иначе тестовые каналы копятся в
+    # боевом uploads_today.json и упираются в дневной лимит (тест начинает
+    # «падать» на ровном месте, а у байера сбиваются реальные счётчики).
+    _counts = {'date': time.strftime('%Y-%m-%d'), 'counts': {}}
+    app.load_uploads_today = lambda: _counts
+    app.save_uploads_today = lambda d: None
+    app.increment_project_upload = lambda *a, **k: None
     try:
         files = [{'path': mk_video(os.path.join(tmp, 'a.mp4')), 'fmt': '9:16', 'title': 'T'},
                  {'path': mk_video(os.path.join(tmp, 'b.mp4'), '640x640'), 'fmt': '1:1', 'title': 'T'}]
