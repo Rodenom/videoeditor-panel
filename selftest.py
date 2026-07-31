@@ -101,8 +101,11 @@ def main():
     # боевом uploads_today.json и упираются в дневной лимит (тест начинает
     # «падать» на ровном месте, а у байера сбиваются реальные счётчики).
     _counts = {'date': time.strftime('%Y-%m-%d'), 'counts': {}}
-    _real_load, _real_save = app.load_uploads_today, app.save_uploads_today
-    _real_incr = app.increment_project_upload
+    # Все подменяемые функции сохраняем и возвращаем в finally — иначе заглушки
+    # протекают в следующие секции и те молча проверяют не то, что думают.
+    _STUBBED = ('load_uploads_today', 'save_uploads_today', 'increment_project_upload',
+                'load_channels', 'save_channels', 'get_youtube_service')
+    _saved = {n: getattr(app, n) for n in _STUBBED}
     app.load_uploads_today = lambda: _counts
     app.save_uploads_today = lambda d: None
     app.increment_project_upload = lambda *a, **k: None
@@ -142,16 +145,17 @@ def main():
                 check('%s отработал' % mode_name, False, str(e)[:140])
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-        # вернуть настоящие функции — иначе заглушки протекут в следующие секции
-        app.load_uploads_today, app.save_uploads_today = _real_load, _real_save
-        app.increment_project_upload = _real_incr
+        for _n, _f in _saved.items():
+            setattr(app, _n, _f)
 
     print('\n6. Прокси не теряется, если упал AI-запрос')
     # Регрессия из практики: AI-вызов снимал прокси, а восстанавливал ПОСЛЕ
     # запроса. Падение Claude (таймаут/429) оставляло окружение без прокси —
     # и видео уходило с реального IP панели вместо прокси аккаунта.
     tmp = tempfile.mkdtemp(prefix='vepx_')
-    _pl, _ps, _pi = app.load_uploads_today, app.save_uploads_today, app.increment_project_upload
+    _PSTUB = ('load_uploads_today', 'save_uploads_today', 'increment_project_upload',
+              'load_channels', 'save_channels', 'get_youtube_service', 'get_anthropic_key')
+    _psaved = {n: getattr(app, n) for n in _PSTUB}
     _pc = {'date': time.strftime('%Y-%m-%d'), 'counts': {}}
     app.load_uploads_today = lambda: _pc
     app.save_uploads_today = lambda d: None
@@ -188,7 +192,8 @@ def main():
             os.environ.pop('HTTPS_PROXY', None)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-        app.load_uploads_today, app.save_uploads_today, app.increment_project_upload = _pl, _ps, _pi
+        for _n, _f in _psaved.items():
+            setattr(app, _n, _f)
 
     print('\n7. Счётчики загрузок: без гонок и не боятся битого файла')
     # Практика: файл счётчиков общий на всех байеров, заливки идут в потоках.
@@ -219,14 +224,35 @@ def main():
             if os.path.exists(f):
                 os.remove(f)
 
-    print('\n8. Понятные тексты ошибок')
+    print('\n8. Битые файлы данных не убивают панель')
+    # Панель убивают при каждом обновлении. Раньше запись шла на месте, и
+    # обрезанный channels_*.json стоил бы байеру ВСЕХ каналов.
+    _d = tempfile.mkdtemp(prefix='vejson_')
+    _origf = app.get_channels_file
+    try:
+        app.get_channels_file = lambda u: os.path.join(_d, 'channels_%s.json' % u)
+        app.save_channels('t', {'ch1': {'name': 'Канал 1'}})
+        check('обычное чтение каналов', app.load_channels('t').get('ch1', {}).get('name') == 'Канал 1')
+        pth = app.get_channels_file('t')
+        open(pth, 'w').write('{"ch1": {"name": "Кана')     # запись оборвана
+        check('битый файл каналов не роняет', isinstance(app.load_channels('t'), dict))
+        check('битый файл сохранён как .corrupt', os.path.exists(pth + '.corrupt'))
+        open(pth, 'w').write('')
+        check('пустой файл каналов не роняет', app.load_channels('t') == {})
+        app.save_channels('t', {'a': {'name': 'A'}})
+        check('после сбоя каналы снова пишутся', app.load_channels('t').get('a', {}).get('name') == 'A')
+    finally:
+        app.get_channels_file = _origf
+        shutil.rmtree(_d, ignore_errors=True)
+
+    print('\n9. Понятные тексты ошибок')
     fe = app.friendly_upload_error
     check('SOCKS -> «прокси не отвечает»', 'прокси не отвечает' in fe(Exception("SOCKSHTTPSConnectionPool ... Max retries exceeded")))
     check('Failed to parse -> про формат', 'формат' in fe(Exception("Failed to parse: 1.2.3.4:80:u:p")))
     check('invalid_grant -> про токен', 'токен' in fe(Exception("invalid_grant: Token has been expired")))
     check('uploadLimitExceeded -> про лимит', 'лимит' in fe(Exception("uploadLimitExceeded")))
 
-    print('\n9. Домен не захардкожен в генерации ТЗ')
+    print('\n10. Домен не захардкожен в генерации ТЗ')
     src = open(os.path.join(HERE, 'app.py'), encoding='utf-8').read()
     bad_lines = [l.strip()[:90] for l in src.splitlines()
                  if 'gvita.beauty' in l and 'landers/official-${' in l]

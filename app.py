@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.34"
+VERSION = "5.35"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -87,33 +87,53 @@ def binom_v1_get(target, action, extra=None):
 USERS_FILE = os.path.join(BASE_DIR, 'users.json')
 SESSIONS_FILE = os.path.join(BASE_DIR, 'sessions.json')
 
-def load_users():
-    if os.path.exists(USERS_FILE):
-        with open(USERS_FILE) as f:
+def read_json(path, default=None):
+    """Прочитать JSON, не роняя панель на пустом/битом файле.
+
+    Панель убивают при каждом обновлении, а запись раньше шла на месте — файл
+    мог остаться пустым или обрезанным. Для channels_*.json это стоило бы
+    байеру ВСЕХ каналов, поэтому читаем терпимо.
+    """
+    if not os.path.exists(path):
+        return {} if default is None else default
+    try:
+        with open(path, encoding='utf-8') as f:
             return json.load(f)
-    return {}  # empty = first launch, show setup screen
+    except Exception:
+        # Битый файл сохраняем рядом — вдруг пригодится восстановить руками
+        try:
+            if os.path.getsize(path) > 0:
+                os.replace(path, path + '.corrupt')
+        except Exception:
+            pass
+        return {} if default is None else default
+
+def write_json(path, data, indent=None, ensure_ascii=True):
+    """Атомарная запись: сначала во временный файл, потом подмена.
+    Прерывание записи больше не оставляет битый JSON."""
+    tmp = path + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=indent, ensure_ascii=ensure_ascii)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+def load_users():
+    return read_json(USERS_FILE)  # пусто = первый запуск, показать setup
 
 def is_first_launch():
     return not os.path.exists(USERS_FILE) or not load_users()
 
 def save_users(u):
-    with open(USERS_FILE, 'w') as f:
-        json.dump(u, f, indent=2)
+    write_json(USERS_FILE, u, indent=2)
 
 def load_sessions():
-    if os.path.exists(SESSIONS_FILE):
-        try:
-            with open(SESSIONS_FILE) as f:
-                data = json.load(f)
-            now = time.time()
-            return {k: v for k, v in data.items() if v.get('exp', 0) > now}
-        except Exception:
-            return {}
-    return {}
+    data = read_json(SESSIONS_FILE)
+    now = time.time()
+    return {k: v for k, v in data.items() if isinstance(v, dict) and v.get('exp', 0) > now}
 
 def save_sessions(s):
-    with open(SESSIONS_FILE, 'w') as f:
-        json.dump(s, f)
+    write_json(SESSIONS_FILE, s)
 
 USERS = load_users()
 SESSIONS = load_sessions()  # {session_id: {user, exp}}
@@ -122,25 +142,16 @@ def get_channels_file(user):
     return os.path.join(BASE_DIR, f'channels_{user}.json')
 
 def load_channels(user='pavel'):
-    f = get_channels_file(user)
-    if os.path.exists(f):
-        with open(f) as fp:
-            return json.load(fp)
-    return {}
+    return read_json(get_channels_file(user))
 
 def save_channels(user, channels):
-    with open(get_channels_file(user), 'w') as f:
-        json.dump(channels, f, ensure_ascii=False, indent=2)
+    write_json(get_channels_file(user), channels, indent=2, ensure_ascii=False)
 
 def get_oauth_seen_file(user):
     return os.path.join(BASE_DIR, f'oauth_seen_{user}.json')
 
 def load_oauth_seen(user):
-    f = get_oauth_seen_file(user)
-    if os.path.exists(f):
-        with open(f) as fp:
-            return json.load(fp)
-    return {}
+    return read_json(get_oauth_seen_file(user))
 
 def record_oauth_seen(user, proj_id, ch_id, email):
     """Track every distinct channel ever authorized per project, permanently.
@@ -152,8 +163,7 @@ def record_oauth_seen(user, proj_id, ch_id, email):
     bucket = seen.setdefault(proj_id, {})
     if ch_id not in bucket:
         bucket[ch_id] = {'email': email, 'first_seen': time.time()}
-        with open(get_oauth_seen_file(user), 'w') as f:
-            json.dump(seen, f, ensure_ascii=False, indent=2)
+        write_json(get_oauth_seen_file(user), seen, indent=2, ensure_ascii=False)
 
 ADMIN_HTML = '''<!DOCTYPE html>
 <html lang="ru">
@@ -388,33 +398,24 @@ def get_projects_file(user):
     return os.path.join(BASE_DIR, f'projects_{user}.json')
 
 def load_projects(user):
-    f = get_projects_file(user)
-    if os.path.exists(f):
-        with open(f) as fp:
-            return json.load(fp)
-    return {}
+    return read_json(get_projects_file(user))
 
 def save_projects(user, projects):
-    with open(get_projects_file(user), 'w') as f:
-        json.dump(projects, f, ensure_ascii=False, indent=2)
+    write_json(get_projects_file(user), projects, indent=2, ensure_ascii=False)
 
 def get_project_uploads_file(user):
     return os.path.join(BASE_DIR, f'proj_uploads_{user}.json')
 
 def load_project_uploads(user):
-    f = get_project_uploads_file(user)
-    if os.path.exists(f):
-        with open(f) as fp:
-            data = json.load(fp)
-        today = time.strftime('%Y-%m-%d')
-        if data.get('date') != today:
-            return {'date': today, 'counts': {}}
-        return data
-    return {'date': time.strftime('%Y-%m-%d'), 'counts': {}}
+    today = time.strftime('%Y-%m-%d')
+    data = read_json(get_project_uploads_file(user))
+    if not isinstance(data, dict) or data.get('date') != today:
+        return {'date': today, 'counts': {}}
+    data.setdefault('counts', {})
+    return data
 
 def save_project_uploads(user, data):
-    with open(get_project_uploads_file(user), 'w') as f:
-        json.dump(data, f)
+    write_json(get_project_uploads_file(user), data)
 
 def get_best_project_secret(user):
     """Return path to client_secret.json with most remaining quota today."""
