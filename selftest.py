@@ -151,6 +151,11 @@ def main():
     # запроса. Падение Claude (таймаут/429) оставляло окружение без прокси —
     # и видео уходило с реального IP панели вместо прокси аккаунта.
     tmp = tempfile.mkdtemp(prefix='vepx_')
+    _pl, _ps, _pi = app.load_uploads_today, app.save_uploads_today, app.increment_project_upload
+    _pc = {'date': time.strftime('%Y-%m-%d'), 'counts': {}}
+    app.load_uploads_today = lambda: _pc
+    app.save_uploads_today = lambda d: None
+    app.increment_project_upload = lambda *a, **k: None
     try:
         vid = mk_video(os.path.join(tmp, 'p.mp4'), '320x180', 1)
         PROXY = 'socks5://user:pass@1.2.3.4:1080'
@@ -183,6 +188,7 @@ def main():
             os.environ.pop('HTTPS_PROXY', None)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+        app.load_uploads_today, app.save_uploads_today, app.increment_project_upload = _pl, _ps, _pi
 
     print('\n7. Счётчики загрузок: без гонок и не боятся битого файла')
     # Практика: файл счётчиков общий на всех байеров, заливки идут в потоках.
