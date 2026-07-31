@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.33"
+VERSION = "5.34"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -340,18 +340,48 @@ async function setup(e){
 MAX_CH_PER_DAY = 15  # жёсткий лимит видео на один канал в сутки
 
 def load_uploads_today():
-    if os.path.exists(UPLOADS_TODAY_FILE):
+    today = time.strftime('%Y-%m-%d')
+    fresh = {'date': today, 'counts': {}}
+    if not os.path.exists(UPLOADS_TODAY_FILE):
+        return fresh
+    try:
         with open(UPLOADS_TODAY_FILE) as f:
             data = json.load(f)
-        today = time.strftime('%Y-%m-%d')
-        if data.get('date') != today:
-            return {'date': today, 'counts': {}}
-        return data
-    return {'date': time.strftime('%Y-%m-%d'), 'counts': {}}
+    except Exception:
+        # Файл пустой или битый (панель убили в момент записи) — не роняем
+        # заливку из-за счётчиков, начинаем день заново.
+        return fresh
+    if not isinstance(data, dict) or data.get('date') != today:
+        return fresh
+    data.setdefault('counts', {})
+    return data
 
 def save_uploads_today(data):
-    with open(UPLOADS_TODAY_FILE, 'w') as f:
+    # Атомарно: пишем во временный файл и подменяем. Иначе прерванная запись
+    # оставляет пустой/битый JSON, и следующий запуск падает на нём.
+    tmp = UPLOADS_TODAY_FILE + '.tmp'
+    with open(tmp, 'w') as f:
         json.dump(data, f)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, UPLOADS_TODAY_FILE)
+
+_UPLOADS_LOCK = threading.Lock()
+
+def bump_upload_count(ch_id):
+    """Атомарно +1 к дневному счётчику канала и вернуть новое значение.
+
+    Файл счётчиков общий на всю панель (все байеры), а заливки идут в потоках.
+    Раньше словарь читался ОДИН раз до цикла и сохранялся целиком — параллельные
+    прогоны затирали инкременты друг друга, канал получал больше загрузок, чем
+    MAX_CH_PER_DAY, и упирался в реальный лимит YouTube (uploadLimitExceeded).
+    """
+    with _UPLOADS_LOCK:
+        data = load_uploads_today()
+        data.setdefault('counts', {})
+        data['counts'][ch_id] = data['counts'].get(ch_id, 0) + 1
+        save_uploads_today(data)
+        return data['counts'][ch_id]
 
 # ── Per-user API projects ─────────────────────────────────────────
 def get_projects_file(user):
@@ -899,7 +929,6 @@ def upload_to_youtube(upload_job_id, files, title, description, privacy, channel
         log.append('✅ Авторизация прошла')
 
         links = []
-        today_data = load_uploads_today()
         for f in files:
             fpath = f['path']
             ftitle = f.get('title', title)
@@ -921,8 +950,7 @@ def upload_to_youtube(upload_job_id, files, title, description, privacy, channel
             links.append({'fmt': f['fmt'], 'link': link, 'title': ftitle})
             log.append(f"✅ {f['fmt']} → {link}")
             # Обновляем счётчик каналов
-            today_data['counts'][ch_id] = today_data['counts'].get(ch_id, 0) + 1
-            save_uploads_today(today_data)
+            bump_upload_count(ch_id)
             # Обновляем счётчик проектов
             proj_id = ch_info.get('project_id')
             if proj_id:
@@ -1129,7 +1157,6 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user, 
                 log.append(f'  ⚠ AI ошибка: {type(_e2).__name__}: {_e2}')
 
             set_links = []
-            today_data = load_uploads_today()
             ch_error = None
 
             def _gen_ai_title(log_ref):
@@ -1203,8 +1230,7 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user, 
                     link = f'https://youtu.be/{vid_id}'
                     set_links.append({'fmt': fmt_name, 'link': link})
                     log[-1] = f'  ✅ {fmt_name} → {link}'
-                    today_data['counts'][ch_id] = today_data['counts'].get(ch_id, 0) + 1
-                    save_uploads_today(today_data)
+                    bump_upload_count(ch_id)
                     proj_id = ch_info.get('project_id')
                     if proj_id:
                         increment_project_upload(user, proj_id)
@@ -1299,7 +1325,6 @@ def ready_upload_to_youtube(job_id, ready_files, n_sets, category, privacy, user
                     os.environ.pop('HTTPS_PROXY', None)
                     os.environ.pop('HTTP_PROXY', None)
                 set_links = []
-                today_data = load_uploads_today()
                 title_ai = f'{category} — видео {i+1}'
                 desc_ai = ''
                 try:
@@ -1371,8 +1396,7 @@ def ready_upload_to_youtube(job_id, ready_files, n_sets, category, privacy, user
                     link = f'https://youtu.be/{vid_id}'
                     set_links.append({'fmt': fmt, 'link': link})
                     log[-1] = f'  ✅ {fmt} → {link}'
-                    today_data['counts'][ch_id] = today_data['counts'].get(ch_id, 0) + 1
-                    save_uploads_today(today_data)
+                    bump_upload_count(ch_id)
                     proj_id = ch_info.get('project_id')
                     if proj_id:
                         increment_project_upload(user, proj_id)
@@ -1434,7 +1458,6 @@ def mass_upload_to_youtube(job_id, files, n_sets, title, description, privacy, u
                     os.environ.pop('HTTPS_PROXY', None)
                     os.environ.pop('HTTP_PROXY', None)
                 set_links = []
-                today_data = load_uploads_today()
                 for f in files:
                     _uqm = os.path.join(OUTPUT_DIR, 'uq_%s_%d_%s.mp4' % (job_id, vid_idx_m, str(f['fmt']).replace(':', 'x')))
                     fpath = uniqueize_file(f['path'], _uqm, vid_idx_m)  # своя копия под этот аккаунт
@@ -1458,8 +1481,7 @@ def mass_upload_to_youtube(job_id, files, n_sets, title, description, privacy, u
                     link = f'https://youtu.be/{vid_id}'
                     set_links.append({'fmt': f['fmt'], 'link': link})
                     log[-1] = f'  ✅ {f["fmt"]} → {link}'
-                    today_data['counts'][ch_id] = today_data['counts'].get(ch_id, 0) + 1
-                    save_uploads_today(today_data)
+                    bump_upload_count(ch_id)
                     proj_id = ch_info.get('project_id')
                     if proj_id:
                         increment_project_upload(user, proj_id)

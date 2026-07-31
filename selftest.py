@@ -101,6 +101,8 @@ def main():
     # боевом uploads_today.json и упираются в дневной лимит (тест начинает
     # «падать» на ровном месте, а у байера сбиваются реальные счётчики).
     _counts = {'date': time.strftime('%Y-%m-%d'), 'counts': {}}
+    _real_load, _real_save = app.load_uploads_today, app.save_uploads_today
+    _real_incr = app.increment_project_upload
     app.load_uploads_today = lambda: _counts
     app.save_uploads_today = lambda d: None
     app.increment_project_upload = lambda *a, **k: None
@@ -140,6 +142,9 @@ def main():
                 check('%s отработал' % mode_name, False, str(e)[:140])
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+        # вернуть настоящие функции — иначе заглушки протекут в следующие секции
+        app.load_uploads_today, app.save_uploads_today = _real_load, _real_save
+        app.increment_project_upload = _real_incr
 
     print('\n6. Прокси не теряется, если упал AI-запрос')
     # Регрессия из практики: AI-вызов снимал прокси, а восстанавливал ПОСЛЕ
@@ -179,14 +184,43 @@ def main():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
-    print('\n7. Понятные тексты ошибок')
+    print('\n7. Счётчики загрузок: без гонок и не боятся битого файла')
+    # Практика: файл счётчиков общий на всех байеров, заливки идут в потоках.
+    # Раньше словарь читался один раз и сохранялся целиком -> параллельные
+    # прогоны затирали инкременты, канал уходил за MAX_CH_PER_DAY и ловил
+    # реальный лимит YouTube. Плюс прерванная запись оставляла битый JSON.
+    import threading as _th, json as _js
+    _tf = tempfile.NamedTemporaryFile(suffix='.json', delete=False); _tf.close()
+    _orig_file = app.UPLOADS_TODAY_FILE
+    app.UPLOADS_TODAY_FILE = _tf.name
+    try:
+        check('пустой файл счётчиков не роняет', isinstance(app.load_uploads_today(), dict))
+        open(_tf.name, 'w').write('{битый')
+        check('битый файл счётчиков не роняет', isinstance(app.load_uploads_today(), dict))
+        os.remove(_tf.name)
+        N, PER = 8, 25
+        def _w():
+            for _ in range(PER):
+                app.bump_upload_count('chTest')
+        ts = [_th.Thread(target=_w) for _ in range(N)]
+        [t.start() for t in ts]; [t.join() for t in ts]
+        got = _js.load(open(_tf.name))['counts']['chTest']
+        check('%d потоков × %d инкрементов — ничего не потеряно' % (N, PER), got == N * PER,
+              'получили %d вместо %d' % (got, N * PER))
+    finally:
+        app.UPLOADS_TODAY_FILE = _orig_file
+        for f in (_tf.name, _tf.name + '.tmp'):
+            if os.path.exists(f):
+                os.remove(f)
+
+    print('\n8. Понятные тексты ошибок')
     fe = app.friendly_upload_error
     check('SOCKS -> «прокси не отвечает»', 'прокси не отвечает' in fe(Exception("SOCKSHTTPSConnectionPool ... Max retries exceeded")))
     check('Failed to parse -> про формат', 'формат' in fe(Exception("Failed to parse: 1.2.3.4:80:u:p")))
     check('invalid_grant -> про токен', 'токен' in fe(Exception("invalid_grant: Token has been expired")))
     check('uploadLimitExceeded -> про лимит', 'лимит' in fe(Exception("uploadLimitExceeded")))
 
-    print('\n8. Домен не захардкожен в генерации ТЗ')
+    print('\n9. Домен не захардкожен в генерации ТЗ')
     src = open(os.path.join(HERE, 'app.py'), encoding='utf-8').read()
     bad_lines = [l.strip()[:90] for l in src.splitlines()
                  if 'gvita.beauty' in l and 'landers/official-${' in l]
