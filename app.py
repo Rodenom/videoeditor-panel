@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.30"
+VERSION = "5.31"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -4632,20 +4632,20 @@ function tkGenerate(){
     html += `<div style="font-size:13px;font-weight:800;color:#c4b5fd;text-transform:uppercase;letter-spacing:.08em;margin-bottom:12px;">🎁 СУНДУК / БЕК-БАТОН</div>`;
     html += `<div style="font-size:13px;line-height:1.8;color:var(--text);">`;
     if(sundukSrcUrl){
-      html += `<b>Скопировать сундук:</b> <span style="color:#a78bfa;">${sundukSrcUrl}</span><br><br>`;
+      html += `<b>Скопіювати сундук:</b> <span style="color:#a78bfa;">${sundukSrcUrl}</span><br><br>`;
     } else {
-      html += `<b>Скопировать сундук и внести правки:</b><br>`;
+      html += `<b>Скопіювати сундук та внести правки:</b><br>`;
     }
     let pIdx = 1;
     // Flag
-    html += `${pIdx++}) заменить флаг страны (картинка вверху)`;
+    html += `${pIdx++}. Замінити прапор країни (картинка зверху)`;
     if(sundukFlagVal && sundukFlagVal !== '[фото вставлено]') html += ` → <b>${sundukFlagVal}</b>`;
     else if(sundukFlagHasImg) html += ` <span class="tk-highlight">(фото флага прикреплено)</span>`;
     html += `<br>`;
     // Photo of product
     if(sundukReplacePhoto){
       const photoInput = document.getElementById('tk-photo-clip');
-      html += `${pIdx++}) заменить фото товара`;
+      html += `${pIdx++}. Замінити фото товару`;
       if(photoInput && photoInput.value && photoInput.value!=='[фото вставлено]') html += ` → <b>${photoInput.value}</b>`;
       else if(photoInput && photoInput.dataset.imgData) html += ` <span class="tk-highlight">(фото прикреплено)</span>`;
       html += `<br>`;
@@ -4655,15 +4655,15 @@ function tkGenerate(){
     if(sundukAdapt && sundukAdapt.checked){
       const catBtn = document.querySelector('#tk-sunduk-cats .tk-scat.on');
       const catName = catBtn ? catBtn.textContent.trim() : '';
-      html += `${pIdx++}) адаптировать сундук под категорию${catName?` <b>${catName}</b>`:' оффера'} (тексты и картинки по смыслу)<br>`;
+      html += `${pIdx++}. Адаптувати сундук під категорію${catName?` <b>${catName}</b>`:' офферу'} (тексти та картинки за змістом)<br>`;
     }
     // Text replacement
     if(sundukOldText && sundukNewText){
-      html += `${pIdx++}) заменить текст:<br><span style="color:var(--text3);font-style:italic;">${sundukOldText.replace(/\n/g,'<br>')}</span><br><b>на:</b><br><span style="color:#c4b5fd;">${sundukNewText.replace(/\n/g,'<br>')}</span><br>`;
+      html += `${pIdx++}. Замінити текст:<br><span style="color:var(--text3);font-style:italic;">${sundukOldText.replace(/\n/g,'<br>')}</span><br><b>НА:</b><br><span style="color:#c4b5fd;">${sundukNewText.replace(/\n/g,'<br>')}</span><br>`;
     }
     html += `</div>`;
     html += `<div style="margin-top:12px;padding:10px 14px;background:#1e0b3a;border-radius:10px;border-left:3px solid #7c3aed;">`;
-    html += `<div style="font-size:11px;color:#a78bfa;font-weight:700;margin-bottom:4px;">НАЗВАТЬ КАК:</div>`;
+    html += `<div style="font-size:11px;color:#a78bfa;font-weight:700;margin-bottom:4px;">НАЗВАТИ ЯК:</div>`;
     html += `<div style="color:#c4b5fd;font-weight:700;word-break:break-all;">${sundukUrl}</div>`;
     html += `</div></div>`;
   }
