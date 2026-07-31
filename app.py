@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.29"
+VERSION = "5.30"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -4455,40 +4455,40 @@ function tkGenerate(){
   const proklaType=document.querySelector('input[name="tk-prokla-type"]:checked').value;
   const copyUrl=document.getElementById('tk-copy-url').value.trim();
 
-  // Title
-  const typeLabel=proklaType==='download'?'Скачать проклу и внести правки':'Скопировать проклу и внести правки';
-  let lines=[`${typeLabel}${offerFull?' '+offerFull:''}`, ''];
-
-  if(offerUrl) lines.push(offerUrl,'');
-  if(geoName) lines.push(`Гео: ${geoName}`);
-  if(offerFull) lines.push(`Офер: ${offerFull}`);
-  if(offerId) lines.push(`ID: ${offerId}`);
-  if(streamId) lines.push(`id потока: ${streamId}`);
-  if(apiToken) lines.push(`API токен: ${apiToken}`);
-  lines.push('','ПРОКЛА','');
+  // Шапка по стандарту ArkNet (техи парсят именно эти поля, украинською).
+  // lines[0] — заголовок карточки; сам блок «Скопіювати/Назвати» рисуется ниже в HTML.
+  let lines=[`ТЗ: ${name||offerFull||'ленд'}${geo&&geo!=='geo'?' · '+geo.toUpperCase():''}`];
   if(proklaType==='download'){
-    lines.push('1)Выкачать проклу (ниже добавил)');
+    lines.push('Скопіювати лендинг - архів (додано нижче)');
   } else {
-    lines.push(`1)Скопировать проклу: ${copyUrl||'[ссылка на проклу]'}`);
+    lines.push(`Скопіювати лендинг - ${copyUrl||'[посилання на проклу]'}`);
   }
-  lines.push(`1. Залить на домен ${domain}`);
-  lines.push('2. Удалить все редиректы и бекбаттоны');
-  lines.push('3. Заменить ID , ID потоку , и api токен');
-  lines.push('4. Все пути должны быть исключительно относительными!');
-  lines.push('5. На прокле сделать камбекер');
+  lines.push(`Назвати лендинг - ${finalUrl}`, '');
+  if(name) lines.push(`Назва товару - ${name}`);
+  lines.push(`ID в ПП товару - ${offerId||'—'}`);
+  lines.push(`Поток ID товара в ПП - ${streamId||'—'}`);
+  lines.push(`Апі Токен - ${apiToken||'—'}`);
+  lines.push(`Країна - ${geo.toUpperCase()}`);
+  if(offerUrl) lines.push('', `Оффер: ${offerUrl}`);
+  lines.push('');
+  lines.push(`Почистити та оптимізувати ленд від зайвих та потенційно шкідливих скриптів. Залити на домен ${domain}, шляхи виключно відносні.`);
+  lines.push('Внести наступні правки:');
+  lines.push('1. Видалити всі редіректи та бекбатони');
+  lines.push('2. Замінити ID товару, ID потоку та api токен');
+  lines.push('3. На проклі зробити камбекер');
 
-  let idx=6;
+  let idx=4;
   if(document.getElementById('tk-ch-name').checked){
     const oldN=document.getElementById('tk-old-name').value.trim();
     const newN=document.getElementById('tk-new-name-field').value.trim()||name;
-    if(oldN&&newN) lines.push(`${idx++}. заменить название офера ${oldN} на ${newN}`);
+    if(oldN&&newN) lines.push(`${idx++}. Замінити назву товару "${oldN}" НА "${newN}"`);
   }
   if(document.getElementById('tk-ch-photo').checked){
     const inp=document.getElementById('tk-photo-clip');
     const clip=inp.value.trim();
     const hasImg=inp.dataset.imgData;
-    if(hasImg){ lines.push(`${idx++}. заменить фото товара (фото прикреплено)`); }
-    else if(clip){ lines.push(`${idx++}. заменить фото товара на ${clip}`); }
+    if(hasImg){ lines.push(`${idx++}. Замінити фото товару (фото прикріплено)`); }
+    else if(clip){ lines.push(`${idx++}. Замінити фото товару НА ${clip}`); }
   }
   if(document.getElementById('tk-ch-price').checked){
     const np=document.getElementById('tk-new-price').value.trim();
@@ -4497,31 +4497,28 @@ function tkGenerate(){
     const changeCur=document.getElementById('tk-ch-currency').checked;
     const cur=document.getElementById('tk-currency').value||'EUR';
     if(np){
-      lines.push(`${idx++}) старая цена ${op} ${cur}\nНовая цена ${np} ${cur}\nСкидка ${disc}`);
-      if(changeCur) lines.push(`   (изменить валюту на ${cur})`);
+      lines.push(`${idx++}. Замінити ціну "${op} ${cur}" НА "${np} ${cur}"${disc?` (знижка ${disc})`:''}`);
+      if(changeCur) lines.push(`   (валюту змінити на ${cur})`);
     }
   }
   if(document.getElementById('tk-ch-mask').checked){
     const mask=document.getElementById('tk-mask').value.trim();
-    if(mask) lines.push(`${idx++}. поставить маску на номер ${mask}`);
+    if(mask) lines.push(`${idx++}. Поставити валідацію (маску) на номер телефону: ${mask}`);
   }
   if(document.getElementById('tk-ch-cert').checked){
     const cert=document.getElementById('tk-cert-file').value.trim();
-    lines.push(`${idx++}. заменить сертификат${cert?' на '+cert:' (файл прикреплён)'}`);
+    lines.push(`${idx++}. Замінити сертифікат${cert?' НА '+cert:' (файл прикріплено)'}`);
   }
   if(document.getElementById('tk-ch-comments').checked){
     const action=document.querySelector('input[name="tk-comment-action"]:checked').value;
     if(action==='delete'){
-      lines.push(`${idx++}. удалить все фото с комментов`);
+      lines.push(`${idx++}. Видалити всі фото з коментарів`);
     } else if(action==='upload'){
       const clips=document.getElementById('tk-comment-clips').value.trim();
-      lines.push(`${idx++}. загрузить фото в коменты с новым офером${clips?': '+clips:' (файлы прикреплены)'}`);
+      lines.push(`${idx++}. Завантажити фото в коментарі з новим оффером${clips?': '+clips:' (файли прикріплено)'}`);
     }
     // 'keep' — ничего не добавляем в таску
   }
-
-  lines.push('','назвать как:');
-  lines.push(finalUrl);
 
   // Build rich HTML output
   const cur = document.getElementById('tk-currency').value || 'EUR';
@@ -4569,16 +4566,16 @@ function tkGenerate(){
   if(document.getElementById('tk-ch-name').checked){
     const oldN=document.getElementById('tk-old-name').value.trim();
     const newN=document.getElementById('tk-new-name-field').value.trim()||name;
-    if(oldN&&newN) html += `<div>${vidx++}. заменить название офера <b>${oldN}</b> на <b>${newN}</b></div>`;
+    if(oldN&&newN) html += `<div>${vidx++}. Замінити назву товару "<b>${oldN}</b>" НА "<b>${newN}</b>"</div>`;
   }
   if(document.getElementById('tk-ch-photo').checked){
     const inp=document.getElementById('tk-photo-clip');
     const clip=inp.value.trim();
     const hasImg=inp.dataset.imgData;
     if(hasImg){
-      html += `<div>${vidx++}. заменить фото товара <span class="tk-highlight">( фото прикреплено )</span></div>`;
+      html += `<div>${vidx++}. Замінити фото товару <span class="tk-highlight">( фото прикріплено )</span></div>`;
     } else if(clip){
-      html += `<div>${vidx++}. заменить фото товара на <b style="color:var(--accent1);">${clip}</b></div>`;
+      html += `<div>${vidx++}. Замінити фото товару НА <b style="color:var(--accent1);">${clip}</b></div>`;
     }
   }
   if(document.getElementById('tk-ch-price').checked){
@@ -4588,29 +4585,29 @@ function tkGenerate(){
     const changeCur=document.getElementById('tk-ch-currency').checked;
     const curVal=document.getElementById('tk-currency').value||'EUR';
     if(np){
-      html += `<div style="margin:4px 0;">${vidx++}) <span style="color:var(--text3);">старая цена</span> <b>${op} ${curVal}</b> &nbsp;→&nbsp; <span style="color:var(--accent3);font-weight:800;">Новая цена ${np} ${curVal}</span> &nbsp;·&nbsp; Скидка <b>${disc}</b>${changeCur?` &nbsp;·&nbsp; <span style="color:var(--accent4);">изменить валюту на ${curVal}</span>`:''}</div>`;
+      html += `<div style="margin:4px 0;">${vidx++}. Замінити ціну "<b>${op} ${curVal}</b>" НА "<span style="color:var(--accent3);font-weight:800;">${np} ${curVal}</span>"${disc?` &nbsp;·&nbsp; знижка <b>${disc}</b>`:''}${changeCur?` &nbsp;·&nbsp; <span style="color:var(--accent4);">валюту змінити на ${curVal}</span>`:''}</div>`;
     }
   }
   if(document.getElementById('tk-ch-mask').checked){
     const mask=document.getElementById('tk-mask').value.trim();
-    if(mask) html += `<div>${vidx++}. поставить маску на номер <b>${mask}</b></div>`;
+    if(mask) html += `<div>${vidx++}. Поставити валідацію (маску) на номер телефону: <b>${mask}</b></div>`;
   }
   if(document.getElementById('tk-ch-cert').checked){
     const certInp=document.getElementById('tk-cert-file');
     const cert=certInp.value.trim();
     if(certInp.dataset.imgData){
-      html += `<div>${vidx++}. заменить сертификат <span class="tk-highlight">( файл прикреплён )</span></div>`;
+      html += `<div>${vidx++}. Замінити сертифікат <span class="tk-highlight">( файл прикріплено )</span></div>`;
     } else {
-      html += `<div>${vidx++}. заменить сертификат${cert?' на <b>'+cert+'</b>':''}</div>`;
+      html += `<div>${vidx++}. Замінити сертифікат${cert?' НА <b>'+cert+'</b>':''}</div>`;
     }
   }
   if(document.getElementById('tk-ch-comments').checked){
     const action=document.querySelector('input[name="tk-comment-action"]:checked').value;
     if(action==='delete'){
-      html += `<div>${vidx++}. удалить все фото с комментов</div>`;
+      html += `<div>${vidx++}. Видалити всі фото з коментарів</div>`;
     } else if(action==='upload'){
       const clips=document.getElementById('tk-comment-clips').value.trim();
-      html += `<div>${vidx++}. загрузить фото в коменты с новым офером ${clips?'<b>'+clips+'</b>':'<span class="tk-highlight">( файлы прикреплены )</span>'}</div>`;
+      html += `<div>${vidx++}. Завантажити фото в коментарі з новим оффером ${clips?'<b>'+clips+'</b>':'<span class="tk-highlight">( файли прикріплено )</span>'}</div>`;
     }
   }
   html += `</div>`;
