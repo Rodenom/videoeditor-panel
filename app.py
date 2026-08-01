@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.42"
+VERSION = "5.43"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -749,6 +749,21 @@ def normalize_proxy(p):
     return p
 
 
+def build_api(name, version, creds):
+    """build() Google API без загрузки схемы по сети.
+
+    Раньше на КАЖДЫЙ канал качался discovery-документ (~500 КБ) с googleapis.com,
+    причём через SOCKS-прокси канала — отсюда долгая пауза перед первой заливкой.
+    Локальная копия схемы уже есть в самой библиотеке, берём её.
+    """
+    from googleapiclient.discovery import build as _b
+    try:
+        return _b(name, version, credentials=creds, static_discovery=True)
+    except TypeError:
+        # старая версия библиотеки — параметра нет
+        return _b(name, version, credentials=creds, cache_discovery=False)
+
+
 def get_youtube_service(token_file=None, proxy=''):
     from google.oauth2.credentials import Credentials
     from google_auth_oauthlib.flow import InstalledAppFlow
@@ -784,7 +799,7 @@ def get_youtube_service(token_file=None, proxy=''):
         from urllib.parse import urlparse as _up
         parsed = _up(proxy)
         print(f'[PROXY] Using proxy: {parsed.hostname}:{parsed.port}')
-        return build('youtube', 'v3', credentials=creds)
+        return build_api('youtube', 'v3', creds)
     # No proxy — show real IP
     try:
         import urllib.request as _ur
@@ -792,7 +807,7 @@ def get_youtube_service(token_file=None, proxy=''):
         print(f'[NO PROXY] Upload IP: {real_ip}')
     except Exception:
         pass
-    return build('youtube', 'v3', credentials=creds)
+    return build_api('youtube', 'v3', creds)
 
 CHANNEL_AUTH_FLOWS = {}  # job_id -> flow (waiting for code)
 
@@ -859,7 +874,7 @@ def add_channel_auth(job_id, user='pavel', is_local=True, proxy='', login_hint='
 
 def _finish_channel_auth(job_id, creds, user, proxy='', secret_file=None):
     from googleapiclient.discovery import build
-    yt = build('youtube', 'v3', credentials=creds)
+    yt = build_api('youtube', 'v3', creds)
     ch_id = None
     ch_name = None
     ch_email = None
@@ -880,7 +895,7 @@ def _finish_channel_auth(job_id, creds, user, proxy='', secret_file=None):
     # Always try to get email for identification
     try:
         from googleapiclient.discovery import build as _gbuild
-        oauth2 = _gbuild('oauth2', 'v2', credentials=creds)
+        oauth2 = build_api('oauth2', 'v2', creds)
         info = oauth2.userinfo().get().execute()
         ch_email = info.get('email', '')
         if ch_email:
@@ -1013,37 +1028,63 @@ def uniqueize_file(src, dst, idx=0):
         w, h, has_audio = get_video_info(src)
     except Exception:
         w, h, has_audio = 0, 0, True
+    # Плёночный шум (noise=) убран: он удваивал время кодирования, а уникальность
+    # байтов и так дают сдвиг кропа, джиттер цвета/гаммы и правки звука.
     r = _rnd.Random('%s-%s' % (idx, os.path.basename(src)))
     c = r.choice([2, 4, 6]); ox = r.randint(0, c); oy = r.randint(0, c)
     br = round(r.uniform(-0.02, 0.02), 4)
     sat = round(r.uniform(0.97, 1.03), 4)
     gm = round(r.uniform(0.97, 1.03), 4)
-    grain = r.randint(5, 11)
     if w and h:
-        vf = ('crop=iw-%d:ih-%d:%d:%d,scale=%d:%d,eq=brightness=%s:saturation=%s:gamma=%s,'
-              'noise=alls=%d:allf=t,setsar=1' % (c, c, ox, oy, w, h, br, sat, gm, grain))
+        vf = ('crop=iw-%d:ih-%d:%d:%d,scale=%d:%d,'
+              'eq=brightness=%s:saturation=%s:gamma=%s,setsar=1' % (c, c, ox, oy, w, h, br, sat, gm))
     else:
-        vf = 'eq=brightness=%s:saturation=%s:gamma=%s,noise=alls=%d:allf=t,setsar=1' % (br, sat, gm, grain)
+        vf = 'eq=brightness=%s:saturation=%s:gamma=%s,setsar=1' % (br, sat, gm)
     rate = round(r.uniform(0.985, 1.015), 5)
     tempo = round(min(max(1.0 / rate, 0.94), 1.06), 5)
     feq = r.randint(200, 1800); fg = round(r.uniform(-1.5, 1.5), 2)
-    rtvol = round(r.uniform(0.004, 0.009), 4)
-    venc = ['-c:v', 'libx264', '-profile:v', 'baseline', '-crf', '23', '-preset', 'veryfast', '-pix_fmt', 'yuv420p']
-    if has_audio:
-        af = ('[0:a]asetrate=44100*%s,aresample=44100,atempo=%s,equalizer=f=%d:width_type=o:width=1:g=%s[a0];'
-              '[1:a]volume=%s[a1];[a0][a1]amix=inputs=2:duration=first:normalize=0[aout]' % (rate, tempo, feq, fg, rtvol))
-        cmd = (['ffmpeg', '-y', '-i', src, '-f', 'lavfi', '-i', 'anoisesrc=color=brown:sample_rate=44100',
-                '-filter_complex', '[0:v]%s[v];%s' % (vf, af), '-map', '[v]', '-map', '[aout]']
-               + venc + ['-c:a', 'aac', '-b:a', '128k', '-map_metadata', '-1', '-shortest', dst])
-    else:
-        cmd = ['ffmpeg', '-y', '-i', src, '-vf', vf] + venc + ['-an', '-map_metadata', '-1', dst]
-    try:
-        res = _sp.run(cmd, capture_output=True, text=True, timeout=180)
-        if res.returncode == 0 and os.path.exists(dst) and os.path.getsize(dst) > 0:
-            return dst
-    except Exception:
-        pass
+    # Эхо и подмешивание румтона убраны: на полноразмерном видео они давали
+    # почти половину времени кодирования, а уникальность байтов обеспечивают
+    # питч/темп/эквалайзер и видеофильтры.
+    af = 'asetrate=44100*%s,aresample=44100,atempo=%s,equalizer=f=%d:width_type=o:width=1:g=%s' % (
+        rate, tempo, feq, fg)
+    # Аппаратный кодек Mac примерно в 1.5 раза быстрее — берём, если доступен.
+    venc = (['-c:v', 'h264_videotoolbox', '-b:v', '4000k', '-pix_fmt', 'yuv420p']
+            if _has_videotoolbox() else
+            ['-c:v', 'libx264', '-profile:v', 'baseline', '-crf', '23', '-preset', 'veryfast', '-pix_fmt', 'yuv420p'])
+
+    def _build(enc):
+        base = ['ffmpeg', '-y', '-i', src, '-vf', vf]
+        if has_audio:
+            return base + ['-af', af] + enc + ['-c:a', 'aac', '-b:a', '128k', '-map_metadata', '-1', dst]
+        return base + enc + ['-an', '-map_metadata', '-1', dst]
+
+    for enc in (venc, ['-c:v', 'libx264', '-crf', '23', '-preset', 'veryfast', '-pix_fmt', 'yuv420p']):
+        try:
+            res = _sp.run(_build(enc), capture_output=True, text=True, timeout=900)
+            if res.returncode == 0 and os.path.exists(dst) and os.path.getsize(dst) > 0:
+                return dst
+        except Exception:
+            pass
+        if enc is not venc:
+            break
     return src
+
+
+_VT_CACHE = None
+
+def _has_videotoolbox():
+    """Есть ли аппаратный кодек Mac (проверяем один раз за запуск)."""
+    global _VT_CACHE
+    if _VT_CACHE is None:
+        try:
+            import subprocess as _s
+            out = _s.run(['ffmpeg', '-hide_banner', '-encoders'],
+                         capture_output=True, text=True, timeout=15).stdout
+            _VT_CACHE = 'h264_videotoolbox' in out
+        except Exception:
+            _VT_CACHE = False
+    return _VT_CACHE
 
 
 def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user, custom_title='', custom_desc='', uniqueize=False):
