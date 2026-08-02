@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.43"
+VERSION = "5.44"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -864,15 +864,15 @@ def add_channel_auth(job_id, user='pavel', is_local=True, proxy='', login_hint='
             UPLOAD_JOBS[job_id]['log'].append(f'🔗 AUTH URL: {auth_url}')
             UPLOAD_JOBS[job_id]['log'].append('🔗 Открой ссылку и авторизуйся')
             UPLOAD_JOBS[job_id]['status'] = 'waiting_code'
-            CHANNEL_AUTH_FLOWS[job_id] = {'flow': flow, 'user': user, 'scopes': SCOPES, 'proxy': proxy, 'secret_file': secret_file}
+            CHANNEL_AUTH_FLOWS[job_id] = {'flow': flow, 'user': user, 'scopes': SCOPES, 'proxy': proxy, 'secret_file': secret_file, 'login_hint': login_hint}
             return  # Will resume in /add_channel_code
 
-        creds = _finish_channel_auth(job_id, creds, user, proxy, secret_file)
+        creds = _finish_channel_auth(job_id, creds, user, proxy, secret_file, login_hint)
     except Exception as e:
         UPLOAD_JOBS[job_id]['status'] = 'error'
         UPLOAD_JOBS[job_id]['log'].append(f'❌ Ошибка: {str(e)}')
 
-def _finish_channel_auth(job_id, creds, user, proxy='', secret_file=None):
+def _finish_channel_auth(job_id, creds, user, proxy='', secret_file=None, login_hint=''):
     from googleapiclient.discovery import build
     yt = build_api('youtube', 'v3', creds)
     ch_id = None
@@ -914,7 +914,10 @@ def _finish_channel_auth(job_id, creds, user, proxy='', secret_file=None):
         f.write(creds.to_json())
     proj_id = get_proj_id_for_secret(secret_file, user)
     channels = load_channels(user)
-    channels[ch_id] = {'name': ch_name, 'email': ch_email or '', 'token_file': token_file, 'project_id': proj_id, 'proxy': proxy, 'auth_time': time.time()}
+    # Если Google не отдал почту (канал заводился до появления scope userinfo.email),
+    # берём ту, что байер вписал в форму — чтобы дальше не искать аккаунт вручную.
+    ch_email = ch_email or (login_hint or '').strip()
+    channels[ch_id] = {'name': ch_name, 'email': ch_email, 'token_file': token_file, 'project_id': proj_id, 'proxy': proxy, 'auth_time': time.time()}
     if ch_name_error:
         channels[ch_id]['name_lookup_error'] = ch_name_error
     save_channels(user, channels)
@@ -3399,7 +3402,7 @@ async function assignProject(chId){
 function reauthChannel(chId){
   const ch = (window.__chCache || {})[chId];
   if(!ch){ alert('Канал не найден, обнови страницу'); return; }
-  addChannel({email: ch.email || '', proxy: ch.proxy || '', reauth: true, project_id: ch.project_id || ''});
+  addChannel({email: ch.email || '', proxy: ch.proxy || '', reauth: true, project_id: ch.project_id || '', name: ch.name || ''});
 }
 
 let addChTimer = null;
@@ -3425,7 +3428,7 @@ async function reauthAll(btn){
     const ch = need[i];
     btn.textContent = `🔄 ${i+1} из ${need.length}...`;
     box.innerHTML = `<b>Канал ${i+1} из ${need.length}:</b> ${ch.name} — пройди вход Google в окне справа.`;
-    const res = await addChannel({email: ch.email || '', proxy: ch.proxy || '', reauth: true, project_id: ch.project_id || ''});
+    const res = await addChannel({email: ch.email || '', proxy: ch.proxy || '', reauth: true, project_id: ch.project_id || '', name: ch.name || ''});
     if(res && res.ok) ok++;
   }
   btn.disabled = false; btn.textContent = orig;
@@ -3440,13 +3443,19 @@ async function addChannel(prefill){
   modal = document.createElement('div');
   modal.id = 'add-ch-modal';
   modal.style.cssText = 'position:fixed;top:20px;right:20px;z-index:9999;background:#1a1a1a;color:#7eff7e;border-radius:14px;padding:18px 20px;font-size:13px;font-family:monospace;min-width:320px;max-width:440px;box-shadow:0 8px 32px rgba(0,0,0,.6);border:1.5px solid #333;';
-  const title = prefill.reauth ? '🔄 Переавторизация канала' : '📺 Добавление канала';
+  const title = prefill.reauth
+    ? '🔄 Переавторизация: ' + (prefill.name || 'канал')
+    : '📺 Добавление канала';
   modal.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;"><b style="color:#fff;font-family:sans-serif;">${title}</b><span onclick="this.parentElement.parentElement.remove()" style="cursor:pointer;color:#666;font-size:18px;">✕</span></div><div id="add-ch-modal-log" style="white-space:pre-wrap;">⏳ Запускаем...</div>`;
   document.body.appendChild(modal);
   const log = document.getElementById('add-ch-modal-log');
 
   // Show input form in modal — pre-filled + auto-skipped when reauthorizing a known channel
-  const reauthNote = prefill.reauth ? `<div style="font-size:11px;color:#7eff7e;margin-bottom:10px;">Тот же email и прокси, что и раньше — просто пройди авторизацию в Google ещё раз.</div>` : '';
+  const reauthNote = prefill.reauth
+    ? (prefill.email
+        ? `<div style="font-size:11px;color:#7eff7e;margin-bottom:10px;">Тот же email и прокси, что и раньше — просто пройди авторизацию в Google ещё раз.</div>`
+        : `<div style="font-size:11px;color:#ffd166;margin-bottom:10px;line-height:1.5;">Канал <b>${prefill.name || ''}</b> добавлен до того, как панель начала запоминать email — ищи аккаунт по названию канала.<br>Впишешь email сейчас — панель запомнит его и дальше будет подставлять сама.</div>`)
+    : '';
   log.innerHTML = `
     <div style="font-family:sans-serif;color:#fff;">
       ${reauthNote}
@@ -7423,7 +7432,7 @@ class Handler(BaseHTTPRequestHandler):
                 _os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
                 flow.fetch_token(code=code)
                 creds = flow.credentials
-                _finish_channel_auth(job_id, creds, flow_data['user'], flow_data.get('proxy',''), flow_data.get('secret_file'))
+                _finish_channel_auth(job_id, creds, flow_data['user'], flow_data.get('proxy',''), flow_data.get('secret_file'), flow_data.get('login_hint',''))
                 CHANNEL_AUTH_FLOWS.pop(job_id, None)
                 self.json({'ok': True})
             except Exception as e:
