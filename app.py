@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.44"
+VERSION = "5.45"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -861,8 +861,7 @@ def add_channel_auth(job_id, user='pavel', is_local=True, proxy='', login_hint='
             auth_url = urlunparse((_p.scheme, _p.netloc, _p.path, _p.params, urlencode(_flat), _p.fragment))
             flow.code_verifier = None
             UPLOAD_JOBS[job_id]['auth_url'] = auth_url
-            UPLOAD_JOBS[job_id]['log'].append(f'🔗 AUTH URL: {auth_url}')
-            UPLOAD_JOBS[job_id]['log'].append('🔗 Открой ссылку и авторизуйся')
+            UPLOAD_JOBS[job_id]['log'].append('🔗 Ссылка готова — жми «Скопировать ссылку» ниже')
             UPLOAD_JOBS[job_id]['status'] = 'waiting_code'
             CHANNEL_AUTH_FLOWS[job_id] = {'flow': flow, 'user': user, 'scopes': SCOPES, 'proxy': proxy, 'secret_file': secret_file, 'login_hint': login_hint}
             return  # Will resume in /add_channel_code
@@ -3499,7 +3498,8 @@ async function addChannel(prefill){
       block.id = 'add-ch-code-block';
       block.style.cssText = 'margin-top:12px;font-family:sans-serif;';
       block.innerHTML = `
-        <a href="${sd.auth_url}" target="_blank" style="display:block;background:#7c3aed;color:#fff;text-align:center;padding:10px;border-radius:8px;text-decoration:none;font-weight:700;margin-bottom:10px;">🔗 Открыть Google авторизацию</a>
+        <button onclick="copyAuthUrl(this)" data-url="${sd.auth_url.replace(/"/g,'&quot;')}" style="display:block;width:100%;background:#16a34a;color:#fff;text-align:center;padding:11px;border:none;border-radius:8px;font-weight:700;font-size:14px;cursor:pointer;margin-bottom:8px;">📋 Скопировать ссылку — вставь в Octo</button>
+        <a href="${sd.auth_url}" target="_blank" style="display:block;background:#7c3aed;color:#fff;text-align:center;padding:9px;border-radius:8px;text-decoration:none;font-weight:600;font-size:13px;margin-bottom:10px;">🔗 Открыть здесь (если этот браузер уже под нужным аккаунтом)</a>
         <div style="color:#aaa;font-size:11px;margin-bottom:6px;">После авторизации скопируй адресную строку браузера и вставь сюда:</div>
         <input id="add-ch-code-inp" placeholder="http://localhost:1/?code=..." style="width:100%;padding:8px;background:#111;border:1px solid #444;border-radius:6px;color:#fff;font-size:12px;box-sizing:border-box;margin-bottom:8px;">
         <button onclick="submitAuthCode('${jobId}')" style="width:100%;padding:9px;background:#16a34a;color:#fff;border:none;border-radius:8px;font-weight:700;cursor:pointer;">✅ Подтвердить</button>
@@ -3520,6 +3520,19 @@ async function addChannel(prefill){
   }, 1000);
   // Позволяет очереди «Переавторизовать все» дождаться этого канала
   return new Promise(res => { addChDone = res; });
+}
+
+function copyAuthUrl(btn){
+  const url = btn.dataset.url || '';
+  navigator.clipboard.writeText(url).then(()=>{
+    const o = btn.textContent;
+    btn.textContent = '✅ Ссылка скопирована — открой профиль в Octo и вставь';
+    setTimeout(()=>{ btn.textContent = o; }, 2600);
+  }).catch(()=>{
+    // если буфер недоступен — показываем ссылку для ручного копирования
+    btn.insertAdjacentHTML('afterend',
+      '<textarea readonly style="width:100%;height:60px;margin-top:6px;font-size:11px;background:#111;color:#7eff7e;border:1px solid #444;border-radius:6px;padding:6px;">'+url+'</textarea>');
+  });
 }
 
 async function submitAuthCode(jobId){
