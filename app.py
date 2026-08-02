@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.45"
+VERSION = "5.46"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -3467,8 +3467,27 @@ async function addChannel(prefill){
         <input id="ch-proxy-inp" type="text" placeholder="host:port:user:pass" value="${prefill.proxy||''}" style="width:100%;padding:8px 10px;border-radius:8px;border:1.5px solid #444;background:#222;color:#fff;font-size:13px;outline:none;" />
         <div style="font-size:11px;color:#666;margin-top:4px;">Любой формат: host:port:user:pass · user:pass@host:port · socks5://... — панель поймёт сама</div>
       </div>
+      <div style="margin-bottom:16px;">
+        <label style="font-size:12px;color:#aaa;display:block;margin-bottom:4px;">ПРОЕКТ API</label>
+        <select id="ch-project-sel" style="width:100%;padding:8px 10px;border-radius:8px;border:1.5px solid #444;background:#222;color:#fff;font-size:13px;outline:none;">
+          <option value="">Авто (наименее загруженный)</option>
+        </select>
+        <div style="font-size:11px;color:#666;margin-top:4px;">Аккаунт должен быть в Test users этого проекта — или проект опубликован (In production)</div>
+      </div>
       <button id="ch-start-btn" style="width:100%;padding:10px;background:#4f46e5;color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:600;cursor:pointer;">Продолжить →</button>
     </div>`;
+
+  // подтягиваем список проектов
+  try {
+    const pr = await fetch('/projects').then(r=>r.json());
+    const sel = document.getElementById('ch-project-sel');
+    (pr.projects||[]).forEach(p=>{
+      const o=document.createElement('option');
+      o.value=p.id; o.textContent=`${p.name} · ≈${p.seen_count||0}/100 юзеров`;
+      if(prefill.project_id && p.id===prefill.project_id) o.selected=true;
+      sel.appendChild(o);
+    });
+  } catch(e){}
 
   const {proxyStr, loginHint, useOcto} = await new Promise(resolve => {
     document.getElementById('ch-start-btn').onclick = () => {
@@ -3481,7 +3500,7 @@ async function addChannel(prefill){
     };
   });
 
-  const resp = await fetch('/add_channel', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({proxy: proxyStr, force_manual: useOcto, login_hint: loginHint, project_id: prefill.project_id || ''})});
+  const resp = await fetch('/add_channel', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({proxy: proxyStr, force_manual: useOcto, login_hint: loginHint, project_id: (document.getElementById('ch-project-sel')||{}).value || prefill.project_id || ''})});
   const data = await resp.json();
   const jobId = data.job_id;
   let logLen = 0;
