@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.46"
+VERSION = "5.47"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -418,23 +418,27 @@ def save_project_uploads(user, data):
     write_json(get_project_uploads_file(user), data)
 
 def get_best_project_secret(user):
-    """Return path to client_secret.json with most remaining quota today."""
+    """Файл client_secret.json проекта с наибольшим остатком квоты на сегодня.
+
+    Пропускаем проекты, у которых файла нет на диске: путь хранится абсолютным,
+    и после переноса/переименования папки панели он перестаёт существовать —
+    раньше это всплывало сырым «No such file or directory» посреди авторизации.
+    """
     projects = load_projects(user)
     if not projects:
-        # fallback to global client_secret.json
-        return CREDENTIALS_FILE
-    uploads = load_project_uploads(user)
-    counts = uploads.get('counts', {})
-    best_proj = None
-    best_count = 9999
+        return CREDENTIALS_FILE if os.path.exists(CREDENTIALS_FILE) else None
+    counts = load_project_uploads(user).get('counts', {})
+    best_proj, best_count = None, 9999
     for pid, pinfo in projects.items():
+        f = pinfo.get('file', '')
+        if not f or not os.path.exists(f):
+            continue
         used = counts.get(pid, 0)
         if used < 100 and used < best_count:
-            best_count = used
-            best_proj = pid
+            best_count, best_proj = used, pid
     if best_proj:
         return projects[best_proj]['file']
-    return None  # all exhausted
+    return None
 
 def increment_project_upload(user, proj_id):
     uploads = load_project_uploads(user)
@@ -837,7 +841,14 @@ def add_channel_auth(job_id, user='pavel', is_local=True, proxy='', login_hint='
                     UPLOAD_JOBS[job_id]['log'].append(
                         '🔑 Проект канала: %s' % _projs[project_id].get('name', project_id))
         if not secret_file:
-            secret_file = get_best_project_secret(user) or CREDENTIALS_FILE
+            secret_file = get_best_project_secret(user)
+        if not secret_file or not os.path.exists(secret_file):
+            _broken = [p.get('name', pid) for pid, p in load_projects(user).items()
+                       if not os.path.exists(p.get('file', ''))]
+            raise RuntimeError(
+                'Не найден файл проекта API' +
+                (' (' + ', '.join(_broken) + ')' if _broken else '') +
+                '. Похоже, папку панели переносили. Зайди в «Проекты API», удали проект и добавь заново его client_secret.json.')
         if is_local:
             # Pavel on localhost — fully automatic
             UPLOAD_JOBS[job_id]['log'].append('🔐 Открываем браузер для авторизации...')
@@ -3441,7 +3452,7 @@ async function addChannel(prefill){
   if(modal) modal.remove();
   modal = document.createElement('div');
   modal.id = 'add-ch-modal';
-  modal.style.cssText = 'position:fixed;top:20px;right:20px;z-index:9999;background:#1a1a1a;color:#7eff7e;border-radius:14px;padding:18px 20px;font-size:13px;font-family:monospace;min-width:320px;max-width:440px;box-shadow:0 8px 32px rgba(0,0,0,.6);border:1.5px solid #333;';
+  modal.style.cssText = 'position:fixed;top:12px;right:12px;z-index:9999;background:#1a1a1a;color:#7eff7e;border-radius:12px;padding:12px 14px;font-size:12px;font-family:monospace;width:300px;max-width:calc(100vw - 24px);max-height:calc(100vh - 24px);overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.6);border:1.5px solid #333;';
   const title = prefill.reauth
     ? '🔄 Переавторизация: ' + (prefill.name || 'канал')
     : '📺 Добавление канала';
@@ -3458,18 +3469,18 @@ async function addChannel(prefill){
   log.innerHTML = `
     <div style="font-family:sans-serif;color:#fff;">
       ${reauthNote}
-      <div style="margin-bottom:12px;">
-        <label style="font-size:12px;color:#aaa;display:block;margin-bottom:4px;">EMAIL АККАУНТА <span style="color:#ff6b6b;">*</span></label>
-        <input id="ch-email-inp" type="email" placeholder="farmaccount@gmail.com" value="${prefill.email||''}" style="width:100%;padding:8px 10px;border-radius:8px;border:1.5px solid #444;background:#222;color:#fff;font-size:13px;outline:none;" />
+      <div style="margin-bottom:8px;">
+        <label style="font-size:11px;color:#aaa;display:block;margin-bottom:3px;">EMAIL АККАУНТА <span style="color:#ff6b6b;">*</span></label>
+        <input id="ch-email-inp" type="email" placeholder="farmaccount@gmail.com" value="${prefill.email||''}" style="width:100%;padding:7px 9px;border-radius:7px;border:1.5px solid #444;background:#222;color:#fff;font-size:12px;outline:none;" />
       </div>
-      <div style="margin-bottom:16px;">
-        <label style="font-size:12px;color:#aaa;display:block;margin-bottom:4px;">ПРОКСИ КАНАЛА <span style="color:#ff6b6b;">*</span></label>
-        <input id="ch-proxy-inp" type="text" placeholder="host:port:user:pass" value="${prefill.proxy||''}" style="width:100%;padding:8px 10px;border-radius:8px;border:1.5px solid #444;background:#222;color:#fff;font-size:13px;outline:none;" />
+      <div style="margin-bottom:8px;">
+        <label style="font-size:11px;color:#aaa;display:block;margin-bottom:3px;">ПРОКСИ КАНАЛА <span style="color:#ff6b6b;">*</span></label>
+        <input id="ch-proxy-inp" type="text" placeholder="host:port:user:pass" value="${prefill.proxy||''}" style="width:100%;padding:7px 9px;border-radius:7px;border:1.5px solid #444;background:#222;color:#fff;font-size:12px;outline:none;" />
         <div style="font-size:11px;color:#666;margin-top:4px;">Любой формат: host:port:user:pass · user:pass@host:port · socks5://... — панель поймёт сама</div>
       </div>
-      <div style="margin-bottom:16px;">
-        <label style="font-size:12px;color:#aaa;display:block;margin-bottom:4px;">ПРОЕКТ API</label>
-        <select id="ch-project-sel" style="width:100%;padding:8px 10px;border-radius:8px;border:1.5px solid #444;background:#222;color:#fff;font-size:13px;outline:none;">
+      <div style="margin-bottom:10px;">
+        <label style="font-size:11px;color:#aaa;display:block;margin-bottom:3px;">ПРОЕКТ API</label>
+        <select id="ch-project-sel" style="width:100%;padding:7px 9px;border-radius:7px;border:1.5px solid #444;background:#222;color:#fff;font-size:12px;outline:none;">
           <option value="">Авто (наименее загруженный)</option>
         </select>
         <div style="font-size:11px;color:#666;margin-top:4px;">Аккаунт должен быть в Test users этого проекта — или проект опубликован (In production)</div>
