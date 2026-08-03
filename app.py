@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.48"
+VERSION = "5.49"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -1258,7 +1258,28 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user, 
                 try:
                     import requests as _rq, random as _rnd, re as _re
                     _s = _rnd.randint(10000,99999)
-                    _p = (
+                    if (category or '').strip() == 'Рецепт':
+                        # Кулинарный угол: заголовок и описание про рецепт, на английском.
+                        # Каждый вызов со своим сидом — заголовки не повторяются между копиями.
+                        _p = (
+                            f"You are a home cook sharing a recipe on YouTube. Session seed: {_s}. "
+                            "Use this seed to pick a UNIQUE dish and angle.\n"
+                            "Write ONE YouTube title and description IN ENGLISH ONLY about a simple home recipe.\n"
+                            "Pick a random dish type based on the seed: soup, casserole, one-pan dinner, "
+                            "slow-cooker meal, breakfast bowl, baked chicken, pasta, salad, stew, sheet-pan bake, "
+                            "homemade bread, rice dish, vegetable side, dessert, smoothie, meal-prep lunch.\n\n"
+                            "RULES:\n"
+                            "- Title: max 65 chars, sounds like a real home cook, no clickbait symbols\n"
+                            "- Description: 2 short sentences about the dish, casual and warm\n"
+                            "- Mention simple everyday ingredients\n"
+                            "- FORBIDDEN: any health claims, weight loss, diabetes, blood sugar, cure, detox, "
+                            "burn fat, medicine, doctor, treatment, miracle\n\n"
+                            "Respond EXACTLY in this format:\n"
+                            "TITLE: [title here]\n"
+                            "DESCRIPTION: [description here]"
+                        )
+                    else:
+                        _p = (
                         f"You are a YouTube lifestyle vlogger. Session seed: {_s}. Use this seed to pick a UNIQUE angle.\n"
                         "Write ONE YouTube title and description IN ENGLISH ONLY. Pick a random topic from this list based on the seed:\n"
                         "sleep schedule, cold shower experiment, phone screen time, journaling, walking habit, meal timing, caffeine-free week, "
@@ -2238,6 +2259,7 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
           <button class="lang-btn" onclick="setAutoCat(this)" data-cat="Цистит">💧 Цистит</button>
           <button class="lang-btn" onclick="setAutoCat(this)" data-cat="Зрение">👁️ Зрение</button>
           <button class="lang-btn" onclick="setAutoCat(this)" data-cat="Память">🧠 Память</button>
+          <button class="lang-btn" onclick="setAutoCat(this)" data-cat="Рецепт">🍳 Рецепт</button>
         </div>
         <div id="auto-cat-selected" style="font-size:12px;color:#4f46e5;margin-top:6px;"></div>
       </div>
@@ -7608,6 +7630,24 @@ class Handler(BaseHTTPRequestHandler):
                 with urllib.request.urlopen(req) as r:
                     result = json.loads(r.read())
                 self.json({'text': result['content'][0]['text']})
+            except urllib.error.HTTPError as e:
+                _raw = e.read().decode('utf-8', 'ignore')
+                _msg = ''
+                try:
+                    _msg = json.loads(_raw).get('error', {}).get('message', '')
+                except Exception:
+                    _msg = _raw[:200]
+                # Ключ Claude общий для всех байеров — когда он выдыхается,
+                # раньше все видели голое «HTTP Error 400» и не понимали причину.
+                if 'credit balance' in _msg.lower():
+                    _msg = ('Закончились кредиты Claude. Пополни аккаунт Anthropic '
+                            'или впиши свой ключ в ~/VideoEditor_data/anthropic_key.txt')
+                elif e.code == 401:
+                    _msg = 'Неверный ключ Claude — проверь ~/VideoEditor_data/anthropic_key.txt'
+                elif e.code == 429:
+                    _msg = 'Слишком много запросов к Claude — подожди минуту'
+                print("AI ERROR:", e.code, _msg)
+                self.json({"error": _msg or ('HTTP %s' % e.code)})
             except Exception as e:
                 print("AI ERROR:", str(e))
                 self.json({"error": str(e)})
