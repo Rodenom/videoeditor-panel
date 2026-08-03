@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.47"
+VERSION = "5.48"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -398,7 +398,28 @@ def get_projects_file(user):
     return os.path.join(BASE_DIR, f'projects_{user}.json')
 
 def load_projects(user):
-    return read_json(get_projects_file(user))
+    """Проекты пользователя. Если файл client_secret переехал (папку панели
+    перенесли — старые версии клали его рядом с app.py), ищем по имени в
+    актуальных местах и чиним путь. Иначе авторизация падала на «No such file»."""
+    projects = read_json(get_projects_file(user))
+    if not isinstance(projects, dict):
+        return {}
+    fixed = False
+    search_dirs = [BASE_DIR, os.path.dirname(os.path.abspath(__file__))]
+    for pid, info in projects.items():
+        f = info.get('file', '')
+        if not f or os.path.exists(f):
+            continue
+        name = os.path.basename(f)
+        for d in search_dirs:
+            cand = os.path.join(d, name)
+            if os.path.exists(cand):
+                info['file'] = cand
+                fixed = True
+                break
+    if fixed:
+        save_projects(user, projects)
+    return projects
 
 def save_projects(user, projects):
     write_json(get_projects_file(user), projects, indent=2, ensure_ascii=False)
