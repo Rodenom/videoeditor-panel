@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.49"
+VERSION = "5.50"
 import io, hashlib
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -5199,7 +5199,37 @@ function tkBinomRows(t){
       html += `<div class="tk-binom-row"><div class="tk-binom-label">${f.label}</div><div class="tk-binom-val" onclick="tkCopyText('${f.val.replace(/'/g,"\\'")}',this)">${f.val}</div><button class="tk-binom-copy" onclick="tkCopyText('${f.val.replace(/'/g,"\\'")}',this)">Копировать</button></div>`;
     });
   }
+  html += `<div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--border);">
+    <button onclick='tkCreateInBinom(${JSON.stringify(JSON.stringify({name:offerName,url:offerUrl,geo:geo}))}, this)'
+      style="width:100%;padding:9px;border-radius:8px;border:none;background:var(--accent1);color:#fff;font-weight:700;font-size:12px;cursor:pointer;">
+      ➕ Создать оффер в Биноме
+    </button>
+    <div style="font-size:10px;color:var(--text3);margin-top:5px;">Создаётся только новый оффер. Существующие кампании и офферы не трогаются.</div>
+  </div>`;
   return html;
+}
+
+async function tkCreateInBinom(payloadStr, btn){
+  const p = JSON.parse(payloadStr);
+  if(!confirm('Создать оффер в Биноме?\n\nНазвание: '+p.name+'\nURL: '+p.url+'\nГео: '+(p.geo||'—'))) return;
+  const orig = btn.textContent;
+  btn.disabled = true; btn.textContent = '⏳ Создаю...';
+  try {
+    const r = await fetch('/binom/create_offer', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({...p, target: (typeof binomTarget==='function' ? binomTarget() : 'swatcam')})});
+    const d = await r.json();
+    if(d.ok){
+      btn.textContent = '✅ Оффер создан';
+      btn.style.background = '#16a34a';
+    } else {
+      btn.textContent = '❌ ' + (d.error||'ошибка');
+      btn.style.background = '#dc2626';
+      setTimeout(()=>{ btn.textContent = orig; btn.style.background=''; btn.disabled=false; }, 5000);
+    }
+  } catch(e){
+    btn.textContent = '❌ ' + e.message;
+    setTimeout(()=>{ btn.textContent = orig; btn.disabled=false; }, 4000);
+  }
 }
 
 function tkToggleBinom(id){
@@ -6808,6 +6838,47 @@ class Handler(BaseHTTPRequestHandler):
             for k in to_del: SESSIONS.pop(k)
             save_sessions(SESSIONS)
             self.json({'ok': True})
+            return
+        elif path == '/binom/create_offer':
+            # Создание оффера в Биноме одним кликом из сохранённой таски.
+            # ВАЖНО: создаём ТОЛЬКО новый оффер. Ничего чужого не трогаем —
+            # никаких edit/delete существующих объектов (см. правило по Биному).
+            length = int(self.headers.get('Content-Length', 0))
+            data = json.loads(self.rfile.read(length)) if length else {}
+            target = binom_norm_target(data.get('target', DEFAULT_BINOM))
+            bk = read_binom_key(target)
+            if not bk:
+                self.json({'ok': False, 'error': 'Не задан ключ Binom для %s' % BINOM_TARGETS[target]['domain']}); return
+            name = (data.get('name') or '').strip()
+            url = (data.get('url') or '').strip()
+            if not name or not url:
+                self.json({'ok': False, 'error': 'Нужны название и URL оффера'}); return
+            geo = (data.get('geo') or '').strip().upper()
+            payout = str(data.get('payout') or '0')
+            try:
+                import requests as _br
+                _s = _br.Session(); _s.headers['User-Agent'] = 'Mozilla/5.0'
+                if BINOM_TARGETS[target]['version'] == 'v1':
+                    params = {'api_key': bk, 'action': 'offer@add', 'name': name, 'url': url}
+                    if geo: params['geo'] = geo
+                    if payout and payout != '0':
+                        params['payout'] = payout
+                    else:
+                        params['auto_payout'] = '1'
+                    if data.get('network'): params['network'] = str(data['network'])
+                    if data.get('group'): params['group_of'] = str(data['group'])
+                    r = _s.get(BINOM_TARGETS[target]['base'], params=params, timeout=30)
+                    try:
+                        res = r.json()
+                    except Exception:
+                        self.json({'ok': False, 'error': 'Бином вернул не JSON: ' + r.text[:200]}); return
+                    if isinstance(res, dict) and res.get('status') == 'error':
+                        self.json({'ok': False, 'error': res.get('message', 'ошибка Binom')}); return
+                    self.json({'ok': True, 'result': res})
+                else:
+                    self.json({'ok': False, 'error': 'Создание для нового Бинома (V2) ещё не подключено'})
+            except Exception as e:
+                self.json({'ok': False, 'error': str(e)[:200]})
             return
         elif path == '/binom/key':
             length = int(self.headers.get('Content-Length', 0))
