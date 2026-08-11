@@ -52,6 +52,603 @@ def get_anthropic_key():
         if k: return k
     return _default
 
+# ── Фабрика связок (видео + прокла) ──────────────────────────────
+# Живёт в отдельной папке ~/Desktop/VideoFactory. Вкладка «Связки» показывается
+# ТОЛЬКО если эта папка есть рядом — у байеров её нет, значит и вкладки не будет.
+# Привязывать к имени пользователя нельзя: панель на localhost всех считает 'pavel',
+# в том числе на машине байера.
+VF_DIR = os.path.join(os.path.expanduser('~'), 'Desktop', 'VideoFactory')
+
+def vf_available():
+    return os.path.isdir(VF_DIR) and os.path.exists(os.path.join(VF_DIR, 'script_gen.py'))
+
+VF_JOBS = {}   # job_id -> {status, log, title}
+
+# Нейминг лендов у ArkNet требует ISO2 в верхнем регистре, внутри фабрики гео
+# живёт двухбуквенным кодом в нижнем — держим соответствие в одном месте.
+VF_ISO2 = {
+           'fr': 'FR',
+           'gb': 'GB',
+           'nl': 'NL',
+           'be': 'BE',
+           'at': 'AT',
+           'ch': 'CH',
+           'se': 'SE',
+           'no': 'NO',
+           'dk': 'DK',
+           'fi': 'FI',
+           'ie': 'IE',
+           'si': 'SI',
+           'ba': 'BA',
+           'mk': 'MK',
+           'al': 'AL',
+           'me': 'ME',
+           'ua': 'UA',
+           'md': 'MD',
+           'cy': 'CY',
+           'mt': 'MT',
+           'ar': 'AR',
+           'py': 'PY',
+           'ke': 'KE',
+           'ng': 'NG',
+           'gh': 'GH',
+           'za': 'ZA',
+           'ci': 'CI','dz': 'DZ', 'ma': 'MA', 'tn': 'TN', 'eg': 'EG', 'sa': 'SA', 'bg': 'BG',
+           'ro': 'RO', 'pl': 'PL', 'hu': 'HU', 'cz': 'CZ', 'sk': 'SK', 'hr': 'HR',
+           'rs': 'RS', 'gr': 'GR', 'it': 'IT', 'es': 'ES', 'pt': 'PT', 'mx': 'MX',
+           'tr': 'TR', 'de': 'DE', 'lt': 'LT', 'lv': 'LV', 'ee': 'EE'}
+
+def pack_iso2(geo):
+    return VF_ISO2.get((geo or '').lower(), (geo or '').upper())
+
+# Сундук собирается дважды: боевой на языке гео и русский для чтения. Дважды
+# запускать процесс из панели неудобно (два job'а, два лога), поэтому оба
+# прогона делает один короткий скрипт.
+VF_CHEST_BOTH = (
+    'import sys, json, chest_gen;'
+    'a = json.loads(sys.argv[1]);'
+    'pos = [x for x in a if not x.startswith("--")];'
+    'fl = dict((x.split("=", 1)[0][2:], x.split("=", 1)[1])'
+    '          for x in a if x.startswith("--") and "=" in x);'
+    'kw = dict(product=fl.get("product", ""), product_img=fl.get("img", ""),'
+    '          p_old=int(fl.get("price") or 0));'
+    'chest_gen.build(pos[0], pos[1], pos[2], pos[3], **kw);'
+    'chest_gen.build(pos[0], pos[1], pos[2], pos[3], ru_mode=True, **kw)')
+
+# Цена за секунду готового видео у дешёвой модели (prunaai/p-video-avatar).
+# Замерено по факту: 5 роликов общей длиной ~130 сек = $3.76 списания.
+# Панель показывает стоимость ДО запуска, чтобы не выходило «сделал 5 роликов — ушло $10».
+VF_PRICE_PER_SEC = 0.029
+
+def vf_run(args, timeout=3600):
+    """Запустить скрипт фабрики и вернуть его вывод (синхронно, для быстрых команд)."""
+    import subprocess
+    r = subprocess.run([sys.executable] + args, cwd=VF_DIR, capture_output=True,
+                       text=True, timeout=timeout)
+    return {'ok': r.returncode == 0, 'out': (r.stdout or '')[-6000:],
+            'err': (r.stderr or '')[-2000:]}
+
+def vf_run_bg(args, title, timeout=7200):
+    """Долгие команды (тексты, ролик, прокла) — в фоне, с живым логом.
+
+    Раньше это шло синхронно: браузер полторы минуты ждал ответа, панель выглядела
+    зависшей и казалось, что кнопки не работают. Теперь возвращаем job_id сразу,
+    а фронт опрашивает /vf_job и показывает, что происходит.
+    """
+    import subprocess
+    job_id = uuid.uuid4().hex[:8]
+    VF_JOBS[job_id] = {'status': 'running', 'log': [], 'title': title}
+
+    def work():
+        job = VF_JOBS[job_id]
+        try:
+            p = subprocess.Popen([sys.executable, '-u'] + args, cwd=VF_DIR,
+                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                 text=True, bufsize=1)
+            for line in p.stdout:
+                # Прогресс-бары и подобное шлют \r и другие управляющие символы.
+                # Если они попадут в лог, ответ /vf_job перестаёт быть валидным JSON,
+                # фронт не может прочитать статус — и вкладка выглядит мёртвой,
+                # хотя работа идёт. Чистим здесь, у источника.
+                line = ''.join(ch for ch in line if ch >= ' ' or ch == '\t').strip()
+                if line:
+                    job['log'].append(line[:400])
+                    del job['log'][:-200]
+            p.wait(timeout=timeout)
+            job['status'] = 'done' if p.returncode == 0 else 'error'
+        except Exception as e:
+            job['log'].append('❌ %s' % str(e)[:300])
+            job['status'] = 'error'
+    threading.Thread(target=work, daemon=True).start()
+    return {'ok': True, 'job': job_id}
+
+def vf_handle(action, p):
+    """Эндпоинты вкладки «Связки». Всё тяжёлое делают скрипты фабрики."""
+    if not vf_available():
+        return {'error': 'Фабрика не найдена: %s' % VF_DIR}
+    import glob as _glob
+    offer, geo = p.get('offer', 'prostate'), p.get('geo', 'dz')
+    dur = int(p.get('dur', 25))
+    sub = '%s_%s%s' % (offer, geo, '' if dur <= 40 else '_%ds' % dur)
+    sdir = os.path.join(VF_DIR, 'scripts', sub)
+
+    if action == 'state':
+        keys = [os.path.basename(f)[8:-4] for f in
+                sorted(_glob.glob(os.path.join(VF_DIR, 'faces', 'persona_*.png')))]
+        # Русские подписи и имена берём из personas.py фабрики — в списке должно быть
+        # «Карим · Алжирец, мужчина 45 лет», а не «dz_man45».
+        meta = {}
+        try:
+            import subprocess as _sp
+            r = _sp.run([sys.executable, '-c',
+                         'import json,personas;print(json.dumps({k:{"name":v.get("name",""),'
+                         '"ru":v.get("ru","")} for k,v in personas.PERSONAS.items()},ensure_ascii=False))'],
+                        cwd=VF_DIR, capture_output=True, text=True, timeout=30)
+            meta = json.loads(r.stdout.strip() or '{}')
+        except Exception:
+            meta = {}
+        personas = [{'key': k, 'name': meta.get(k, {}).get('name', ''),
+                     'ru': meta.get(k, {}).get('ru', k)} for k in keys]
+        offers_ru = {'prostate': 'Простатит', 'potency': 'Потенция', 'joints': 'Суставы',
+                     'diabetes': 'Диабет', 'pressure': 'Гипертония', 'weight': 'Похудение',
+                     'parasites': 'Паразиты', 'cystitis': 'Цистит', 'vision': 'Зрение',
+                     'memory': 'Память'}
+        geos_ru = {'dz': '🇩🇿 Алжир', 'ma': '🇲🇦 Марокко', 'tn': '🇹🇳 Тунис', 'eg': '🇪🇬 Египет',
+                   'sa': '🇸🇦 Саудовская Аравия', 'bg': '🇧🇬 Болгария', 'ro': '🇷🇴 Румыния',
+                   'pl': '🇵🇱 Польша', 'hu': '🇭🇺 Венгрия', 'cz': '🇨🇿 Чехия', 'sk': '🇸🇰 Словакия',
+                   'hr': '🇭🇷 Хорватия', 'rs': '🇷🇸 Сербия', 'gr': '🇬🇷 Греция', 'it': '🇮🇹 Италия',
+                   'es': '🇪🇸 Испания', 'pt': '🇵🇹 Португалия', 'mx': '🇲🇽 Мексика',
+                   'tr': '🇹🇷 Турция', 'de': '🇩🇪 Германия', 'lt': '🇱🇹 Литва',
+                   'lv': '🇱🇻 Латвия', 'ee': '🇪🇪 Эстония',
+                   'fr': '🇫🇷 Франция',
+                   'gb': '🇬🇧 Великобритания',
+                   'nl': '🇳🇱 Нидерланды',
+                   'be': '🇧🇪 Бельгия',
+                   'at': '🇦🇹 Австрия',
+                   'ch': '🇨🇭 Швейцария',
+                   'se': '🇸🇪 Швеция',
+                   'no': '🇳🇴 Норвегия',
+                   'dk': '🇩🇰 Дания',
+                   'fi': '🇫🇮 Финляндия',
+                   'ie': '🇮🇪 Ирландия',
+                   'si': '🇸🇮 Словения',
+                   'ba': '🇧🇦 Босния',
+                   'mk': '🇲🇰 Македония',
+                   'al': '🇦🇱 Албания',
+                   'me': '🇲🇪 Черногория',
+                   'ua': '🇺🇦 Украина',
+                   'md': '🇲🇩 Молдова',
+                   'cy': '🇨🇾 Кипр',
+                   'mt': '🇲🇹 Мальта',
+                   'ar': '🇦🇷 Аргентина',
+                   'py': '🇵🇾 Парагвай',
+                   'ke': '🇰🇪 Кения',
+                   'ng': '🇳🇬 Нигерия',
+                   'gh': '🇬🇭 Гана',
+                   'za': '🇿🇦 ЮАР',
+                   'ci': '🇨🇮 Кот-дИвуар'}
+        return {'ok': True, 'personas': personas,
+                'offers': [{'key': k, 'ru': v} for k, v in offers_ru.items()],
+                'geos': [{'key': k, 'ru': v} for k, v in geos_ru.items()]}
+
+    if action == 'scripts':
+        out = []
+        for f in sorted(_glob.glob(os.path.join(sdir, '*.json'))):
+            d = read_json(f)
+            words = len((d.get('text') or '').split())
+            secs = round(words / 2.2)          # ~2.2 слова в секунду обычной речи
+            out.append({'n': d.get('n'), 'angle': d.get('angle'), 'hook_ru': d.get('hook_ru'),
+                        'ru': d.get('ru'), 'text': d.get('text'), 'version': d.get('version', 1),
+                        'style': d.get('style', 'direct'), 'style_ru': d.get('style_ru', ''),
+                        'secs': secs, 'price': round(secs * VF_PRICE_PER_SEC, 2)})
+        total = round(sum(x['price'] for x in out), 2)
+        return {'ok': True, 'scripts': out, 'dir': sub, 'total': total,
+                'price_per_sec': VF_PRICE_PER_SEC}
+
+    if action == 'job':
+        j = VF_JOBS.get(p.get('job'), {'status': 'unknown', 'log': [], 'title': ''})
+        return {'ok': True, 'status': j['status'], 'log': j['log'][-40:], 'title': j.get('title', '')}
+
+    if action == 'settext':
+        # Ручная правка: Павел переписал русский текст сам — переводим его на язык гео
+        # и сохраняем как новую версию, старая уходит в историю.
+        return vf_run_bg(['script_gen.py', 'settext', offer, geo, str(p.get('script')),
+                          p.get('ru', '')], 'Сохраняю правку текста')
+
+    if action == 'task':
+        # Таска теху на НАШИ материалы: залить готовые пакеты и проверить.
+        # Отличается от вкладки «Таски», где прокла чужая и её надо переделывать.
+        # ID оффера/потока/токен ПП не передаются — их настраивает тех у себя.
+        args = ['task_gen.py', offer, geo]
+        for key, flag in (('mark', 'mark'), ('product', 'product'), ('price', 'price'),
+                          ('domain', 'domain'), ('land', 'land'), ('ptype', 'ptype'),
+                          ('inter', 'inter')):
+            if p.get(key):
+                args.append('--%s=%s' % (flag, p[key]))
+        return vf_run_bg(args, 'Собираю таску теху')
+
+    if action == 'taskread':
+        f = os.path.join(VF_DIR, 'out', 'task_%s_%s.txt' % (offer, geo))
+        if not os.path.exists(f):
+            return {'error': 'Таска ещё не собрана'}
+        return {'ok': True, 'text': open(f, encoding='utf-8').read()}
+
+    if action == 'bg':
+        # Фоновый звук: превью на одном ролике или наложение на всю связку.
+        args = ['bg_apply.py', offer, geo,
+                '--voices=%d' % int(p.get('voices', 2)),
+                '--noise=%s' % p.get('noise', 'city'),
+                '--vol=%s' % p.get('vol', 0.06)]
+        if p.get('preview'):
+            args.append('--preview')
+        return vf_run_bg(args, 'Фоновый звук')
+
+    if action == 'chest':
+        args = ['chest_gen.py', offer, geo, str(p.get('script')), p.get('persona', '')]
+        img = p.get('product_img') or ''
+        if img.startswith('data:'):
+            import base64 as _b64
+            head, _, data = img.partition(',')
+            pdir = os.path.join(VF_DIR, 'product'); os.makedirs(pdir, exist_ok=True)
+            fp = os.path.join(pdir, '%s_%s.%s' % (offer, geo, 'png' if 'png' in head else 'jpg'))
+            open(fp, 'wb').write(_b64.b64decode(data))
+            args.append('--img=%s' % fp)
+        for key, flag in (('product', 'product'), ('price', 'price')):
+            if p.get(key):
+                args.append('--%s=%s' % (flag, p[key]))
+        # Сразу же собираем русскую версию: без неё Павел смотрит на страницу
+        # на арабском или болгарском и не понимает, что там написано.
+        return vf_run_bg(['-c', VF_CHEST_BOTH, json.dumps(args[1:])],
+                         'Делаю сундук (+ русская версия)')
+
+    if action == 'heroes':
+        # Кто подходит под этот оффер и это гео — считает personas.fit() в фабрике.
+        try:
+            import subprocess as _sp
+            r = _sp.run([sys.executable, '-c',
+                         'import json,personas as p;ks=p.fit(%r,%r);'
+                         'print(json.dumps([{"key":k,"name":p.PERSONAS[k].get("name",""),'
+                         '"ru":p.PERSONAS[k].get("ru",k)} for k in ks],ensure_ascii=False))'
+                         % (offer, geo)],
+                        cwd=VF_DIR, capture_output=True, text=True, timeout=30)
+            return {'ok': True, 'heroes': json.loads(r.stdout.strip() or '[]')}
+        except Exception as e:
+            return {'ok': True, 'heroes': [], 'note': str(e)[:120]}
+
+    if action == 'card':
+        # Разбор карточки оффера по скриншоту: Павел кидает картинку товара,
+        # панель сама достаёт название, форму, цену и особенности. Форма важнее
+        # всего — от неё зависит, что герой делает на прокле: глотает или втирает.
+        img = (p.get('image') or '')
+        if ',' in img:
+            img = img.split(',', 1)[1]
+        if not img:
+            return {'error': 'Нет картинки'}
+        prompt = (
+            "На картинке — карточка товара (нутра-оффер) или сама упаковка. "
+            "Разбери её и верни ТОЛЬКО JSON:\n"
+            '{"product": "<название как на упаковке>", '
+            '"form": "<одно из: капсулы, таблетки, гель, крем, капли, порошок, чай, спрей>", '
+            '"price": <число или 0, если не видно>, '
+            '"currency": "<валюта или пусто>", '
+            '"category": "<простатит | потенция | суставы | диабет | давление | похудение | зрение | паразиты | другое>", '
+            '"look": "<как выглядит упаковка: цвет, форма банки/тюбика — 1 фраза>", '
+            '"notes": "<что важно учесть на прокле: как применяют, особенности — 1-2 фразы>"}'
+        )
+        body = json.dumps({
+            'model': 'claude-sonnet-5', 'max_tokens': 2000,
+            'messages': [{'role': 'user', 'content': [
+                {'type': 'image', 'source': {'type': 'base64',
+                 'media_type': p.get('mime', 'image/jpeg'), 'data': img}},
+                {'type': 'text', 'text': prompt}]}]}).encode()
+        import urllib.request as _u
+        req = _u.Request('https://api.anthropic.com/v1/messages', data=body,
+                         headers={'x-api-key': get_anthropic_key(),
+                                  'anthropic-version': '2023-06-01',
+                                  'content-type': 'application/json'})
+        try:
+            r = json.loads(_u.urlopen(req, timeout=120).read())
+            txt = next((b['text'] for b in r.get('content', []) if b.get('type') == 'text'), '')
+            t = txt[txt.index('{'):txt.rindex('}') + 1]
+            return {'ok': True, 'card': json.loads(t)}
+        except Exception as e:
+            return {'error': 'Не разобрал карточку: %s' % str(e)[:200]}
+
+    if action == 'jobs':
+        # Что сейчас считается. Нужно, чтобы после перезагрузки страницы (или если
+        # вкладку случайно закрыли) панель подхватила работу обратно, а не делала
+        # вид, что ничего не запущено. Сам процесс живёт в фоне и не зависит от браузера.
+        run = [{'job': k, 'title': v.get('title', ''), 'log': v['log'][-3:]}
+               for k, v in VF_JOBS.items() if v.get('status') == 'running']
+        return {'ok': True, 'running': run}
+
+    if action == 'gen':
+        return vf_run_bg(['script_gen.py', 'gen', offer, geo, str(int(p.get('n', 5))), str(dur),
+                          p.get('persona', ''), p.get('style', 'direct')], 'Пишу тексты')
+
+    if action == 'edit':
+        return vf_run_bg(['script_gen.py', 'edit', offer, geo, str(p.get('script')),
+                          p.get('instruction', '')], 'Переписываю текст №%s' % p.get('script'))
+
+    if action == 'restyle':
+        # Формат меняется у одного ролика, угол боли сохраняется.
+        return vf_run_bg(['script_gen.py', 'restyle', offer, geo, str(p.get('script')),
+                          p.get('style', 'direct')],
+                         'Меняю формат ролика №%s' % p.get('script'))
+
+    if action == 'build':
+        args = ['make_batch.py', offer, geo]
+        if p.get('script'):
+            args.append(str(p['script']))
+        if p.get('persona'):
+            args.append('--persona=%s' % p['persona'])   # герой, выбранный для этого ролика
+        return vf_run_bg(args, 'Собираю ролик %s' % (p.get('script') or 'все'))
+
+    if action == 'prela':
+        # Фото товара приходит из панели картинкой (перетащили/вставили) — кладём
+        # его файлом в product/, оттуда его берут и прокла, и сундук.
+        img = p.get('product_img') or ''
+        if img.startswith('data:'):
+            import base64 as _b64
+            head, _, data = img.partition(',')
+            ext = 'png' if 'png' in head else 'jpg'
+            pdir = os.path.join(VF_DIR, 'product')
+            os.makedirs(pdir, exist_ok=True)
+            fp = os.path.join(pdir, '%s_%s.%s' % (offer, geo, ext))
+            with open(fp, 'wb') as fh:
+                fh.write(_b64.b64decode(data))
+            p['product_img'] = fp
+        args = ['prela_gen.py', offer, geo, str(p.get('script')), p.get('persona', '')]
+        for key, flag in (('product', 'product'), ('price', 'price'),
+                          ('form_url', 'form'), ('product_img', 'img'),
+                          ('form', 'form_type')):
+            if p.get(key):
+                args.append('--%s=%s' % (flag, p[key]))
+        if not p.get('photos', 1):
+            args.append('--no-photos')
+        return vf_run_bg(args, 'Делаю проклу №%s' % p.get('script'))
+
+    if action == 'uniq':
+        return vf_run_bg(['uniq.py', os.path.join(VF_DIR, 'out', 'batch'),
+                          str(int(p.get('copies', 5)))], 'Размножаю ролики')
+
+    if action == 'prela_view':
+        # Превью проклы: русский перевод + сама страница. Павлу нужно понимать,
+        # что написано, не открывая арабский текст в переводчике.
+        name = p.get('name') or '%s_%s_%02d_%s' % (offer, geo, int(p.get('script', 1)),
+                                                   p.get('persona', ''))
+        d = os.path.join(VF_DIR, 'prela', name)
+        meta = read_json(os.path.join(d, 'prela.json'))
+        if not meta:
+            return {'error': 'Прокла не найдена: %s' % name}
+        return {'ok': True, 'name': name, 'title': meta.get('title'),
+                'ru': meta.get('ru', ''), 'cta': meta.get('cta'),
+                'blocks': [b.get('h') for b in (meta.get('blocks') or [])],
+                'url': '/vf_page?name=' + name}
+
+    if action == 'pack':
+        # Прокла как ФАЙЛ для теха: страница + трекинг + обработчик заявки +
+        # самопроверка + README. Без этого тех получает голый index.html и
+        # возвращает его с вопросами — ровно то, чего Павел не хочет.
+        pref = '%s_%s_' % (offer, geo)
+        dirs = sorted(d for d in _glob.glob(os.path.join(VF_DIR, 'prela', pref + '*'))
+                      if os.path.isdir(d) and not d.endswith('_ru'))
+        if not dirs:
+            return {'error': 'Прокл нет — сначала сделай их на этом шаге'}
+        import re as _re
+        name = _re.sub(r'[^A-Za-z0-9]', '', p.get('product') or offer) or 'Offer'
+        mark = p.get('mark') or 'VG'
+        domain = p.get('domain') or 'gvita.beauty'
+        base = 'https://%s/landers/' % domain
+        iso = pack_iso2(geo)
+        # Имя строится ровно как в pack.naming(): без префикса official-.
+        # Раньше здесь был свой хардкод со старым слагом — камбекер на прокле
+        # вёл на адрес, которого на домене не существует.
+        chest_url = '%s%s-%s-%s-RD-Boxes/' % (base, name, iso, mark)
+        # Куда бить события. `/click.php` живёт на домене лендов Бинома — это
+        # тот же домен, куда тех кладёт ленд, поэтому берём его из поля панели.
+        # Пустым оставлять нельзя: если ленд уедет на другой домен, пиксель
+        # уйдёт на сам лендинг и события пропадут.
+        common = ['--offer=%s' % name, '--geo=%s' % geo, '--mark=%s' % mark,
+                  '--base=%s' % base, '--binom=https://%s' % domain]
+        if p.get('price'):
+            common.append('--price=%s' % p['price'])
+        if p.get('currency'):
+            common.append('--cur=%s' % p['currency'])
+
+        out, zips, has_chest = [], [], False
+
+        def take(label, r):
+            out.append({'name': label, 'ok': r['ok'],
+                        'log': r['out'].strip(), 'err': (r['err'] or '').strip()})
+            # pack.py печатает «PACK<tab>путь» — берём именно собранное сейчас,
+            # а не последнее по времени в packs/ (там лежат прошлые связки).
+            for line in (r['out'] or '').splitlines():
+                if line.startswith('PACK\t') and os.path.exists(line[5:].strip()):
+                    z = line[5:].strip()
+                    zips.append({'file': os.path.relpath(z, VF_DIR),
+                                 'name': os.path.basename(z),
+                                 'kb': os.path.getsize(z) // 1024})
+
+        for i, d in enumerate(dirs, 1):
+            take(os.path.basename(d),
+                 vf_run(['pack.py', os.path.relpath(d, VF_DIR)] + common +
+                        ['--ptype=low', '--num=%d' % i, '--chest=%s' % chest_url]))
+            ch = os.path.join(d, 'chest')
+            if os.path.exists(os.path.join(ch, 'index.html')) and not has_chest:
+                has_chest = True   # сундук ОДИН на связку, а не на каждую проклу
+                take('сундук', vf_run(['pack.py', os.path.relpath(ch, VF_DIR)] +
+                                      common + ['--kind=rd']))
+        return {'ok': True, 'built': out, 'zips': zips}
+
+    # ── Материалы оффера: фото товара по видам + карточка от ПП ──────
+    if action == 'materials':
+        r = vf_run(['materials.py', offer, geo])
+        m = {'main': '—', 'bottle': '—', 'box': '—', 'real': '0 шт', 'text': ''}
+        for line in (r['out'] or '').splitlines():
+            for k in ('main', 'bottle', 'box', 'real'):
+                if line.strip().startswith(k + ' '):
+                    m[k] = line.split(None, 1)[1].strip()
+        d = os.path.join(VF_DIR, 'product', '%s_%s' % (offer, geo))
+        t = os.path.join(d, 'offer.md')
+        if os.path.exists(t):
+            m['text'] = open(t, encoding='utf-8').read()
+        m['phone'] = {}
+        try:
+            pr = vf_run(['-c', 'import sys,json,materials;'
+                         'print(json.dumps(materials.phone_rule(sys.argv[1], sys.argv[2])'
+                         ' or {}, ensure_ascii=False))', offer, geo])
+            m['phone'] = json.loads((pr['out'] or '{}').strip().splitlines()[-1])
+        except Exception:
+            pass
+        m['photos'] = sorted(os.path.basename(f) for f in
+                             _glob.glob(os.path.join(d, '*'))
+                             if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')))
+        return {'ok': True, **m}
+
+    if action == 'materials_text':
+        # Описание карточки оффера от ПП. Из него берутся формат номера
+        # (он точнее нашей общей таблицы по гео) и правила для теха.
+        d = os.path.join(VF_DIR, 'product', '%s_%s' % (offer, geo))
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, 'offer.md'), 'w', encoding='utf-8') as fh:
+            fh.write((p.get('text') or '').strip() + '\n')
+        return {'ok': True}
+
+    if action == 'materials_inbox':
+        # Всё валится в одну кучу без ролей — роли определит разбор.
+        img = p.get('image') or ''
+        if not img.startswith('data:'):
+            return {'error': 'Нужна картинка'}
+        import base64 as _b64, tempfile
+        head, _, data = img.partition(',')
+        ext = '.png' if 'png' in head else ('.webp' if 'webp' in head else '.jpg')
+        fd, tmp = tempfile.mkstemp(suffix=ext)
+        with os.fdopen(fd, 'wb') as fh:
+            fh.write(_b64.b64decode(data))
+        r = vf_run(['-c', 'import sys,materials;print(materials.inbox_add(*sys.argv[1:4]))',
+                    offer, geo, tmp])
+        os.unlink(tmp)
+        return {'ok': True} if r['ok'] else {'error': (r['err'] or '')[:300]}
+
+    if action == 'materials_inbox_list':
+        d = os.path.join(VF_DIR, 'product', '%s_%s' % (offer, geo), '_inbox')
+        files = sorted(os.path.basename(f) for f in _glob.glob(os.path.join(d, '*'))
+                       if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')))
+        return {'ok': True, 'files': files,
+                'rel': 'product/%s_%s/_inbox' % (offer, geo)}
+
+    if action == 'materials_sort':
+        # Разбор смотрит на картинки глазами модели: где карточка оффера,
+        # где промо, где живое фото. Долгий вызов, но один на весь оффер.
+        r = vf_run(['-c', 'import sys,json,materials;'
+                    'print(json.dumps(materials.sort_inbox(sys.argv[1], sys.argv[2]),'
+                    ' ensure_ascii=False))', offer, geo], timeout=600)
+        if not r['ok']:
+            return {'error': (r['err'] or 'разбор не вышел')[-400:]}
+        try:
+            return json.loads((r['out'] or '').strip().splitlines()[-1])
+        except Exception:
+            return {'error': (r['out'] or '')[-400:] or 'пустой ответ разбора'}
+
+    if action == 'materials_add':
+        # Фото приходит из панели картинкой (перетащили или вставили из буфера).
+        img, role = p.get('image') or '', p.get('role') or 'real'
+        if not img.startswith('data:'):
+            return {'error': 'Нужна картинка'}
+        import base64 as _b64, tempfile
+        head, _, data = img.partition(',')
+        ext = '.png' if 'png' in head else ('.webp' if 'webp' in head else '.jpg')
+        fd, tmp = tempfile.mkstemp(suffix=ext)
+        with os.fdopen(fd, 'wb') as fh:
+            fh.write(_b64.b64decode(data))
+        r = vf_run(['-c', 'import sys,materials;print(materials.add(*sys.argv[1:5]))',
+                    offer, geo, role, tmp])
+        os.unlink(tmp)
+        if not r['ok']:
+            return {'error': (r['err'] or 'не сохранилось')[:300]}
+        return {'ok': True, 'file': os.path.basename((r['out'] or '').strip())}
+
+    if action == 'materials_del':
+        d = os.path.join(VF_DIR, 'product', '%s_%s' % (offer, geo))
+        f = os.path.join(d, os.path.basename(p.get('file') or ''))
+        if os.path.exists(f) and os.path.dirname(f) == d:
+            os.remove(f)
+            return {'ok': True}
+        return {'error': 'Файл не найден'}
+
+    # ── ВСЛ: длинная видеопрокла тем же героем, жанр «интервью» ──────
+    if action == 'vsl_price':
+        # Цена видна ДО запуска, как и на роликах: ВСЛ дороже связки роликов,
+        # и узнавать это после списания нельзя.
+        r = vf_run(['vsl_gen.py', 'price'])
+        rows = []
+        for line in (r['out'] or '').splitlines():
+            parts = line.split()
+            if len(parts) >= 4 and parts[1] == 'мин':
+                rows.append({'min': float(parts[0]), 'seg': int(parts[2]),
+                             'usd': float(parts[-1].lstrip('~$'))})
+        return {'ok': True, 'rows': rows}
+
+    if action == 'vsl':
+        args = ['vsl_gen.py', 'gen', offer, geo, str(p.get('script', 1)),
+                p.get('persona', ''), '--min=%s' % (p.get('minutes') or 4)]
+        return vf_run_bg(args, 'Пишу текст ВСЛ на %s минут' % (p.get('minutes') or 4))
+
+    if action == 'vsl_list':
+        d = read_json(os.path.join(VF_DIR, 'vsl', '%s_%s_%02d'
+                                   % (offer, geo, int(p.get('script', 1))), 'vsl.json'))
+        if not d:
+            return {'error': 'Текста ВСЛ ещё нет'}
+        return {'ok': True, 'title': d.get('title', ''), 'minutes': d.get('minutes'),
+                'usd': d.get('usd'), 'ru': d.get('ru', ''),
+                'segments': [{'q': s.get('q_ru', ''), 'a': s.get('a_ru', ''),
+                              'scene': s.get('scene', '')}
+                             for s in d.get('segments', [])]}
+
+    if action == 'vsl_edit':
+        return vf_run_bg(['vsl_gen.py', 'edit', offer, geo, str(p.get('script', 1)),
+                          str(p.get('seg', 1)), p.get('instruction', '')],
+                         'Переписываю сегмент %s' % p.get('seg'))
+
+    if action == 'vsl_settext':
+        return vf_run_bg(['vsl_gen.py', 'settext', offer, geo, str(p.get('script', 1)),
+                          str(p.get('seg', 1)), p.get('ru', '')],
+                         'Сохраняю правку сегмента %s' % p.get('seg'))
+
+    if action == 'chest_view':
+        # Сундук по-русски: Павел должен читать, что там написано, а не гадать
+        # по арабской странице. Русская версия лежит рядом в chest_ru/.
+        pref = '%s_%s_' % (offer, geo)
+        dirs = sorted(d for d in _glob.glob(os.path.join(VF_DIR, 'prela', pref + '*'))
+                      if os.path.isdir(d) and not d.endswith('_ru'))
+        for d in dirs:
+            if os.path.exists(os.path.join(d, 'chest', 'index.html')):
+                name = os.path.basename(d)
+                has_ru = os.path.exists(os.path.join(d, 'chest_ru', 'index.html'))
+                meta = read_json(os.path.join(d, 'chest', 'chest.json')) or {}
+                return {'ok': True, 'name': name, 'has_ru': has_ru,
+                        'photo': bool(meta.get('has_product_photo')),
+                        'url': '/vf_page?name=%s&sub=chest' % name,
+                        'url_ru': ('/vf_page?name=%s&sub=chest_ru' % name) if has_ru else ''}
+        return {'error': 'Сундук ещё не сделан'}
+
+    if action == 'files':
+        # Только текущая связка. Раньше показывалось всё содержимое папки, включая
+        # ролики прошлых прогонов — выглядело так, будто сгенерировалось восемь штук
+        # вместо двух, и деньги якобы улетели.
+        pref = '%s_%s_' % (offer, geo)
+        res = {}
+        for key, pat in (('videos', 'out/batch/*.mp4'), ('copies', 'out/uniq/*.mp4'),
+                         ('prelas', 'prela/*/index.html')):
+            files = sorted(_glob.glob(os.path.join(VF_DIR, pat)))
+            res[key] = [os.path.relpath(f, VF_DIR) for f in files
+                        if os.path.basename(f).startswith(pref)
+                        or ('/prela/' in f and os.path.basename(os.path.dirname(f)).startswith(pref))]
+        return {'ok': True, **res}
+
+    return {'error': 'неизвестное действие: %s' % action}
+
 # ── Binom (два трекера) ──────────────────────────────────────────
 # swat.cam → gvita.beauty (старый, активный сейчас) · swat.icu → mybeauty.day (новый)
 BINOM_TARGETS = {
@@ -1831,6 +2428,7 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
     <button class="tab-btn" onclick="switchTab('tasks')">📋 Таски</button>
     <button class="tab-btn" onclick="switchTab('binom')" style="display:none;">📊 Binom</button>
     <button class="tab-btn" onclick="switchTab('static')">🖼️ Статика</button>
+    <button class="tab-btn" id="tab-btn-svyazki" onclick="switchTab('svyazki')" style="display:none;">🔗 Связки</button>
     <div style="flex:1;"></div>
     <button onclick="addChannel()" style="padding:7px 14px;font-size:12px;font-weight:700;border:1.5px solid var(--accent1);border-radius:10px;background:transparent;cursor:pointer;color:var(--accent1);white-space:nowrap;">📺 + Канал</button>
   </div>
@@ -2445,6 +3043,344 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
   </div>
 
 </div>
+
+  <!-- Связки: текст → ролик → прокла, всё одним героем. Вкладка появляется
+       только если рядом лежит папка VideoFactory (у байеров её нет). -->
+  <div id="tab-svyazki" class="tab-pane">
+    <style>
+      .sv-wrap{max-width:900px}
+      .sv-step{border:1px solid var(--border);border-radius:16px;padding:18px 20px;margin-bottom:12px;
+               background:var(--surface);transition:.2s;}
+      .sv-step.off{opacity:.45;pointer-events:none;}
+      .sv-step.done{border-color:#22c55e;}
+      .sv-head{display:flex;align-items:center;gap:11px;margin-bottom:14px;}
+      .sv-n{width:28px;height:28px;border-radius:50%;background:var(--border2);color:var(--text2);
+            display:flex;align-items:center;justify-content:center;font-weight:800;font-size:13px;flex:none;}
+      .sv-step.on .sv-n{background:var(--grad1);color:#fff;}
+      .sv-step.done .sv-n{background:#22c55e;color:#fff;}
+      .sv-t{font-weight:800;font-size:15px;}
+      .sv-sub{font-size:12px;color:var(--text3);margin-left:auto;text-align:right;}
+      .sv-row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;}
+      .sv-fld{display:flex;flex-direction:column;gap:4px;}
+      .sv-fld label{font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.04em;}
+      .sv-fld select,.sv-fld input{padding:9px 11px;border:1.5px solid var(--border);border-radius:10px;
+            background:var(--surface2);color:var(--text);font-size:14px;font-family:inherit;}
+      .sv-price{display:inline-flex;align-items:center;gap:7px;background:rgba(108,99,255,.09);
+            color:var(--accent1);border-radius:9px;padding:8px 12px;font-size:13px;font-weight:700;margin-top:12px;}
+      .sv-btn{padding:11px 18px;border:none;border-radius:11px;background:var(--grad1);color:#fff;
+            font-weight:700;font-size:14px;cursor:pointer;font-family:inherit;}
+      .sv-btn.ghost{background:var(--surface2);color:var(--text2);border:1.5px solid var(--border);}
+      .sv-btn:disabled{opacity:.45;cursor:default;}
+      .sv-bar{height:6px;border-radius:99px;background:var(--border2);overflow:hidden;margin-top:12px;display:none;}
+      .sv-bar.on{display:block;}
+      .sv-bar i{display:block;height:100%;width:30%;background:var(--grad1);border-radius:99px;
+            animation:svrun 1.1s infinite;}
+      @keyframes svrun{0%{margin-left:-30%}100%{margin-left:100%}}
+      .sv-log{font-size:12px;color:var(--text3);margin-top:6px;min-height:15px;}
+      .sv-tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;}
+      .sv-tab{padding:7px 13px;border-radius:9px;border:1.5px solid var(--border);background:var(--surface2);
+            cursor:pointer;font-weight:700;font-size:13px;color:var(--text2);}
+      .sv-tab.on{background:var(--grad1);color:#fff;border-color:transparent;}
+      .sv-tab.ok{border-color:#22c55e;}
+      .sv-area{width:100%;min-height:150px;padding:14px;border:1.5px solid var(--border);border-radius:12px;
+            background:var(--surface2);color:var(--text);font-size:14.5px;line-height:1.6;font-family:inherit;resize:vertical;}
+      .sv-heroes{display:flex;gap:10px;flex-wrap:wrap;margin:10px 0;}
+      .sv-hero{border:2px solid var(--border);border-radius:12px;padding:8px;cursor:pointer;width:104px;
+            text-align:center;background:var(--surface2);}
+      .sv-hero.on{border-color:var(--accent1);background:rgba(108,99,255,.07);}
+      .sv-hero img{width:86px;height:86px;object-fit:cover;border-radius:9px;display:block;background:var(--border2);}
+      .sv-hero b{font-size:12px;display:block;margin-top:5px;}
+      .sv-hero span{font-size:10.5px;color:var(--text3);line-height:1.25;display:block;}
+      .sv-done{display:flex;align-items:center;gap:10px;background:rgba(34,197,94,.1);color:#16a34a;
+            border-radius:11px;padding:11px 14px;font-size:13.5px;font-weight:700;margin-top:10px;}
+      .sv-err{background:rgba(255,101,132,.12);color:#e11d48;border-radius:11px;padding:11px 14px;
+            font-size:13.5px;font-weight:700;margin-top:10px;}
+      .sv-ask{border:1.5px dashed var(--accent1);border-radius:12px;padding:14px;margin-top:12px;}
+      .sv-ask b{display:block;margin-bottom:9px;font-size:14px;}
+      .sv-drop{border:2px dashed var(--border2);border-radius:12px;padding:12px;text-align:center;
+            cursor:pointer;background:var(--surface2);font-size:13px;}
+      .sv-hint{font-size:11.5px;color:var(--text3);margin-top:7px;line-height:1.45;}
+    </style>
+
+    <div class="sv-wrap">
+      <!-- ШАГ 1 -->
+      <div class="sv-step on" id="sv-s1">
+        <div class="sv-head"><div class="sv-n">1</div><div class="sv-t">Под что делаем</div></div>
+        <div class="sv-row">
+          <div class="sv-fld"><label>Категория</label><select id="sv-offer" onchange="svStep1()"></select></div>
+          <div class="sv-fld"><label>Страна</label><select id="sv-geo" onchange="svStep1()"></select></div>
+          <div class="sv-fld"><label>Длина ролика</label>
+            <select id="sv-dur" onchange="svStep1()">
+              <option value="25">~25 секунд</option>
+              <option value="35" selected>~35 секунд</option>
+              <option value="60">~1 минута</option>
+              <option value="90">~1.5 минуты</option>
+            </select></div>
+          <!-- Формат = как построен ролик, а не насколько он жёсткий. Жёсткость
+               общая и вшита в каркас промпта: мягкого формата в списке нет,
+               кроме «Истории героя», которая осталась с самого начала. -->
+          <div class="sv-fld"><label>Формат роликов</label>
+            <select id="sv-style" style="min-width:250px;">
+              <option value="mix" selected>Разные форматы — по одному на ролик</option>
+              <option value="direct">Наезд на зрителя</option>
+              <option value="mirror">Зеркало — его день по минутам</option>
+              <option value="wife">Взгляд жены</option>
+              <option value="ultimatum">Два пути</option>
+              <option value="burn">Сжигание альтернатив</option>
+              <option value="shame">Сцена унижения</option>
+              <option value="countdown">Что уже происходит</option>
+              <option value="story">История героя (мягкий, почти не льём)</option>
+            </select></div>
+          <div class="sv-fld"><label>Роликов</label>
+            <input id="sv-n" type="number" value="3" min="1" max="6" style="width:74px;" onchange="svStep1()"></div>
+        </div>
+        <div class="sv-price" id="sv-est"></div>
+        <div style="margin-top:14px;">
+          <button class="sv-btn" id="sv-b1" onclick="svGen()">Написать тексты</button>
+        </div>
+        <div class="sv-bar" id="sv-bar1"><i></i></div>
+        <div class="sv-log" id="sv-log1"></div>
+      </div>
+
+      <!-- ШАГ 2 -->
+      <div class="sv-step off" id="sv-s2">
+        <div class="sv-head"><div class="sv-n">2</div><div class="sv-t">Тексты — прочитай и утверди</div>
+          <div class="sv-sub" id="sv-s2sub"></div></div>
+        <div class="sv-tabs" id="sv-tabs"></div>
+        <div id="sv-fmt" style="font-size:12px;margin:-4px 0 10px;display:flex;
+             align-items:center;flex-wrap:wrap;gap:4px;"></div>
+        <div id="sv-angle" class="sv-hint" style="margin:0 0 8px;"></div>
+        <textarea class="sv-area" id="sv-text" oninput="svTextDirty()"></textarea>
+        <div class="sv-row" style="margin-top:10px;">
+          <input id="sv-ins" placeholder="переписать: жёстче · добавь бытовую деталь · убери концовку"
+                 style="flex:1;min-width:230px;padding:9px 11px;border:1.5px solid var(--border);
+                        border-radius:10px;background:var(--surface2);color:var(--text);font-family:inherit;">
+          <button class="sv-btn ghost" id="sv-b2e" onclick="svEdit()">Переписать</button>
+          <button class="sv-btn ghost" id="sv-b2s" onclick="svSaveText()">Сохранить правку</button>
+        </div>
+        <div class="sv-bar" id="sv-bar2"><i></i></div>
+        <div class="sv-log" id="sv-log2"></div>
+        <div style="margin-top:12px;">
+          <button class="sv-btn" id="sv-b2" onclick="svApprove()">Утвердить тексты и перейти к героям</button>
+        </div>
+      </div>
+
+      <!-- ШАГ 3 -->
+      <div class="sv-step off" id="sv-s3">
+        <div class="sv-head"><div class="sv-n">3</div><div class="sv-t">Кто говорит в каждом ролике</div>
+          <div class="sv-sub" id="sv-s3sub"></div></div>
+        <div class="sv-tabs" id="sv-htabs"></div>
+        <div class="sv-heroes" id="sv-heroes"></div>
+        <div class="sv-hint">Один герой может вести несколько роликов — выбирай для каждого свой или один и тот же. Прокла к ролику делается тем же героем.</div>
+        <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+          <button class="sv-btn" id="sv-b3" onclick="svBuildAll()">Собрать ролики</button>
+          <!-- Проклу можно делать, не собирая ролик: ей нужен только текст и
+               герой, а липсинк — это почти вся стоимость связки. Раньше шаг 4
+               открывался только после сборки, и проверить проклу без траты
+               на видео было нельзя. -->
+          <button class="sv-btn ghost" onclick="svSkipBuild()">Сразу к прокле, без сборки</button>
+        </div>
+        <div class="sv-hint">Прокле ролик не нужен — только текст и герой. Липсинк
+          можно оставить на потом, когда прокла устроит.</div>
+        <div class="sv-bar" id="sv-bar3"><i></i></div>
+        <div class="sv-log" id="sv-log3"></div>
+        <div id="sv-videos"></div>
+
+        <div id="sv-bgbox" style="display:none;border-top:1px solid var(--border);
+             margin-top:16px;padding-top:14px;">
+          <div style="font-weight:800;font-size:14px;margin-bottom:10px;">Фоновый звук</div>
+          <div class="sv-row">
+            <div class="sv-fld"><label>Голосов на фоне</label>
+              <select id="sv-bgv"><option value="2" selected>два</option>
+                <option value="1">один</option><option value="0">без голосов</option></select></div>
+            <div class="sv-fld"><label>Шум</label>
+              <select id="sv-bgn"><option value="city" selected>город</option>
+                <option value="sea">море</option><option value="rain">дождь</option>
+                <option value="none">без шума</option></select></div>
+            <div class="sv-fld" style="flex:1;min-width:220px;">
+              <label>Громкость фона: <b id="sv-bgvol-l">6%</b></label>
+              <input id="sv-bgvol" type="range" min="1" max="20" value="6"
+                     oninput="document.getElementById('sv-bgvol-l').textContent=this.value+'%'"
+                     style="width:100%;"></div>
+            <button class="sv-btn ghost" onclick="svBgPreview()">Послушать превью</button>
+            <button class="sv-btn" onclick="svBgApply()">Наложить на все ролики</button>
+          </div>
+          <div class="sv-bar" id="sv-bar6"><i></i></div>
+          <div class="sv-log" id="sv-log6"></div>
+          <div id="sv-bgprev"></div>
+          <div class="sv-hint">Дорожки берутся из банка и у каждого ролика своя пара, свой сдвиг и своя громкость — одинакового фона на двух роликах не будет. Стоит ноль: банк уже собран.</div>
+        </div>
+      </div>
+
+      <!-- ШАГ 4 -->
+      <div class="sv-step off" id="sv-s4">
+        <div class="sv-head"><div class="sv-n">4</div><div class="sv-t">Прокла и сундук</div></div>
+        <div class="sv-ask">
+          <b>Проклы делаем сами или берём готовые?</b>
+          <button class="sv-btn" onclick="svPrelaMode('own')">Делаем сами</button>
+          <button class="sv-btn ghost" onclick="svPrelaMode('ready')">Берём готовые, тех переделает</button>
+        </div>
+        <div id="sv-own" style="display:none;margin-top:14px;">
+          <!-- ОДНА зона на всё. Раньше карточка товара грузилась отдельно, а
+               материалы отдельно, и надо было самому выбирать роль каждому
+               файлу. Теперь Павел кидает сюда всё подряд — скриншот карточки
+               оффера, промо, фото с телефона — и жмёт «Разобрать». -->
+          <div class="sv-drop" id="sv-card-drop" onclick="document.getElementById('sv-card-file').click()">
+            Кидай сюда ВСЁ: скриншот карточки оффера, промо товара, фото с телефона
+            <div class="sv-hint" style="margin-top:4px;">Перетащи, вставь из буфера или нажми.
+              Потом «Разобрать» — сам пойму, что где, и заполню поля.</div>
+            <div id="sv-card-info" class="sv-hint"></div>
+            <img id="sv-card-img" style="display:none;max-height:110px;margin:9px auto 0;border-radius:8px;">
+          </div>
+          <input type="file" id="sv-card-file" accept="image/*" multiple style="display:none;" onchange="svInboxAdd(this.files)">
+          <div id="sv-inbox" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;"></div>
+          <div style="display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap;">
+            <button class="sv-btn" id="sv-bsort" onclick="svSortInbox()">🔍 Разобрать</button>
+            <span id="sv-sort-res" style="font-size:12px;color:var(--text3);"></span>
+          </div>
+
+          <!-- Материалы оффера. Одна карточка товара — мало: в комментариях
+               должно быть то банка, то коробка, а живые фото с телефона бьют
+               любую генерацию. Плюс сюда же вставляется описание карточки от
+               ПП — из него берётся формат номера, который точнее нашей
+               общей таблицы по гео. -->
+          <div style="margin-top:12px;border:1px solid var(--border);border-radius:12px;
+               padding:12px 14px;background:var(--surface2);">
+            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+              <b style="font-size:13px;">📦 Материалы оффера</b>
+              <label style="font-size:12px;color:var(--text3);display:flex;align-items:center;gap:6px;margin-left:auto;">
+                <input type="checkbox" id="sv-photos-on" checked> фото товара в комментариях
+              </label>
+            </div>
+
+            <div class="sv-hint" style="margin-top:8px;">Описание карточки оффера от ПП —
+              вставь как есть. Разберу формат номера и положу правила теху в архив.</div>
+            <textarea id="sv-offer-text" placeholder="Algeria DZ 7900 DZD&#10;Язык: арабский&#10;Номер: +213 и 9 цифр&#10;Пример: +213658632284…"
+              style="width:100%;min-height:90px;margin-top:6px;font-size:12px;
+              background:var(--surface);color:var(--text);border:1px solid var(--border);
+              border-radius:8px;padding:8px;font-family:inherit;"></textarea>
+            <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap;">
+              <button class="sv-btn ghost" style="padding:5px 12px;font-size:12px;"
+                onclick="svOfferSave()">Сохранить описание</button>
+              <span id="sv-phone-rule" style="font-size:12px;color:var(--accent3);"></span>
+            </div>
+
+            <div id="sv-mat-list" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;"></div>
+          </div>
+          <div class="sv-row" style="margin-top:10px;">
+            <div class="sv-fld"><label>Товар</label><input id="sv-product" placeholder="Prostanol" style="min-width:140px;"></div>
+            <div class="sv-fld"><label>Форма</label>
+              <select id="sv-form">
+                <option value="">—</option><option value="капсулы">капсулы</option>
+                <option value="таблетки">таблетки</option><option value="гель, втирается">гель</option>
+                <option value="крем, втирается">крем</option><option value="капли">капли</option>
+                <option value="порошок, разводится">порошок</option><option value="чай, заваривается">чай</option>
+                <option value="спрей">спрей</option>
+              </select></div>
+            <div class="sv-fld"><label>Цена со скидкой</label><input id="sv-price-in" type="number" placeholder="5900" style="width:130px;"></div>
+            <button class="sv-btn" id="sv-b4" onclick="svPrelaAll()">Сделать проклы</button>
+          </div>
+          <div class="sv-bar" id="sv-bar4"><i></i></div>
+          <div class="sv-log" id="sv-log4"></div>
+          <div id="sv-prelas"></div>
+          <div class="sv-ask" id="sv-chest-ask" style="display:none;">
+            <b>Сделать сундук под каждую проклу?</b>
+            <button class="sv-btn" onclick="svChestAll()">Да, сделать сундуки</button>
+            <button class="sv-btn ghost" onclick="svSkipChest()">Без сундуков</button>
+          </div>
+          <div id="sv-chest-view"></div>
+          <!-- Пакет для теха: страница + трекинг + приём заявки + самопроверка.
+               Метка и домен нужны только для имени папки по стандарту ArkNet
+               и для ссылки на сундук — сами страницы от них не зависят. -->
+          <div id="sv-pack-box" style="display:none;margin-top:16px;padding-top:14px;
+               border-top:1px solid var(--border);">
+            <div class="sv-row">
+              <div class="sv-fld"><label>Метка</label><input id="sv-mark" placeholder="VG" style="width:90px;"></div>
+              <div class="sv-fld"><label>Домен лендов</label><input id="sv-domain" placeholder="gvita.beauty" style="min-width:160px;"></div>
+              <button class="sv-btn" id="sv-bpack" onclick="svPack()">📦 Собрать пакеты для теха</button>
+            </div>
+            <div class="sv-hint">В архиве уже: ловля clickid, события в Бином, маска телефона
+              по гео, антидубль, приём заявки с записью в лог, страница самопроверки и README.
+              Теху остаётся вписать в config.php адрес ПП.</div>
+            <div id="sv-packs"></div>
+          </div>
+          <!-- ВСЛ: тот же герой и тот же формат, что в ролике, но длинно и в
+               другой комнате, подано как интервью. Цена видна до запуска —
+               ВСЛ дороже целой связки роликов. -->
+          <div id="sv-vsl-box" style="display:none;margin-top:16px;padding-top:14px;
+               border-top:1px solid var(--border);">
+            <b style="font-size:14px;">🎬 ВСЛ — длинная видеопрокла</b>
+            <div class="sv-hint">Тот же герой и тот же формат, что в ролике, только
+              в другой комнате и в жанре интервью: голос за кадром задаёт вопросы,
+              он отвечает. Сегментами по 32 секунды — так правится и считается.</div>
+            <div class="sv-row" style="margin-top:10px;">
+              <div class="sv-fld"><label>Длина</label>
+                <select id="sv-vsl-min" onchange="svVslPrice()">
+                  <option value="2">2 минуты</option>
+                  <option value="3">3 минуты</option>
+                  <option value="4" selected>4 минуты</option>
+                  <option value="5">5 минут</option>
+                  <option value="7">7 минут</option>
+                  <option value="10">10 минут</option>
+                </select></div>
+              <button class="sv-btn" id="sv-bvsl" onclick="svVsl()">Написать текст ВСЛ</button>
+            </div>
+            <div class="sv-price" id="sv-vsl-est"></div>
+            <div id="sv-vsl-text"></div>
+          </div>
+        </div>
+        <div id="sv-ready" style="display:none;margin-top:14px;">
+          <div class="sv-hint">Готовые проклы и сундуки заливает тех — панель поставит ему таску с материалами связки.</div>
+          <button class="sv-btn" style="margin-top:10px;" onclick="svTask()">Поставить таску теху</button>
+        </div>
+      </div>
+
+      <!-- ШАГ 5 -->
+      <div class="sv-step off" id="sv-s5">
+        <div class="sv-head"><div class="sv-n">5</div><div class="sv-t">Таска теху, Бином и залив</div></div>
+
+        <div style="border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:14px;">
+          <div style="font-weight:800;font-size:14px;margin-bottom:10px;">Таска теху на залив наших лендов</div>
+          <div class="sv-row">
+            <div class="sv-fld"><label>Моя метка</label><input id="sv-mark" value="VG" style="width:80px;"></div>
+            <div class="sv-fld"><label>Домен</label><input id="sv-domain" placeholder="gvita.beauty" style="min-width:150px;"></div>
+            <div class="sv-fld"><label>Название ленда</label><input id="sv-land" value="MedicalArticle" style="min-width:140px;"></div>
+            <div class="sv-fld"><label>Тип цены</label>
+              <select id="sv-ptype"><option value="low" selected>low</option>
+                <option value="free">free</option><option value="full">full</option></select></div>
+            <div class="sv-fld"><label>Интерактив</label>
+              <select id="sv-inter"><option value="Boxes" selected>Boxes — сундук (три аптечные сумки)</option>
+                <option value="Boxes">Boxes</option><option value="Wheel">Wheel</option>
+                <option value="Form">Form</option></select></div>
+          </div>
+          <div class="sv-row" style="margin-top:8px;">
+            <!-- ID оффера в ПП, ID потока и API-токен убраны 11.08: куда уходят
+                 лиды, тех настраивает у себя в config.php, это не наши данные,
+                 и Павлу их взять неоткуда. -->
+            <button class="sv-btn" onclick="svMakeTask()">Собрать таску</button>
+          </div>
+          <div class="sv-bar" id="sv-bar7"><i></i></div>
+          <div class="sv-log" id="sv-log7"></div>
+          <textarea id="sv-task" class="sv-area" style="min-height:180px;display:none;margin-top:10px;"></textarea>
+          <button class="sv-btn ghost" id="sv-copy" style="display:none;margin-top:8px;" onclick="svCopyTask()">Скопировать таску</button>
+          <div class="sv-hint">Нейминг по стандарту ArkNet: ленды получают LP с названием и типом цены, сундук — RD с типом интерактива. Один сундук на все ленды оффера.</div>
+        </div>
+        <div class="sv-ask">
+          <b>Заводим связку в Бином?</b>
+          <button class="sv-btn" onclick="svBinom(true)">Да, завести</button>
+          <button class="sv-btn ghost" onclick="svBinom(false)">Не сейчас</button>
+        </div>
+        <div id="sv-upload" style="display:none;margin-top:14px;">
+          <div class="sv-row">
+            <div class="sv-fld"><label>Сколько роликов заливать</label>
+              <input id="sv-up-n" type="number" value="3" min="1" style="width:90px;"></div>
+            <button class="sv-btn" onclick="svToUpload()">Отправить во вкладку загрузки</button>
+          </div>
+          <div class="sv-hint">Ролики уйдут во вкладку «Загрузить на YouTube» — там выбираешь каналы и форматы.</div>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <div id="tab-prokla" class="tab-pane">
     <style>
@@ -4025,11 +4961,565 @@ function updateReviewOpt(){
   });
 }
 
+// ===== СВЯЗКИ: пять шагов по порядку =====
+// Каждый шаг открывается только когда закрыт предыдущий — чтобы нельзя было
+// собрать ролик по неутверждённому тексту или проклу без героя.
+let svScripts = [], svCur = 0, svHeroes = [], svBusy = false, svTextChanged = false;
+
+async function svApi(action, body){
+  const r = await fetch('/vf_'+action, {method:'POST', headers:{'Content-Type':'application/json'},
+                                       body: JSON.stringify(body||{})});
+  return await r.json();
+}
+function svParams(){
+  return {offer: document.getElementById('sv-offer').value,
+          geo: document.getElementById('sv-geo').value,
+          dur: parseInt(document.getElementById('sv-dur').value)};
+}
+function svOpen(step){
+  for(let i=1;i<=5;i++){
+    const el = document.getElementById('sv-s'+i);
+    if(!el) continue;
+    el.classList.toggle('off', i > step);
+    el.classList.toggle('on', i === step);
+    el.classList.toggle('done', i < step);
+  }
+  // Материалы оффера подтягиваются при открытии шага прокл: описание и
+  // фотографии живут между сессиями, их не надо загружать заново каждый раз.
+  if(step === 4) svMaterials();
+  const el = document.getElementById('sv-s'+step);
+  if(el) el.scrollIntoView({behavior:'smooth', block:'start'});
+}
+function svBar(n, on){
+  const b = document.getElementById('sv-bar'+n);
+  if(b) b.classList.toggle('on', on);
+}
+function svSay(n, text, err){
+  const l = document.getElementById('sv-log'+n);
+  if(l){ l.textContent = text||''; l.style.color = err ? '#e11d48' : ''; }
+}
+// Ждём фоновую задачу и показываем её последнюю строку — видно, что процесс живой
+async function svWait(job, n){
+  for(;;){
+    await new Promise(r=>setTimeout(r, 1100));
+    const j = await svApi('job', {job});
+    const last = (j.log||[]).filter(Boolean).slice(-1)[0] || '';
+    svSay(n, last.slice(0,150));
+    if(j.status === 'done')  return {ok:true,  log:j.log||[]};
+    if(j.status !== 'running') return {ok:false, log:j.log||[]};
+  }
+}
+async function svJob(action, params, n, wait){
+  if(svBusy) return {ok:false};
+  svBusy = true; svBar(n, true); svSay(n, wait||'Работаю…');
+  try{
+    const r = await svApi(action, params);
+    if(r.error){ svSay(n, r.error, true); return {ok:false}; }
+    const res = await svWait(r.job, n);
+    if(!res.ok) svSay(n, (res.log.slice(-1)[0]||'не получилось').slice(0,200), true);
+    return res;
+  } finally { svBusy = false; svBar(n, false); }
+}
+
+// ── ШАГ 1 ────────────────────────────────────────────────
+async function svInit(){
+  const s = await svApi('state');
+  if(s.error){ svSay(1, s.error, true); return; }
+  const o = document.getElementById('sv-offer'), g = document.getElementById('sv-geo');
+  if(!o.options.length){
+    (s.offers||[]).forEach(x=>o.add(new Option(x.ru||x.key, x.key)));
+    (s.geos||[]).forEach(x=>g.add(new Option(x.ru||x.key, x.key)));
+  }
+  svCardBind();
+  svStep1();
+  svLoad();
+}
+function svStep1(){
+  const p = svParams();
+  const n = parseInt(document.getElementById('sv-n').value)||1;
+  const perSec = 0.029, price = (p.dur * perSec);
+  document.getElementById('sv-est').textContent =
+    'Ролик ~' + p.dur + ' сек ≈ ' + price.toFixed(2) + ' $ · связка из ' + n + ' = ' + (price*n).toFixed(2) + ' $';
+}
+async function svGen(){
+  const p = svParams();
+  p.n = parseInt(document.getElementById('sv-n').value)||3;
+  p.style = document.getElementById('sv-style').value;
+  const r = await svJob('gen', p, 1, 'Пишу ' + p.n + ' текстов, это примерно полторы минуты…');
+  if(r.ok){ svSay(1, 'Тексты готовы.'); await svLoad(); svOpen(2); }
+}
+
+// ── ШАГ 2 ────────────────────────────────────────────────
+async function svLoad(){
+  // _hero и _done живут только в браузере — сервер их не знает. Раньше svLoad
+  // (его зовут после правки текста и смены формата) заменял массив целиком и
+  // сбрасывал выбор на первый ролик: выбранные герои пропадали.
+  const keep = {};
+  svScripts.forEach(s => { if(s && s.n != null) keep[s.n] = {_hero: s._hero, _done: s._done}; });
+  const wasN = (svScripts[svCur]||{}).n;
+  const r = await svApi('scripts', svParams());
+  svScripts = r.scripts || [];
+  if(!svScripts.length) return;
+  svScripts.forEach(s => { if(keep[s.n]) Object.assign(s, keep[s.n]); });
+  const back = svScripts.findIndex(s => s.n === wasN);
+  svCur = back >= 0 ? back : 0;
+  document.getElementById('sv-s2sub').textContent =
+    svScripts.length + ' текстов · ' + (r.total||0).toFixed(2) + ' $ за связку';
+  svTabs();
+  svShow();
+}
+function svTabs(){
+  document.getElementById('sv-tabs').innerHTML = svScripts.map((x,i)=>
+    '<div class="sv-tab '+(i===svCur?'on':'')+'" onclick="svGo('+i+')">Ролик '+x.n+'</div>').join('');
+  document.getElementById('sv-htabs').innerHTML = svScripts.map((x,i)=>
+    '<div class="sv-tab '+(i===svCur?'on':'')+(x._hero?' ok':'')+'" onclick="svGo('+i+')">Ролик '+x.n+'</div>').join('');
+}
+const SV_FORMATS = [['direct','Наезд на зрителя'],['mirror','Зеркало — его день по минутам'],
+  ['wife','Взгляд жены'],['ultimatum','Два пути'],['burn','Сжигание альтернатив'],
+  ['shame','Сцена унижения'],['countdown','Что уже происходит'],
+  ['story','История героя (мягкий)']];
+function svShow(){
+  const s = svScripts[svCur]; if(!s) return;
+  document.getElementById('sv-angle').textContent =
+    'боль ролика: ' + (s.angle||'') + ' · ~' + (s.secs||0) + ' сек · ' + (s.price||0).toFixed(2) + ' $';
+  document.getElementById('sv-text').value = s._edited || s.ru || '';
+  // Формат виден и меняется у КАЖДОГО ролика по отдельности: подходящий формат
+  // видно только по готовому тексту, а переписывать ради этого всю пачку —
+  // терять уже утверждённые тексты.
+  const box = document.getElementById('sv-fmt');
+  if(box) box.innerHTML = '<span style="color:var(--text3);">формат:</span> '
+    + '<select id="sv-fmt-sel" style="margin:0 8px;">'
+    + SV_FORMATS.map(f=>'<option value="'+f[0]+'"'+(f[0]===s.style?' selected':'')+'>'+f[1]+'</option>').join('')
+    + '</select><button class="sv-btn ghost" style="padding:5px 12px;font-size:12px;" '
+    + 'onclick="svRestyle()">Переписать в этом формате</button>';
+  svTabs();
+  svHeroCards();
+}
+async function svRestyle(){
+  const s = svScripts[svCur]; if(!s) return;
+  const p = svParams(); p.script = s.n; p.style = document.getElementById('sv-fmt-sel').value;
+  const r = await svJob('restyle', p, 2, 'Переписываю ролик ' + s.n + ' в другом формате…');
+  if(r.ok){ svSay(2, 'Формат изменён.'); await svLoad(); }
+}
+function svGo(i){ svCur = i; svTextChanged = false; svShow(); }
+function svTextDirty(){ svTextChanged = true; }
+async function svSaveText(){
+  const s = svScripts[svCur]; if(!s) return;
+  const txt = document.getElementById('sv-text').value.trim();
+  const p = svParams(); p.script = s.n; p.ru = txt;
+  const r = await svJob('settext', p, 2, 'Сохраняю правку и перевожу…');
+  if(r.ok){ svSay(2, 'Правка сохранена.'); svTextChanged = false; await svLoad(); }
+}
+async function svEdit(){
+  const s = svScripts[svCur]; if(!s) return;
+  const ins = document.getElementById('sv-ins').value.trim();
+  if(!ins){ svSay(2, 'Напиши, что поменять.', true); return; }
+  const p = svParams(); p.script = s.n; p.instruction = ins;
+  const r = await svJob('edit', p, 2, 'Переписываю текст ролика ' + s.n + '…');
+  if(r.ok){ document.getElementById('sv-ins').value=''; await svLoad(); svSay(2, 'Готово.'); }
+}
+function svApprove(){
+  if(svTextChanged){ svSay(2, 'Сначала сохрани правку или отмени её.', true); return; }
+  svOpen(3);
+  svHeroCards();
+}
+
+// ── ШАГ 3 ────────────────────────────────────────────────
+async function svHeroCards(){
+  const r = await svApi('heroes', svParams());
+  svHeroes = r.heroes || [];
+  const s = svScripts[svCur];
+  if(s && !s._hero && svHeroes.length) s._hero = svHeroes[svCur % svHeroes.length].key;
+  document.getElementById('sv-s3sub').textContent = s ? ('настраиваем ролик ' + s.n) : '';
+  document.getElementById('sv-heroes').innerHTML = svHeroes.map(h=>
+    '<div class="sv-hero '+(s && s._hero===h.key?'on':'')+'" onclick="svPickHero(\''+h.key+'\')">'
+    + '<img src="/vf_face?key='+h.key+'" onerror="this.style.opacity=.25">'
+    + '<b>'+(h.name||'')+'</b><span>'+(h.ru||'')+'</span></div>').join('');
+  svTabs();
+}
+function svPickHero(key){
+  const s = svScripts[svCur]; if(!s) return;
+  s._hero = key; svHeroCards();
+}
+// Перейти к прокле, не собирая ролики. Героя закрепляем за каждым текстом —
+// прокла делается тем же лицом, что потом будет в ролике, поэтому связка
+// не разъедется, когда липсинк всё-таки запустят.
+function svSkipBuild(){
+  if(!svScripts.length){ svSay(3, 'Сначала нужны тексты.', true); return; }
+  const def = (svHeroes[0]||{}).key || '';
+  svScripts.forEach((s, i) => {
+    if(!s._hero) s._hero = (svHeroes[i % (svHeroes.length||1)]||{}).key || def;
+  });
+  if(!svScripts[0]._hero){ svSay(3, 'Сначала выбери героя.', true); return; }
+  svSay(3, 'Ролики пока не собираем. Герои закреплены, можно делать проклу.');
+  svOpen(4);
+}
+async function svBuildAll(){
+  for(let i=0;i<svScripts.length;i++){
+    svCur = i; svShow();
+    const s = svScripts[i];
+    const p = svParams(); p.script = s.n; p.persona = s._hero;
+    const r = await svJob('build', p, 3, 'Собираю ролик ' + s.n + ' из ' + svScripts.length + '…');
+    if(!r.ok) return;
+    s._done = true;
+  }
+  svSay(3, 'Все ролики собраны.');
+  await svFiles();
+  document.getElementById('sv-bgbox').style.display = 'block';
+}
+async function svFiles(){
+  const r = await svApi('files', svParams());
+  const box = document.getElementById('sv-videos');
+  const vids = (r.videos||[]).slice(-8);
+  box.innerHTML = vids.length ? ('<div class="sv-done">Готово роликов: ' + vids.length + '</div>'
+    + vids.map(f=>'<div style="display:flex;align-items:center;gap:10px;margin-top:8px;font-size:13px;">'
+      + '<span style="flex:1;color:var(--text3);">'+f.split('/').pop()+'</span>'
+      + '<a class="sv-btn ghost" style="text-decoration:none;" href="/vf_file?p='+encodeURIComponent(f)+'" download>Скачать</a></div>').join('')) : '';
+}
+
+// Фоновый звук: сначала слушаем превью, потом накладываем на всю связку.
+function svBgParams(){
+  const p = svParams();
+  p.voices = parseInt(document.getElementById('sv-bgv').value);
+  p.noise  = document.getElementById('sv-bgn').value;
+  p.vol    = parseInt(document.getElementById('sv-bgvol').value) / 100;
+  return p;
+}
+async function svBgPreview(){
+  const p = svBgParams(); p.preview = true;
+  const r = await svJob('bg', p, 6, 'Делаю превью со звуком…');
+  if(!r.ok) return;
+  const f = await svApi('files', svParams());
+  const v = (f.videos||[]).slice(-1)[0];
+  document.getElementById('sv-bgprev').innerHTML =
+    '<video controls playsinline style="width:100%;max-width:320px;margin-top:10px;border-radius:12px;" '
+    + 'src="/vf_file?p=' + encodeURIComponent('out/bg_preview.mp4') + '"></video>'
+    + '<div class="sv-hint">Слушай баланс: голос героя должен быть чистым, фон — на грани слышимости.</div>';
+  svSay(6, 'Превью готово — послушай и подвинь ползунок, если надо.');
+}
+async function svBgApply(){
+  const r = await svJob('bg', svBgParams(), 6, 'Накладываю фон на все ролики…');
+  if(r.ok){ svSay(6, 'Фон наложен на все ролики.'); await svFiles(); svOpen(4); }
+}
+
+// ── ШАГ 4 ────────────────────────────────────────────────
+function svPrelaMode(mode){
+  document.getElementById('sv-own').style.display   = mode==='own'   ? 'block' : 'none';
+  document.getElementById('sv-ready').style.display = mode==='ready' ? 'block' : 'none';
+}
+function svCardBind(){
+  const drop = document.getElementById('sv-card-drop');
+  if(!drop || drop._b) return; drop._b = true;
+  ['dragenter','dragover'].forEach(e=>drop.addEventListener(e, ev=>{ev.preventDefault(); drop.style.borderColor='var(--accent1)';}));
+  ['dragleave','drop'].forEach(e=>drop.addEventListener(e, ev=>{ev.preventDefault(); drop.style.borderColor='var(--border2)';}));
+  // Кидать можно пачкой: скриншот карточки и все фото сразу одним движением.
+  drop.addEventListener('drop', ev=>{ const fs=ev.dataTransfer.files; if(fs&&fs.length) svInboxAdd(fs); });
+  document.addEventListener('paste', ev=>{
+    const pane = document.getElementById('tab-svyazki');
+    if(!pane || !pane.classList.contains('active')) return;
+    const imgs = [];
+    for(const it of (ev.clipboardData||{}).items||[]){
+      if(it.type && it.type.startsWith('image/')) imgs.push(it.getAsFile());
+    }
+    if(imgs.length) svInboxAdd(imgs);
+  });
+}
+// svCardFile удалена 11.08: разбор одной карточки заменён на разбор всей кучи
+// материалов (svInboxAdd → svSortInbox). Главное фото товара берётся из папки
+// материалов, а не из переменной в браузере, поэтому и svCardImage больше нет.
+async function svPrelaAll(){
+  const prod = document.getElementById('sv-product').value.trim();
+  const form = document.getElementById('sv-form').value;
+  if(!prod || !form){ svSay(4, 'Заполни товар и форму — от формы зависит, что герой делает на прокле.', true); return; }
+  // От карточки товара зависят три места сразу: блок заказа, сундук и фото
+  // в комментариях (из неё же делаются разные снимки). Без неё прокла
+  // собирается, но выглядит недоделанной — предупреждаем до запуска, а не после.
+  const mat = await svApi('materials', svParams());
+  if(!(mat.main && mat.main !== '—')
+     && !confirm('Главного фото товара нет.\n\nБез него не будет: фото в блоке заказа, '
+      + 'фото на сундуке и фотографий товара в комментариях.\n\nВсё равно делать?')) return;
+  for(let i=0;i<svScripts.length;i++){
+    const s = svScripts[i];
+    const p = svParams();
+    p.script = s.n; p.persona = s._hero; p.product = prod; p.form = form;
+    p.price = document.getElementById('sv-price-in').value.trim();
+    p.photos = document.getElementById('sv-photos-on').checked ? 1 : 0;
+    const r = await svJob('prela', p, 4, 'Делаю проклу ' + (i+1) + ' из ' + svScripts.length + '…');
+    if(!r.ok) return;
+  }
+  svSay(4, 'Проклы готовы.');
+  await svPrelaList();
+  document.getElementById('sv-chest-ask').style.display = 'block';
+}
+async function svPrelaList(){
+  const r = await svApi('files', svParams());
+  const box = document.getElementById('sv-prelas');
+  const ps = (r.prelas||[]).slice(-8);
+  box.innerHTML = ps.length ? ('<div class="sv-done">Прокл готово: ' + ps.length + '</div>'
+    + ps.map(f=>{ const name=f.split('/')[1]||f;
+      return '<div style="display:flex;align-items:center;gap:10px;margin-top:8px;font-size:13px;">'
+      + '<span style="flex:1;color:var(--text3);">'+name+'</span>'
+      + '<a class="sv-btn ghost" style="text-decoration:none;" target="_blank" href="/vf_page?name='+encodeURIComponent(name)+'">Открыть</a></div>';
+    }).join('')) : '';
+  document.getElementById('sv-pack-box').style.display = ps.length ? 'block' : 'none';
+  document.getElementById('sv-vsl-box').style.display = ps.length ? 'block' : 'none';
+  svVslPrice();
+  svVslList();
+}
+
+// ── Материалы оффера ─────────────────────────────────────────────────────
+async function svMaterials(){
+  const r = await svApi('materials', svParams());
+  if(!r.ok) return;
+  const ta = document.getElementById('sv-offer-text');
+  if(ta && !ta.value.trim()) ta.value = r.text || '';
+  const ph = document.getElementById('sv-phone-rule');
+  if(ph) ph.textContent = (r.phone && r.phone.code)
+    ? ('номер: ' + r.phone.code + ', ровно ' + r.phone.min + ' цифр'
+       + (r.phone.starts && r.phone.starts.length ? ', с ' + r.phone.starts.join('/') : ''))
+    : 'формат номера из карточки не разобрался — останется общая таблица по гео';
+  const box = document.getElementById('sv-mat-list');
+  box.innerHTML = (r.photos||[]).map(f =>
+    '<div style="position:relative;">'
+    + '<img src="/vf_file?p=' + encodeURIComponent('product/' + svParams().offer + '_'
+      + svParams().geo + '/' + f) + '" style="height:72px;border-radius:8px;'
+      + 'background:#fff;object-fit:contain;">'
+    + '<div style="font-size:10px;color:var(--text3);text-align:center;max-width:90px;'
+      + 'overflow:hidden;text-overflow:ellipsis;">' + f + '</div>'
+    + '<span onclick="svMatDel(\'' + f + '\')" style="position:absolute;top:-6px;right:-6px;'
+      + 'background:#e11d48;color:#fff;border-radius:50%;width:18px;height:18px;'
+      + 'font-size:12px;line-height:18px;text-align:center;cursor:pointer;">×</span></div>').join('')
+    || '<span class="sv-hint">пока пусто</span>';
+}
+async function svOfferSave(){
+  const p = svParams();
+  p.text = document.getElementById('sv-offer-text').value;
+  const r = await svApi('materials_text', p);
+  if(r.ok){ svSay(4, 'Описание оффера сохранено.'); await svMaterials(); }
+}
+// Всё летит в одну «входящую» кучу. Роль не спрашиваем — её определит разбор.
+async function svInboxAdd(files){
+  const box = document.getElementById('sv-inbox');
+  for(const f of files){
+    if(!f.type || f.type.indexOf('image') !== 0) continue;
+    const data = await new Promise(res => {
+      const rd = new FileReader(); rd.onload = e => res(e.target.result); rd.readAsDataURL(f);
+    });
+    // миниатюра появляется сразу, до ответа сервера — иначе кажется, что ничего не произошло
+    const el = document.createElement('img');
+    el.src = data; el.style.cssText = 'height:66px;border-radius:8px;background:#fff;'
+      + 'object-fit:contain;opacity:.5;';
+    box.appendChild(el);
+    const p = svParams(); p.image = data; p.name = f.name || '';
+    const r = await svApi('materials_inbox', p);
+    el.style.opacity = r.error ? '.2' : '1';
+    if(r.error){ svSay(4, r.error, true); return; }
+  }
+  await svInboxList();
+}
+async function svInboxList(){
+  const r = await svApi('materials_inbox_list', svParams());
+  const box = document.getElementById('sv-inbox');
+  box.innerHTML = (r.files||[]).map(f =>
+    '<img src="/vf_file?p=' + encodeURIComponent(r.rel + '/' + f) + '" '
+    + 'style="height:66px;border-radius:8px;background:#fff;object-fit:contain;">').join('');
+  const b = document.getElementById('sv-bsort');
+  b.style.display = (r.files||[]).length ? '' : 'none';
+}
+async function svSortInbox(){
+  const b = document.getElementById('sv-bsort');
+  b.disabled = true; b.textContent = 'Смотрю…';
+  const r = await svApi('materials_sort', svParams());
+  b.disabled = false; b.textContent = '🔍 Разобрать';
+  const res = document.getElementById('sv-sort-res');
+  if(r.error){ res.textContent = r.error; return; }
+  const RU = {main:'главное промо', bottle:'банка', box:'коробка',
+              real_bottle:'живое фото банки', real_box:'живое фото коробки',
+              card:'карточка оффера — забрал текст', other:'не пригодилось'};
+  res.innerHTML = (r.placed||[]).map(x => '• ' + (RU[x.role]||x.role)
+    + ' <span style="opacity:.6">(' + (x.why||'') + ')</span>').join('<br>');
+  // Разбор заполняет поля сам — Павлу не надо перепечатывать из карточки.
+  const o = r.offer || {};
+  if(o.name && !document.getElementById('sv-product').value.trim())
+    document.getElementById('sv-product').value = o.name;
+  if(o.price && !document.getElementById('sv-price-in').value.trim())
+    document.getElementById('sv-price-in').value = o.price;
+  if(o.form){
+    const sel = document.getElementById('sv-form');
+    for(const opt of sel.options){ if(opt.value.startsWith(o.form)){ sel.value = opt.value; break; } }
+  }
+  await svInboxList();
+  await svMaterials();
+  svSay(4, 'Разобрал. Проверь поля и делай проклы.');
+}
+async function svMatDel(file){
+  const p = svParams(); p.file = file;
+  await svApi('materials_del', p);
+  await svMaterials();
+}
+
+// ── ВСЛ ──────────────────────────────────────────────────────────────────
+let svVslRows = [];
+async function svVslPrice(){
+  if(!svVslRows.length){
+    const r = await svApi('vsl_price', {});
+    svVslRows = r.rows || [];
+  }
+  const m = parseFloat(document.getElementById('sv-vsl-min').value);
+  const row = svVslRows.find(x => x.min === m);
+  document.getElementById('sv-vsl-est').textContent = row
+    ? (row.seg + ' сегментов · ' + row.usd.toFixed(2) + ' $ за ВСЛ')
+    : '';
+}
+async function svVsl(){
+  const s = svScripts[svCur] || svScripts[0]; if(!s) return;
+  const p = svParams();
+  p.script = s.n; p.persona = s._hero || (svHeroes[0]||{}).key || '';
+  p.minutes = document.getElementById('sv-vsl-min').value;
+  const r = await svJob('vsl', p, 4, 'Пишу текст ВСЛ…');
+  if(r.ok){ svSay(4, 'Текст ВСЛ готов.'); await svVslList(); }
+}
+async function svVslList(){
+  const s = svScripts[svCur] || svScripts[0]; if(!s) return;
+  const p = svParams(); p.script = s.n;
+  const r = await svApi('vsl_list', p);
+  const box = document.getElementById('sv-vsl-text');
+  if(r.error){ box.innerHTML = ''; return; }
+  box.innerHTML = '<div class="sv-done" style="margin-top:10px;">' + (r.title||'ВСЛ')
+    + ' — ' + r.minutes + ' мин, ' + (r.segments||[]).length + ' сегментов</div>'
+    + (r.segments||[]).map((sg,i) =>
+        '<div style="margin-top:10px;padding:10px 12px;background:var(--surface2);border-radius:10px;">'
+        + '<div style="font-size:12px;color:var(--accent3);font-weight:700;">Сегмент ' + (i+1)
+        + ' · ' + (sg.scene||'') + '</div>'
+        + '<div style="font-size:13px;color:var(--text3);margin:6px 0 4px;">— ' + sg.q + '</div>'
+        + '<textarea id="sv-vseg-' + i + '" style="width:100%;min-height:70px;font-size:13px;'
+        + 'background:var(--surface);color:var(--text);border:1px solid var(--border);'
+        + 'border-radius:8px;padding:8px;">' + sg.a + '</textarea>'
+        + '<div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;">'
+        + '<button class="sv-btn ghost" style="padding:5px 12px;font-size:12px;" '
+        + 'onclick="svVslSave(' + (i+1) + ')">Сохранить правку</button>'
+        + '<button class="sv-btn ghost" style="padding:5px 12px;font-size:12px;" '
+        + 'onclick="svVslEdit(' + (i+1) + ')">Переписать командой</button></div></div>').join('');
+}
+async function svVslSave(seg){
+  const s = svScripts[svCur] || svScripts[0];
+  const p = svParams(); p.script = s.n; p.seg = seg;
+  p.ru = document.getElementById('sv-vseg-' + (seg-1)).value.trim();
+  const r = await svJob('vsl_settext', p, 4, 'Сохраняю сегмент ' + seg + '…');
+  if(r.ok){ svSay(4, 'Сегмент сохранён.'); await svVslList(); }
+}
+async function svVslEdit(seg){
+  const ins = prompt('Что поменять в сегменте ' + seg + '?');
+  if(!ins) return;
+  const s = svScripts[svCur] || svScripts[0];
+  const p = svParams(); p.script = s.n; p.seg = seg; p.instruction = ins;
+  const r = await svJob('vsl_edit', p, 4, 'Переписываю сегмент ' + seg + '…');
+  if(r.ok){ svSay(4, 'Сегмент переписан.'); await svVslList(); }
+}
+// Каждую проклу Павел хочет получать файлом. Здесь страница превращается
+// в папку по стандарту: картинки из base64 в img/, трекинг, приём заявки,
+// самопроверка и README теху. Сундук пакуется тем же заходом, если он есть.
+async function svPack(){
+  const btn = document.getElementById('sv-bpack');
+  btn.disabled = true; btn.textContent = 'Собираю…';
+  const p = svParams();
+  p.product  = document.getElementById('sv-product').value.trim();
+  p.price    = document.getElementById('sv-price-in').value.trim();
+  p.mark     = document.getElementById('sv-mark').value.trim() || 'VG';
+  p.domain   = document.getElementById('sv-domain').value.trim() || 'gvita.beauty';
+  const r = await svApi('pack', p);
+  btn.disabled = false; btn.textContent = '📦 Собрать пакеты для теха';
+  const box = document.getElementById('sv-packs');
+  if(r.error){ box.innerHTML = '<div class="sv-err">'+r.error+'</div>'; return; }
+  const bad = (r.built||[]).filter(b=>!b.ok);
+  box.innerHTML = '<div class="sv-done" style="margin-top:10px;">Пакетов готово: '
+    + (r.zips||[]).length + '</div>'
+    + (r.zips||[]).map(z =>
+        '<div style="display:flex;align-items:center;gap:10px;margin-top:8px;font-size:13px;">'
+        + '<span style="flex:1;color:var(--text3);word-break:break-all;">'+z.name+' · '+z.kb+' КБ</span>'
+        + '<a class="sv-btn" style="text-decoration:none;" download href="/vf_file?p='
+        + encodeURIComponent(z.file)+'">Скачать</a></div>').join('')
+    + (bad.length ? '<div class="sv-err" style="margin-top:10px;">Не собралось: '
+        + bad.map(b=>b.name+' — '+(b.err||'').slice(0,200)).join('; ') + '</div>' : '')
+    + '<div class="sv-hint" style="margin-top:10px;">Ссылку на самопроверку тех найдёт '
+    + 'в README внутри архива — она с ключом, чужой её не откроет.</div>';
+}
+// Сундук ОДИН на связку, а не на каждую проклу: по стандарту это редирект
+// (Оффер-Гео-Мітка-RD-Chest), и он общий для всех лендов оффера.
+async function svChestAll(){
+  const s = svScripts[0]; if(!s) return;
+  const p = svParams();
+  p.script = s.n; p.persona = s._hero;
+  p.product = document.getElementById('sv-product').value.trim();
+  p.price = document.getElementById('sv-price-in').value.trim();
+  const r = await svJob('chest', p, 4, 'Делаю сундук — он один на всю связку…');
+  if(r.ok){ svSay(4, 'Сундук готов, он общий для всех прокл связки.'); await svChestShow(); svOpen(5); }
+}
+// Сундук надо ВИДЕТЬ. Раньше он собирался молча и ссылки на него не было —
+// Павел не мог ни открыть его, ни прочитать, что там написано на языке гео.
+async function svChestShow(){
+  const box = document.getElementById('sv-chest-view');
+  const r = await svApi('chest_view', svParams());
+  if(r.error){ box.innerHTML = ''; return; }
+  box.innerHTML = '<div class="sv-done" style="margin-top:10px;">Сундук готов'
+    + (r.photo ? '' : ' — но БЕЗ фото товара, загрузи карточку выше и пересобери')
+    + '</div><div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;">'
+    + (r.url_ru ? '<a class="sv-btn" style="text-decoration:none;" target="_blank" href="'
+        + r.url_ru + '">Посмотреть по-русски</a>' : '')
+    + '<a class="sv-btn ghost" style="text-decoration:none;" target="_blank" href="'
+    + r.url + '">Как увидит человек</a></div>';
+}
+function svSkipChest(){ svOpen(5); }
+async function svTask(){
+  const r = await svJob('task', svParams(), 4, 'Ставлю таску теху…');
+  if(r.ok){ svSay(4, 'Таска поставлена.'); svOpen(5); }
+}
+
+// ── ШАГ 5 ────────────────────────────────────────────────
+async function svMakeTask(){
+  const p = svParams();
+  p.mark   = document.getElementById('sv-mark').value.trim();
+  p.domain = document.getElementById('sv-domain').value.trim();
+  p.land   = document.getElementById('sv-land').value.trim();
+  p.ptype  = document.getElementById('sv-ptype').value;
+  p.inter  = document.getElementById('sv-inter').value;
+  p.product = document.getElementById('sv-product').value.trim();
+  p.price   = document.getElementById('sv-price-in').value.trim();
+  const r = await svJob('task', p, 7, 'Собираю таску…');
+  if(!r.ok) return;
+  const t = await svApi('taskread', svParams());
+  if(t.error){ svSay(7, t.error, true); return; }
+  const box = document.getElementById('sv-task');
+  box.value = t.text; box.style.display = 'block';
+  document.getElementById('sv-copy').style.display = 'inline-block';
+  svSay(7, 'Таска готова — проверь и копируй.');
+}
+function svCopyTask(){
+  const box = document.getElementById('sv-task');
+  box.select(); document.execCommand('copy');
+  svSay(7, 'Скопировано в буфер.');
+}
+
+async function svBinom(yes){
+  // Кнопка слала действие 'binom', которого в vf_handle нет — она молча
+  // ничего не делала. Автосоздание оффера и кампании пока не подключено,
+  // и честнее сказать это вслух, чем изображать работу.
+  if(yes) svSay(5, 'Автосоздание в Биноме ещё не подключено — заведи руками, '
+    + 'имена лендов возьми из таски выше. Подключаем следующим шагом.', true);
+  document.getElementById('sv-upload').style.display='block';
+}
+function svToUpload(){
+  switchTab('upload');
+}
+
 function switchTab(tab){
-  document.querySelectorAll('.tab-btn').forEach((b,i)=>b.classList.toggle('active',['editor','ads','upload','tasks','binom','static'][i]===tab));
+  document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
+  const btn = document.querySelector(`.tab-btn[onclick*="'${tab}'"]`);
+  if(btn) btn.classList.add('active');
   document.querySelectorAll('.tab-pane').forEach(p=>p.classList.remove('active'));
   document.getElementById('tab-'+tab).classList.add('active');
   if(tab==='prokla') loadProklaNames();
+  if(tab==='svyazki') svInit();
   if(tab==='tasks') tkInit();
   if(tab==='upload'){ loadChannels(); loadProjects(); }
   if(tab==='binom'){ loadBinomTargets().then(loadBinom); }
@@ -6148,6 +7638,11 @@ window.addEventListener('DOMContentLoaded', async ()=>{
       document.body.prepend(banner);
     }
   }catch(e){}
+  // Вкладка «Связки» — только там, где рядом лежит фабрика. У байеров её нет.
+  try{
+    const s = await (await fetch('/vf_state', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'})).json();
+    if(s && s.ok) document.getElementById('tab-btn-svyazki').style.display = '';
+  }catch(e){}
 });
 
 async function reloadAfterUpdate(btn){
@@ -6415,6 +7910,68 @@ class Handler(BaseHTTPRequestHandler):
             body = html.encode()
             self.send_response(200)
             self.send_header('Content-Type','text/html; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        if path == '/vf_face':
+            # Превью лица героя для выбора в панели. Лица может ещё не быть —
+            # тогда 404, и карточка просто показывается блёклой.
+            qs = parse_qs(urlparse(self.path).query)
+            key = os.path.basename((qs.get('key') or [''])[0])
+            f = os.path.join(VF_DIR, 'faces', 'persona_%s.png' % key)
+            if not vf_available() or not os.path.exists(f):
+                self.send_response(404); self.end_headers(); return
+            data = open(f, 'rb').read()
+            self.send_response(200)
+            self.send_header('Content-Type', 'image/png')
+            self.send_header('Content-Length', str(len(data)))
+            self.send_header('Cache-Control', 'max-age=3600')
+            self.end_headers(); self.wfile.write(data); return
+
+        if path == '/vf_file':
+            # Скачивание готового ролика — Павел должен видеть, что файл у него.
+            qs = parse_qs(urlparse(self.path).query)
+            rel = (qs.get('p') or [''])[0].replace('..', '')
+            f = os.path.join(VF_DIR, rel)
+            if not vf_available() or not os.path.exists(f):
+                self.send_response(404); self.end_headers(); return
+            data = open(f, 'rb').read()
+            self.send_response(200)
+            # Через этот же эндпоинт уходят пакеты прокл — с типом video/mp4
+            # браузер сохранял zip как .mp4 и тех получал «битый архив».
+            ext = os.path.splitext(f)[1].lower()
+            self.send_header('Content-Type', {'.zip': 'application/zip',
+                                              '.mp4': 'video/mp4',
+                                              '.png': 'image/png',
+                                              '.jpg': 'image/jpeg',
+                                              '.jpeg': 'image/jpeg',
+                                              '.webp': 'image/webp'}.get(ext,
+                                              'application/octet-stream'))
+            # Картинки материалов показываются миниатюрами прямо в панели —
+            # с attachment браузер вместо показа предлагал их скачать.
+            if ext not in ('.png', '.jpg', '.jpeg', '.webp') \
+                    and 'preview' not in os.path.basename(f):
+                self.send_header('Content-Disposition',
+                                 'attachment; filename="%s"' % os.path.basename(f))
+            self.send_header('Content-Length', str(len(data)))
+            self.end_headers(); self.wfile.write(data); return
+
+        if path == '/vf_page':
+            # Отдать готовую проклу или сундук для превью в панели (iframe).
+            qs = parse_qs(urlparse(self.path).query)
+            name = (qs.get('name') or [''])[0]
+            sub = (qs.get('sub') or [''])[0]
+            sub = sub if sub in ('chest', 'chest_ru') else ''
+            f = os.path.join(VF_DIR, 'prela', os.path.basename(name),
+                             sub, 'index.html') if sub else \
+                os.path.join(VF_DIR, 'prela', os.path.basename(name), 'index.html')
+            if not vf_available() or not os.path.exists(f):
+                self.send_response(404); self.end_headers(); return
+            body = open(f, 'rb').read()
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Content-Length', str(len(body)))
             self.end_headers()
             self.wfile.write(body)
             return
@@ -6845,7 +8402,14 @@ class Handler(BaseHTTPRequestHandler):
             # никаких edit/delete существующих объектов (см. правило по Биному).
             length = int(self.headers.get('Content-Length', 0))
             data = json.loads(self.rfile.read(length)) if length else {}
-            target = binom_norm_target(data.get('target', DEFAULT_BINOM))
+            # Цель указываем ЯВНО и не откатываемся на дефолт: binom_norm_target
+            # подменяет неизвестное значение боевым трекером, из-за чего
+            # ошибочный запрос уходил в реальный Бином и создавал оффер.
+            _t_raw = (data.get('target') or '').strip()
+            if _t_raw not in BINOM_TARGETS:
+                self.json({'ok': False, 'error': 'Неизвестный Бином: %r. Ожидается %s'
+                           % (_t_raw, ' или '.join(BINOM_TARGETS))}); return
+            target = _t_raw
             bk = read_binom_key(target)
             if not bk:
                 self.json({'ok': False, 'error': 'Не задан ключ Binom для %s' % BINOM_TARGETS[target]['domain']}); return
@@ -6876,7 +8440,35 @@ class Handler(BaseHTTPRequestHandler):
                         self.json({'ok': False, 'error': res.get('message', 'ошибка Binom')}); return
                     self.json({'ok': True, 'result': res})
                 else:
-                    self.json({'ok': False, 'error': 'Создание для нового Бинома (V2) ещё не подключено'})
+                    # Binom V2: тело обёрнуто в {"offer": {...}}. Обязательные поля
+                    # разведаны неполными запросами: currency, amount, isAuto,
+                    # isUpsell + name, url.
+                    offer = {
+                        'name': name,
+                        'url': url,
+                        'currency': (data.get('currency') or 'USD').upper(),
+                        'amount': float(payout or 0),
+                        'isAuto': not (payout and payout != '0'),
+                        'isUpsell': False,
+                    }
+                    if geo:
+                        offer['countryCode'] = geo
+                    if data.get('group'):
+                        offer['groupId'] = int(data['group'])
+                    if data.get('network'):
+                        offer['affiliateNetworkId'] = int(data['network'])
+                    r = _s.post(BINOM_TARGETS[target]['base'] + 'offer',
+                                headers={'Api-Key': bk, 'Content-Type': 'application/json'},
+                                json={'offer': offer}, timeout=30)
+                    if r.status_code >= 400:
+                        _e = r.text[:250]
+                        try:
+                            _d = r.json().get('errors', {})
+                            _e = _d.get('detail') or _d.get('message') or _e
+                        except Exception:
+                            pass
+                        self.json({'ok': False, 'error': str(_e)[:250]}); return
+                    self.json({'ok': True, 'result': r.json() if r.text else {}})
             except Exception as e:
                 self.json({'ok': False, 'error': str(e)[:200]})
             return
@@ -7596,6 +9188,10 @@ class Handler(BaseHTTPRequestHandler):
                 UPLOAD_JOBS[job_id]['status'] = 'error'
                 UPLOAD_JOBS[job_id]['log'].append(f'❌ Ошибка: {str(e)}')
                 self.json({'ok': False, 'error': str(e)})
+        elif path.startswith('/vf_'):
+            length = int(self.headers.get('Content-Length',0))
+            params = json.loads(self.rfile.read(length)) if length else {}
+            self.json(vf_handle(path[4:], params))
         elif path == '/ai_generate':
             length = int(self.headers.get('Content-Length',0))
             params = json.loads(self.rfile.read(length))
@@ -7897,7 +9493,9 @@ if __name__ == '__main__':
 
     class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
         daemon_threads = True
-    port = 7777
+    # Порт можно переопределить: VE_PORT=7778 python3 app.py — нужно, чтобы
+    # поднять вторую панель для проверки, не гася рабочую.
+    port = int(os.environ.get('VE_PORT') or 7777)
     server = ThreadedHTTPServer(('0.0.0.0', port), Handler)
     import socket
     try:
