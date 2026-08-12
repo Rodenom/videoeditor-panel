@@ -1,0 +1,99 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>اختار صندوق وشوف واش ربحت</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;background:linear-gradient(160deg,#2a1052,#6d28d9);color:#fff;min-height:100vh;
+       font-family:'Georgia', 'Times New Roman', serif;font-size:18px;-webkit-text-size-adjust:100%}
+  .wrap{max-width:620px;margin:0 auto;padding:26px 18px 60px;text-align:center}
+  h1{font-size:29px;line-height:1.25;margin:6px 0 6px}
+  .sub{opacity:.8;font-size:17px;margin-bottom:26px}
+  .boxes{display:flex;gap:12px;justify-content:center;flex-wrap:wrap}
+  .box{flex:1;min-width:120px;max-width:170px;cursor:pointer;transition:transform .18s;
+        background:rgba(255,255,255,.09);border:2px solid rgba(255,255,255,.28);
+        border-radius:18px;padding:20px 12px}
+  .box:active{transform:scale(.95)}
+  .box .ico{font-size:60px;line-height:1.1}
+  .box .cap{margin-top:8px;font-weight:800;font-size:16px;opacity:.9}
+  .box.shake{animation:sh .45s}
+  @keyframes sh{0%,100%{transform:translateX(0)}25%{transform:translateX(-7px)}75%{transform:translateX(7px)}}
+  .box.gone{opacity:.28;pointer-events:none}
+  #win{display:none;margin-top:8px}
+  .won{font-size:27px;font-weight:800;color:#fbbf24;margin:14px 0 6px}
+  .prices{display:flex;align-items:center;justify-content:center;gap:12px;margin:10px 0 4px;flex-wrap:wrap}
+  .old{opacity:.65;text-decoration:line-through;font-size:21px}
+  .new{font-size:39px;font-weight:800;color:#fbbf24}
+  .prod{margin-top:14px}
+  .prod img{max-width:210px;background:#fff;border-radius:14px;padding:8px}
+  .timer{margin:16px auto 4px;font-size:16px;opacity:.9}
+  .clock{font-size:31px;font-weight:800;letter-spacing:1px}
+  form{margin-top:20px;text-align:left}
+  input{width:100%;padding:16px;font-size:18px;border:none;border-radius:12px;margin-bottom:11px;
+        font-family:inherit;color:#111}
+  button{width:100%;padding:18px;font-size:20px;font-weight:800;border:none;border-radius:12px;
+         background:#fbbf24;color:#1a1a1a;cursor:pointer;font-family:inherit}
+  #thanks{display:none;font-size:20px;font-weight:700;padding:26px 0;color:#fbbf24}
+</style>
+<div class="wrap" dir="rtl">
+  <h1>اختار صندوق وشوف واش ربحت</h1>
+  <div class="sub" id="sub">عندك محاولة وحدة برك</div>
+  <div class="boxes" id="boxes">
+    <div class="box" onclick="pick(this,0)"><div class="ico">🎁</div><div class="cap">1</div></div>
+    <div class="box" onclick="pick(this,1)"><div class="ico">🎁</div><div class="cap">2</div></div>
+    <div class="box" onclick="pick(this,2)"><div class="ico">🎁</div><div class="cap">3</div></div>
+  </div>
+  <div id="win">
+    <div class="won">مبروك! ربحت تخفيض 50%</div>
+    <div class="prod"><div style="font-weight:800;font-size:21px;margin-top:8px;">Prostanol</div></div>
+    <div class="prices"><span class="old">11800 دج</span><span class="new">5900 دج</span></div>
+    <div class="timer">التخفيض محجوز ليك<div class="clock" id="clock">15:00</div></div>
+    <form id="lead" onsubmit="return sendLead(event)">
+      <input name="name" required placeholder="الاسم الكامل">
+      <input name="phone" required inputmode="tel" placeholder="+213 55 12 34 56">
+      <button type="submit">اطلب الآن</button>
+    </form>
+    <div id="thanks">تم إرسال طلبك، راح نعيطولك قريب</div>
+  </div>
+</div>
+<script>
+var LEAD_URL = "";
+var picked = false;
+function pick(el, i){
+  if(picked) return;
+  picked = true;
+  el.classList.add('shake');
+  setTimeout(function(){
+    el.querySelector('.ico').textContent = '🏆';
+    document.querySelectorAll('.box').forEach(function(b){ if(b!==el) b.classList.add('gone'); });
+    document.getElementById('sub').style.display = 'none';
+    document.getElementById('win').style.display = 'block';
+    document.getElementById('win').scrollIntoView({behavior:'smooth', block:'center'});
+    startClock();
+  }, 460);
+}
+// Таймер удержания скидки. Держим в sessionStorage, чтобы перезагрузка страницы
+// не давала «свежие» 15 минут — иначе обратный отсчёт ничего не значит.
+function startClock(){
+  var end = +sessionStorage.getItem('chest_end');
+  if(!end){ end = Date.now() + 15*60*1000; sessionStorage.setItem('chest_end', end); }
+  var el = document.getElementById('clock');
+  (function tick(){
+    var left = Math.max(0, end - Date.now());
+    var m = Math.floor(left/60000), s = Math.floor(left%60000/1000);
+    el.textContent = m + ':' + (s<10?'0':'') + s;
+    if(left > 0) setTimeout(tick, 1000);
+  })();
+}
+function sendLead(e){
+  e.preventDefault();
+  var f = document.getElementById('lead');
+  // Заявка уходит НАПРЯМУЮ в колл-центр. Панель лиды не принимает и не хранит.
+  if(LEAD_URL){
+    fetch(LEAD_URL, {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({name:f.name.value, phone:f.phone.value, ts:Date.now()})}).catch(function(){});
+  }
+  f.style.display = 'none';
+  document.getElementById('thanks').style.display = 'block';
+  return false;
+}
+</script>

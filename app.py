@@ -192,7 +192,7 @@ def vf_handle(action, p):
         offers_ru = {'prostate': 'Простатит', 'potency': 'Потенция', 'joints': 'Суставы',
                      'diabetes': 'Диабет', 'pressure': 'Гипертония', 'weight': 'Похудение',
                      'parasites': 'Паразиты', 'cystitis': 'Цистит', 'vision': 'Зрение',
-                     'memory': 'Память'}
+                     'memory': 'Память', 'neuropathy': 'Нейропатия', 'hearing': 'Слух'}
         geos_ru = {'dz': '🇩🇿 Алжир', 'ma': '🇲🇦 Марокко', 'tn': '🇹🇳 Тунис', 'eg': '🇪🇬 Египет',
                    'sa': '🇸🇦 Саудовская Аравия', 'bg': '🇧🇬 Болгария', 'ro': '🇷🇴 Румыния',
                    'pl': '🇵🇱 Польша', 'hu': '🇭🇺 Венгрия', 'cz': '🇨🇿 Чехия', 'sk': '🇸🇰 Словакия',
@@ -3799,23 +3799,25 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
         <input class="tk-input" id="ai-api-key" type="password" placeholder="sk-ant-..." oninput="localStorage.setItem('claude_api_key', this.value)">
       </div>
 
-      <div class="tk-row">
-        <div class="tk-col">
-          <div class="tk-label">Архив ленда (.zip)</div>
-          <input type="file" id="ai-lander-zip" accept=".zip" style="display:none;" onchange="aiLanderSelected(this)">
-          <button onclick="document.getElementById('ai-lander-zip').click()" id="ai-lander-btn" style="width:100%;padding:11px;border:2px dashed var(--border);border-radius:10px;background:var(--surface2);cursor:pointer;font-size:13px;color:var(--text3);">📦 Выбрать архив прокла</button>
+      <!-- ОДНА зона на всё. Раньше было три отдельных поля — архив, карточка,
+           фото — и каждый файл надо было класть в своё. Реальная работа так не
+           идёт: ВСЛ приходит одним файлом, форма заказа другим, карточка
+           скрином, фото товара россыпью. Теперь всё валится сюда, роли
+           определяются при разборе. -->
+      <div class="tk-mb">
+        <div class="tk-label">Материалы <span style="color:var(--text3);font-weight:400;text-transform:none;">— архивы, страницы, скрины, фото: всё сразу</span></div>
+        <div id="ai-drop" onclick="document.getElementById('ai-files').click()"
+             style="border:2px dashed var(--border);border-radius:12px;padding:22px 14px;text-align:center;cursor:pointer;background:var(--surface2);font-size:13px;color:var(--text3);">
+          📥 Кидай сюда ВСЁ: архив ленда, файл с ВСЛ, файл с формой заказа,<br>карточку оффера, фото товара
+          <div style="font-size:11px;margin-top:6px;">перетащи, вставь из буфера (Ctrl+V) или кликни · файлов сколько нужно</div>
+          <input type="file" id="ai-files" multiple style="display:none;" onchange="aiFilesAdd(this.files)">
         </div>
+        <div id="ai-file-list" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:10px;"></div>
       </div>
 
       <div class="tk-mb">
-        <div class="tk-label">Карточка оффера</div>
-        <div id="ai-offer-drop" onclick="document.getElementById('ai-offer-file').click()" style="border:2px dashed var(--border);border-radius:10px;padding:14px;text-align:center;cursor:pointer;background:var(--surface2);font-size:13px;color:var(--text3);">
-          🖼️ Вставь скрин карточки (Ctrl+V) или кликни для выбора
-          <input type="file" id="ai-offer-file" accept="image/*" style="display:none;" onchange="aiOfferFileSelected(this)">
-        </div>
-        <img id="ai-offer-preview" style="display:none;max-height:140px;margin-top:8px;border-radius:8px;border:2px solid var(--accent1);">
-        <div style="font-size:11px;color:var(--text3);margin:8px 0 4px;">или впиши данными:</div>
-        <textarea class="tk-input" id="ai-offer-text" rows="3" placeholder="Оффер: Trauflix · Гео: HU · Цена: 9900 HUF · метка zd · тип цены low ..."></textarea>
+        <div class="tk-label">Что известно про оффер <span style="color:var(--text3);font-weight:400;text-transform:none;">— свободным текстом, необязательно</span></div>
+        <textarea class="tk-input" id="ai-offer-text" rows="4" placeholder="Всё, что знаешь и что не видно в файлах: ссылка на ленд, ID оффера в ПП, поток, API-токен, цена, тип интерактива сундука, особые пожелания. Пиши как удобно — разберу."></textarea>
       </div>
 
       <div class="tk-mb">
@@ -5650,13 +5652,67 @@ function aiProdFileSelected(input){
   r.readAsDataURL(f);
 }
 
-function aiLanderSelected(input){
-  const f = input.files && input.files[0];
-  if(!f) return;
-  const r = new FileReader();
-  r.onload = e => { aiLanderData = e.target.result; document.getElementById('ai-lander-btn').textContent = '📦 ' + f.name; };
-  r.readAsDataURL(f);
+// Все материалы одной кучей: [{name, kind, data}]. kind — только подсказка для
+// глаза, роль каждого файла определяется при разборе по содержимому.
+let aiFiles = [];
+
+function aiKind(name, type){
+  const n = (name||'').toLowerCase();
+  if((type||'').startsWith('image/')) return 'скрин';
+  if(n.endsWith('.zip')) return 'архив';
+  if(n.endsWith('.html') || n.endsWith('.htm')) return 'страница';
+  if(n.endsWith('.txt') || n.endsWith('.md')) return 'текст';
+  return 'файл';
 }
+
+function aiFilesAdd(files){
+  for(const f of files || []){
+    const r = new FileReader();
+    r.onload = e => {
+      aiFiles.push({name: f.name || 'вставка.png', kind: aiKind(f.name, f.type), data: e.target.result});
+      aiFilesRender();
+    };
+    r.readAsDataURL(f);
+  }
+}
+
+function aiFilesDrop(i){ aiFiles.splice(i,1); aiFilesRender(); }
+
+function aiFilesRender(){
+  const box = document.getElementById('ai-file-list');
+  if(!box) return;
+  box.innerHTML = aiFiles.map((f,i) => {
+    const pic = f.data.startsWith('data:image')
+      ? `<img src="${f.data}" style="height:38px;border-radius:5px;display:block;margin-bottom:4px;">` : '';
+    return `<div style="border:1.5px solid var(--border);border-radius:9px;padding:7px 9px;background:var(--surface2);font-size:11.5px;max-width:190px;">
+      ${pic}<div style="display:flex;gap:6px;align-items:center;">
+        <span style="color:var(--text3);">${f.kind}</span>
+        <b style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${f.name}</b>
+        <span onclick="aiFilesDrop(${i})" style="cursor:pointer;color:var(--text3);margin-left:auto;">✕</span>
+      </div></div>`;
+  }).join('');
+}
+
+function aiDropBind(){
+  const d = document.getElementById('ai-drop');
+  if(!d || d._b) return; d._b = true;
+  ['dragenter','dragover'].forEach(e => d.addEventListener(e, ev => {
+    ev.preventDefault(); d.style.borderColor = 'var(--accent1)'; }));
+  ['dragleave','drop'].forEach(e => d.addEventListener(e, ev => {
+    ev.preventDefault(); d.style.borderColor = 'var(--border)'; }));
+  d.addEventListener('drop', ev => { if(ev.dataTransfer.files.length) aiFilesAdd(ev.dataTransfer.files); });
+  // Вставка скрина из буфера работает по всей вкладке, а не только по клику в зону
+  document.addEventListener('paste', ev => {
+    const pane = document.getElementById('tab-tasks');
+    if(!pane || !pane.classList.contains('active')) return;
+    const imgs = [];
+    for(const it of (ev.clipboardData||{}).items || []){
+      if(it.type && it.type.startsWith('image/')) imgs.push(it.getAsFile());
+    }
+    if(imgs.length) aiFilesAdd(imgs);
+  });
+}
+document.addEventListener('DOMContentLoaded', aiDropBind);
 function aiOfferSetImage(dataUrl){
   aiOfferImage = dataUrl;
   const img = document.getElementById('ai-offer-preview');
@@ -5725,16 +5781,14 @@ function aiTaskGenerate(){
   const offerText = (document.getElementById('ai-offer-text').value||'').trim();
   const status = document.getElementById('ai-status');
   if(!key){ alert('Вставь API-ключ Claude (console.anthropic.com)'); return; }
-  if(!aiLanderData){ alert('Загрузи архив ленда (.zip)'); return; }
-  if(!aiOfferImage && !offerText){ alert('Добавь карточку оффера — скрин или текстом'); return; }
+  if(!aiFiles.length && !offerText){ alert('Кинь материалы или опиши оффер текстом'); return; }
   const btn = document.getElementById('ai-gen-btn');
   btn.disabled = true; btn.textContent = '⏳ ИИ разбирает ленд...';
   status.style.display = 'block'; status.textContent = 'Обычно 15–40 секунд...';
   fetch('/analyze_lander_ai', {method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({
       api_key: key,
-      zip_data: aiLanderData,
-      offer_image: aiOfferImage || '',
+      files: aiFiles,
       offer_text: offerText,
       comment: (document.getElementById('ai-comment').value||'').trim(),
       mark: (document.getElementById('ai-mark').value||'').trim(),
@@ -8698,32 +8752,62 @@ class Handler(BaseHTTPRequestHandler):
             api_key = (params.get('api_key') or '').strip()
             if not api_key:
                 self.json({'error': 'Не указан API-ключ Claude'}); return
-            # 1) извлечь текст ленда из архива
-            try:
-                zb64 = params.get('zip_data', '')
-                if ',' in zb64:
-                    zb64 = zb64.split(',', 1)[1]
-                zbytes = _b64.b64decode(zb64)
-                tmp = tempfile.mkdtemp()
-                with zipfile.ZipFile(_io2.BytesIO(zbytes)) as zf:
-                    zf.extractall(tmp)
-                index_html = None
-                for root, dirs, files in os.walk(tmp):
-                    for fn in files:
-                        if fn.lower() == 'index.html':
-                            index_html = os.path.join(root, fn); break
-                    if index_html: break
-                if not index_html:
-                    _sh2.rmtree(tmp, ignore_errors=True)
-                    self.json({'error': 'В архиве не найден index.html'}); return
-                with open(index_html, 'r', encoding='utf-8', errors='ignore') as f:
-                    html = f.read()
-                _sh2.rmtree(tmp, ignore_errors=True)
-            except Exception as e:
-                self.json({'error': f'Не удалось прочитать архив: {e}'}); return
-            txt = _re2.sub(r'<(script|style)[^>]*>.*?</\1>', ' ', html, flags=_re2.S | _re2.I)
-            txt = _re2.sub(r'<[^>]+>', ' ', txt).replace('&nbsp;', ' ')
-            txt = _re2.sub(r'\s+', ' ', txt).strip()[:24000]
+            # 1) разобрать ПАЧКУ материалов. Файлов может быть сколько угодно и
+            # любых: архив ленда, отдельный файл ВСЛ, отдельный файл формы
+            # заказа, карточка скрином, фото товара. Раньше принимался ровно
+            # один архив и одна картинка — под реальную работу это не годилось.
+            def _strip_html(h):
+                t = _re2.sub(r'<(script|style)[^>]*>.*?</\1>', ' ', h, flags=_re2.S | _re2.I)
+                t = _re2.sub(r'<[^>]+>', ' ', t).replace('&nbsp;', ' ')
+                return _re2.sub(r'\s+', ' ', t).strip()
+
+            files_in = params.get('files') or []
+            # совместимость со старым вызовом (одиночный архив + скрин карточки)
+            if not files_in and params.get('zip_data'):
+                files_in = [{'name': 'lander.zip', 'data': params.get('zip_data')}]
+                if params.get('offer_image'):
+                    files_in.append({'name': 'card.png', 'data': params.get('offer_image')})
+
+            pages, images, errors = [], [], []
+            for it in files_in[:20]:
+                name = (it.get('name') or 'file')
+                data = it.get('data') or ''
+                raw = data.split(',', 1)[1] if ',' in data else data
+                try:
+                    blob = _b64.b64decode(raw)
+                except Exception:
+                    errors.append(name); continue
+                low = name.lower()
+                if data.startswith('data:image') or low.endswith(('.png', '.jpg', '.jpeg', '.webp')):
+                    images.append(data)                       # отдаём модели как есть
+                elif low.endswith('.zip'):
+                    try:
+                        tmp = tempfile.mkdtemp()
+                        with zipfile.ZipFile(_io2.BytesIO(blob)) as zf:
+                            zf.extractall(tmp)
+                        # берём все html архива, не только index: ВСЛ и форма
+                        # часто лежат отдельными страницами
+                        found = []
+                        for root, dirs, fs in os.walk(tmp):
+                            for fn in sorted(fs):
+                                if fn.lower().endswith(('.html', '.htm')):
+                                    with open(os.path.join(root, fn), encoding='utf-8', errors='ignore') as fh:
+                                        found.append((fn, _strip_html(fh.read())))
+                        _sh2.rmtree(tmp, ignore_errors=True)
+                        if not found:
+                            errors.append(name + ' (нет html)')
+                        for fn, t in found[:5]:
+                            pages.append('%s / %s:\n%s' % (name, fn, t[:12000]))
+                    except Exception as e:
+                        errors.append('%s (%s)' % (name, str(e)[:60]))
+                elif low.endswith(('.html', '.htm')):
+                    pages.append('%s:\n%s' % (name, _strip_html(blob.decode('utf-8', 'ignore'))[:12000]))
+                else:
+                    pages.append('%s:\n%s' % (name, blob.decode('utf-8', 'ignore')[:8000]))
+
+            if not pages and not images and not (params.get('offer_text') or '').strip():
+                self.json({'error': 'Не удалось прочитать ни один файл: ' + ', '.join(errors[:5])}); return
+            txt = ('\n\n---\n\n'.join(pages))[:40000]
             # 2) собрать запрос к Claude
             offer_domain = (params.get('domain') or 'gvita.beauty').strip()
             buyer_mark = (params.get('mark') or '').strip()
@@ -8764,18 +8848,26 @@ class Handler(BaseHTTPRequestHandler):
                 "(тільки реальні правки під цей ленд; кожна — один рядок, конкретні значення, формат Замінити \"X\" НА \"Y\")"
             )
             content = []
-            offer_img = params.get('offer_image', '') or ''
-            mimg = _re2.match(r'data:(image/[\w.+-]+);base64,(.+)', offer_img, _re2.S)
-            if mimg:
-                content.append({"type": "image", "source": {"type": "base64", "media_type": mimg.group(1), "data": mimg.group(2)}})
+            # Все присланные картинки — карточка оффера, фото товара, скрины
+            # страниц. Модель сама поймёт, что где; больше десяти в один запрос
+            # не имеет смысла ни по деньгам, ни по вниманию.
+            for img in images[:10]:
+                mimg = _re2.match(r'data:(image/[\w.+-]+);base64,(.+)', img, _re2.S)
+                if mimg:
+                    content.append({"type": "image", "source": {
+                        "type": "base64", "media_type": mimg.group(1), "data": mimg.group(2)}})
             offer_text = (params.get('offer_text') or '').strip()
             comment = (params.get('comment') or '').strip()
             user_text = ""
             if comment:
                 user_text += ("ВКАЗІВКИ БАЄРА (ПРІОРИТЕТ — враховуй у першу чергу, вони важливіші за загальні правила): "
                               + comment + "\n\n")
-            user_text += ("КАРТОЧКА ОФФЕРА:\n" + (offer_text if offer_text else "(см. изображение выше)")
-                          + "\n\nТЕКСТ ЛЕНДА (прокла):\n" + txt)
+            user_text += ("ЩО ВІДОМО ПРО ОФФЕР (від баєра, вільним текстом):\n"
+                          + (offer_text if offer_text else "(нічого не вказано — дивись зображення та файли)")
+                          + "\n\nМАТЕРІАЛИ (файлів: %d, зображень: %d). Ролі визнач сам: "
+                            "де основний ленд, де ВСЛ, де форма замовлення, де картка оффера, де фото товару. "
+                            "Якщо сторінок кілька — зроби ТЗ на кожну окремим блоком «Ленд N».\n\n"
+                            % (len(pages), len(images)) + txt)
             content.append({"type": "text", "text": user_text})
             body = {
                 "model": "claude-opus-4-8",
