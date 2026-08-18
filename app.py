@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.54"
+VERSION = "5.55"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -3306,7 +3306,10 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
                         border-radius:10px;background:var(--surface2);color:var(--text);font-family:inherit;">
           <button class="sv-btn ghost" id="sv-b2e" onclick="svEdit()">Переписать</button>
           <button class="sv-btn ghost" id="sv-b2s" onclick="svSaveText()">Сохранить правку</button>
+          <button class="sv-btn ghost" id="sv-b2d" onclick="svDropDraft()"
+                  style="display:none;">Вернуть сохранённый</button>
         </div>
+        <div id="sv-dirty" style="font-size:12px;margin-top:6px;"></div>
         <div class="sv-bar" id="sv-bar2"><i></i></div>
         <div class="sv-log" id="sv-log2"></div>
         <div style="margin-top:12px;">
@@ -5279,6 +5282,20 @@ async function svGen(){
   const p = svParams();
   p.n = parseInt(document.getElementById('sv-n').value)||3;
   p.style = document.getElementById('sv-style').value;
+  // Эта кнопка пишет тексты ПОВЕРХ существующих. Раньше она делала это молча,
+  // и правка руками пропадала вместе с ними (Павел напоролся 18.08).
+  // Копия старых текстов теперь остаётся на диске, но спросить всё равно надо:
+  // ждать полторы минуты и потом лезть в архив — не работа.
+  const было = svScripts.length;
+  const правки = svScripts.filter(s => s._dirty).length;
+  if(было){
+    const msg = 'Тут уже есть ' + было + ' текстов'
+      + (правки ? (', и в ' + правки + ' лежит твоя несохранённая правка') : '')
+      + '.\n\nНаписать новые поверх? Прежние уйдут в архив '
+      + '(scripts/…/_прошлые), но в панели их не будет.\n\n'
+      + 'Если надо поправить один ролик — закрой это и правь его на шаге 2.';
+    if(!confirm(msg)) return;
+  }
   const r = await svJob('gen', p, 1, 'Пишу ' + p.n + ' текстов, это примерно полторы минуты…');
   if(r.ok){ svSay(1, 'Тексты готовы.'); await svLoad(); svOpen(2); }
 }
@@ -5288,13 +5305,32 @@ async function svLoad(){
   // _hero и _done живут только в браузере — сервер их не знает. Раньше svLoad
   // (его зовут после правки текста и смены формата) заменял массив целиком и
   // сбрасывал выбор на первый ролик: выбранные герои пропадали.
+  svCapture();
+  const wasFor = svLoadedFor;
   const keep = {};
-  svScripts.forEach(s => { if(s && s.n != null) keep[s.n] = {_hero: s._hero, _done: s._done}; });
+  svScripts.forEach(s => { if(s && s.n != null)
+    keep[s.n] = {_hero: s._hero, _done: s._done, _pick: s._pick, _edited: s._edited}; });
   const wasN = (svScripts[svCur]||{}).n;
-  const r = await svApi('scripts', svParams());
+  const pp = svParams();
+  const r = await svApi('scripts', pp);
   svScripts = r.scripts || [];
-  if(!svScripts.length) return;
-  svScripts.forEach(s => { if(keep[s.n]) Object.assign(s, keep[s.n]); });
+  if(!svScripts.length){ svLoadedFor = pp.offer + '_' + pp.geo; return; }
+  // с этого места черновики относятся уже к новой связке
+  svLoadedFor = pp.offer + '_' + pp.geo;
+  const тажеСвязка = wasFor === svLoadedFor;
+  svScripts.forEach(s => {
+    if(keep[s.n] && тажеСвязка) Object.assign(s, keep[s.n]);
+    else if(keep[s.n]) Object.assign(s, {_hero: undefined, _done: undefined,
+                                         _pick: undefined, _edited: undefined});
+    if(s._edited === undefined){
+      // черновик мог остаться с прошлого запуска браузера
+      try { const d = localStorage.getItem(svDraftKey(s.n)); if(d !== null) s._edited = d; } catch(e){}
+    }
+    if(s._edited !== undefined){
+      s._dirty = s._edited.trim() !== (s.ru || '').trim();
+      if(!s._dirty){ s._edited = undefined; try { localStorage.removeItem(svDraftKey(s.n)); } catch(e){} }
+    }
+  });
   const back = svScripts.findIndex(s => s.n === wasN);
   svCur = back >= 0 ? back : 0;
   document.getElementById('sv-s2sub').textContent =
@@ -5304,7 +5340,9 @@ async function svLoad(){
 }
 function svTabs(){
   document.getElementById('sv-tabs').innerHTML = svScripts.map((x,i)=>
-    '<div class="sv-tab '+(i===svCur?'on':'')+'" onclick="svGo('+i+')">Ролик '+x.n+'</div>').join('');
+    '<div class="sv-tab '+(i===svCur?'on':'')+'" onclick="svGo('+i+')">Ролик '+x.n
+    + (x._dirty ? ' <b style="color:#d97706;" title="есть несохранённая правка">●</b>' : '')
+    + '</div>').join('');
   // Галочка = «этот ролик собирать». Кликом по названию переключаем вкладку,
   // кликом по галочке — отметку, чтобы не собирать всю папку разом.
   document.getElementById('sv-htabs').innerHTML = svScripts.map((x,i)=>
@@ -5328,7 +5366,7 @@ function svShow(){
   const s = svScripts[svCur]; if(!s) return;
   document.getElementById('sv-angle').textContent =
     'боль ролика: ' + (s.angle||'') + ' · ~' + (s.secs||0) + ' сек · ' + (s.price||0).toFixed(2) + ' $';
-  document.getElementById('sv-text').value = s._edited || s.ru || '';
+  document.getElementById('sv-text').value = (s._edited !== undefined ? s._edited : (s.ru || ''));
   // Формат виден и меняется у КАЖДОГО ролика по отдельности: подходящий формат
   // видно только по готовому тексту, а переписывать ради этого всю пачку —
   // терять уже утверждённые тексты.
@@ -5339,6 +5377,7 @@ function svShow(){
     + '</select><button class="sv-btn ghost" style="padding:5px 12px;font-size:12px;" '
     + 'onclick="svRestyle()">Переписать в этом формате</button>';
   svTabs();
+  svDirtyNote();
   svHeroCards();
 }
 async function svRestyle(){
@@ -5347,14 +5386,77 @@ async function svRestyle(){
   const r = await svJob('restyle', p, 2, 'Переписываю ролик ' + s.n + ' в другом формате…');
   if(r.ok){ svSay(2, 'Формат изменён.'); await svLoad(); }
 }
-function svGo(i){ svCur = i; svTextChanged = false; svShow(); }
-function svTextDirty(){ svTextChanged = true; }
+// Правка текста живёт В САМОМ ролике, а не только в поле ввода. Раньше её
+// негде было хранить: переключил вкладку — svShow() перерисовывал поле из
+// сохранённого текста, и всё набранное пропадало без предупреждения.
+// Плюс копия в localStorage: закрытая вкладка браузера тоже не должна стоить
+// получаса работы.
+// Ключ черновика строится по связке, ДЛЯ КОТОРОЙ загружены тексты, а не по
+// тому, что сейчас выбрано в выпадашках. Иначе так: сменил оффер — svLoad по
+// дороге забирает набранное и пишет (или стирает) его под ключом уже НОВОГО
+// оффера. Черновик от старого при этом пропадает.
+let svLoadedFor = '';
+function svDraftKey(n){
+  const p = svParams();
+  return 've_draft_' + (svLoadedFor || (p.offer + '_' + p.geo)) + '_' + n;
+}
+function svRemember(s, text){
+  if(!s) return;
+  s._edited = text;
+  s._dirty = text.trim() !== (s.ru || '').trim();
+  try {
+    if(s._dirty) localStorage.setItem(svDraftKey(s.n), text);
+    else { localStorage.removeItem(svDraftKey(s.n)); s._edited = undefined; }
+  } catch(e){}
+}
+// Забрать набранное перед тем, как уйти со вкладки или перерисовать список.
+function svCapture(){
+  const el = document.getElementById('sv-text');
+  if(el && svScripts[svCur]) svRemember(svScripts[svCur], el.value);
+}
+function svDirtyNote(){
+  const dirty = svScripts.filter(s => s._dirty);
+  svTextChanged = dirty.length > 0;
+  const note = document.getElementById('sv-dirty');
+  const save = document.getElementById('sv-b2s');
+  const drop = document.getElementById('sv-b2d');
+  const cur = svScripts[svCur];
+  if(drop) drop.style.display = (cur && cur._dirty) ? '' : 'none';
+  if(save) save.textContent = dirty.length > 1
+    ? ('Сохранить правки: ' + dirty.length) : 'Сохранить правку';
+  if(!note) return;
+  note.innerHTML = dirty.length
+    ? ('<span style="color:#d97706;">● не сохранено: ролик '
+       + dirty.map(s=>s.n).join(', ') + '</span> — правка живёт только в браузере, '
+       + 'в озвучку она попадёт после «Сохранить правку»')
+    : '';
+}
+function svGo(i){ svCapture(); svCur = i; svShow(); }
+function svTextDirty(){ svCapture(); svTabs(); svDirtyNote(); }
+function svDropDraft(){
+  const s = svScripts[svCur]; if(!s || !s._dirty) return;
+  if(!confirm('Вернуть ролик ' + s.n + ' к сохранённому тексту? Твоя правка пропадёт.')) return;
+  s._edited = undefined; s._dirty = false;
+  try { localStorage.removeItem(svDraftKey(s.n)); } catch(e){}
+  svShow();
+}
 async function svSaveText(){
-  const s = svScripts[svCur]; if(!s) return;
-  const txt = document.getElementById('sv-text').value.trim();
-  const p = svParams(); p.script = s.n; p.ru = txt;
-  const r = await svJob('settext', p, 2, 'Сохраняю правку и перевожу…');
-  if(r.ok){ svSay(2, 'Правка сохранена.'); svTextChanged = false; await svLoad(); }
+  svCapture();
+  // Сохраняем ВСЕ незаписанные правки, а не только открытую вкладку: правил-то
+  // он несколько роликов подряд, а помнить, какие остались, — не его работа.
+  const list = svScripts.filter(s => s._dirty);
+  if(!list.length){ svSay(2, 'Тут нечего сохранять — текст и так сохранён.'); return; }
+  for(let i = 0; i < list.length; i++){
+    const s = list[i];
+    const p = svParams(); p.script = s.n; p.ru = (s._edited || '').trim();
+    const r = await svJob('settext', p, 2,
+      'Сохраняю правку ролика ' + s.n + (list.length > 1 ? (' (' + (i+1) + ' из ' + list.length + ')') : '') + '…');
+    if(!r.ok) return;
+    try { localStorage.removeItem(svDraftKey(s.n)); } catch(e){}
+    s._edited = undefined; s._dirty = false;
+  }
+  svSay(2, list.length > 1 ? ('Сохранено правок: ' + list.length) : 'Правка сохранена.');
+  await svLoad();
 }
 async function svEdit(){
   const s = svScripts[svCur]; if(!s) return;
@@ -5365,7 +5467,13 @@ async function svEdit(){
   if(r.ok){ document.getElementById('sv-ins').value=''; await svLoad(); svSay(2, 'Готово.'); }
 }
 function svApprove(){
-  if(svTextChanged){ svSay(2, 'Сначала сохрани правку или отмени её.', true); return; }
+  svCapture();
+  const dirty = svScripts.filter(s => s._dirty);
+  if(dirty.length){
+    svSay(2, 'Не сохранены правки: ролик ' + dirty.map(s=>s.n).join(', ')
+             + '. Жми «Сохранить правку» — иначе в озвучку уйдёт старый текст.', true);
+    svDirtyNote(); return;
+  }
   svOpen(3);
   svHeroCards();
   svFiles();      // покажет уже собранные ролики и блок монтажа
