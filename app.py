@@ -3,8 +3,8 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.50"
-import io, hashlib
+VERSION = "5.53"
+import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
@@ -167,8 +167,12 @@ def vf_handle(action, p):
     if not vf_available():
         return {'error': 'Фабрика не найдена: %s' % VF_DIR}
     import glob as _glob
-    offer, geo = p.get('offer', 'prostate'), p.get('geo', 'dz')
-    dur = int(p.get('dur', 25))
+    # Именно `or`, а не .get(..., умолчание): страница успевает дёрнуть панель
+    # до того, как списки офферов и стран заполнились, и тогда приходит пустая
+    # строка. С .get() она проходила дальше как есть — и в списке героев
+    # оказывались все 140 человек со всех стран разом.
+    offer, geo = (p.get('offer') or 'prostate'), (p.get('geo') or 'dz')
+    dur = int(p.get('dur') or 25)
     sub = '%s_%s%s' % (offer, geo, '' if dur <= 40 else '_%ds' % dur)
     sdir = os.path.join(VF_DIR, 'scripts', sub)
 
@@ -283,6 +287,69 @@ def vf_handle(action, p):
             args.append('--preview')
         return vf_run_bg(args, 'Фоновый звук')
 
+    if action == 'teardown':
+        # Разбор ЧУЖОЙ проклы: ссылка, сохранённый html или архив из спая.
+        src = (p.get('url') or '').strip()
+        data = p.get('file') or ''
+        if data.startswith('data:'):
+            import base64 as _b64
+            head, _, b64 = data.partition(',')
+            ext = '.zip' if 'zip' in head else '.html'
+            d = os.path.join(VF_DIR, 'out', '_spy')
+            os.makedirs(d, exist_ok=True)
+            src = os.path.join(d, 'lander%s' % ext)
+            with open(src, 'wb') as fh:
+                fh.write(_b64.b64decode(b64))
+        if not src:
+            return {'error': 'Дай ссылку на проклу или кинь её файлом'}
+        args = ['teardown.py', src, '--save']
+        if not p.get('text', True):
+            args.append('--notext')
+        return vf_run_bg(args, 'Разбираю чужую проклу')
+
+    if action == 'teardown_read':
+        f = os.path.join(VF_DIR, 'out', 'teardown_last.json')
+        if not os.path.exists(f):
+            return {'error': 'Разбора ещё нет'}
+        return read_json(f) or {'error': 'Разбор не прочитался'}
+
+    if action == 'checktext':
+        # Что реально звучит в готовом ролике. Слушает Whisper локально, денег
+        # не стоит. Нужно, чтобы правка текста проверялась фактом, а не на слово.
+        rel = (p.get('file') or '').replace('..', '')
+        if not rel:
+            return {'error': 'Не сказано, какой ролик проверять'}
+        r = vf_run(['check_text.py', rel, '--json'], timeout=900)
+        try:
+            return json.loads((r['out'] or '').strip().splitlines()[-1])
+        except Exception:
+            return {'error': ((r['err'] or '') or (r['out'] or ''))[-300:] or 'проверка не прошла'}
+
+    if action == 'mix_list':
+        # Что лежит в папке Павла «Звуки и хвосты»: дорожки и хвосты.
+        r = vf_run(['-c', 'import json,mix;print(json.dumps(mix.catalog(),ensure_ascii=False))'])
+        try:
+            return {'ok': True, **json.loads((r['out'] or '').strip().splitlines()[-1])}
+        except Exception:
+            return {'ok': True, 'dir': '', 'tails': [], 'sounds': [],
+                    'note': ((r['err'] or '') or (r['out'] or ''))[-300:]}
+
+    if action == 'mix':
+        # Монтаж целиком в панели: фоновые дорожки + хвост, без CapCut.
+        args = ['mix.py', '--batch', offer, geo,
+                '--tail=%s' % int(p.get('tail', 90)),
+                '--quiet=%s' % float(p.get('quiet', 20)),
+                '--loud=%s' % float(p.get('loud', 2))]
+        if p.get('sounds'):
+            # Имена дорожек русские и с пробелами, поэтому разделитель — «|»:
+            # запятая в имени файла разнесла бы одно имя на два.
+            args.append('--sounds=%s' % '|'.join(p['sounds']))
+        if p.get('tailfile'):
+            args.append('--tailfile=%s' % p['tailfile'])
+        if p.get('preview'):
+            args.append('--preview')
+        return vf_run_bg(args, 'Монтирую звук и хвост')
+
     if action == 'chest':
         args = ['chest_gen.py', offer, geo, str(p.get('script')), p.get('persona', '')]
         img = p.get('product_img') or ''
@@ -302,18 +369,44 @@ def vf_handle(action, p):
                          'Делаю сундук (+ русская версия)')
 
     if action == 'heroes':
-        # Кто подходит под этот оффер и это гео — считает personas.fit() в фабрике.
+        # ВСЕ герои этого гео, подходящие под оффер — первыми. Раньше показывался
+        # только жёсткий отбор по полу и возрасту: на «потенция Германия» выходило
+        # два человека, и выбора у Павла не было. Теперь видно и мужчин, и женщин,
+        # а подсказка «подходит» осталась.
         try:
             import subprocess as _sp
             r = _sp.run([sys.executable, '-c',
-                         'import json,personas as p;ks=p.fit(%r,%r);'
-                         'print(json.dumps([{"key":k,"name":p.PERSONAS[k].get("name",""),'
-                         '"ru":p.PERSONAS[k].get("ru",k)} for k in ks],ensure_ascii=False))'
+                         'import json,personas as p;'
+                         'print(json.dumps(p.all_for(%r,%r),ensure_ascii=False))'
                          % (offer, geo)],
                         cwd=VF_DIR, capture_output=True, text=True, timeout=30)
-            return {'ok': True, 'heroes': json.loads(r.stdout.strip() or '[]')}
+            heroes = json.loads(r.stdout.strip() or '[]')
         except Exception as e:
             return {'ok': True, 'heroes': [], 'note': str(e)[:120]}
+        # Есть ли уже лицо. Без этого карточка молча показывалась пустой, и Павел
+        # не понимал, кого выбирает.
+        for h in heroes:
+            h['face'] = os.path.exists(os.path.join(VF_DIR, 'faces',
+                                                    'persona_%s.png' % h['key']))
+        return {'ok': True, 'heroes': heroes,
+                'noface': sum(1 for h in heroes if not h['face'])}
+
+    if action == 'face_gen':
+        keys = [k for k in (p.get('keys') or ([p['key']] if p.get('key') else [])) if k]
+        if not keys:
+            return {'error': 'Не сказано, кому делать лицо'}
+        return vf_run_bg(['persona_new.py', '--face'] + keys,
+                         'Делаю лицо: %s' % ', '.join(keys[:3]))
+
+    if action == 'faces_geo':
+        return vf_run_bg(['persona_new.py', '--faces-geo', geo],
+                         'Делаю недостающие лица для гео')
+
+    if action == 'persona_add':
+        # Новый герой словами: имя, гео, пол, возраст и пара слов о внешности.
+        return vf_run_bg(['persona_new.py', p.get('name', ''), geo,
+                          p.get('sex', 'm'), str(p.get('age', 45)),
+                          p.get('desc', '')], 'Добавляю героя')
 
     if action == 'card':
         # Разбор карточки оффера по скриншоту: Павел кидает картинку товара,
@@ -645,6 +738,19 @@ def vf_handle(action, p):
             res[key] = [os.path.relpath(f, VF_DIR) for f in files
                         if os.path.basename(f).startswith(pref)
                         or ('/prela/' in f and os.path.basename(os.path.dirname(f)).startswith(pref))]
+        # Длина и вес каждого ролика: Павел должен видеть, смонтирован ролик
+        # с хвостом или ещё голый, не открывая файл.
+        res['meta'] = {}
+        for rel in res.get('videos', []):
+            f = os.path.join(VF_DIR, rel)
+            try:
+                out = subprocess.run(['ffprobe', '-v', 'error', '-show_entries',
+                                      'format=duration', '-of', 'csv=p=0', f],
+                                     capture_output=True, text=True, timeout=20).stdout
+                res['meta'][rel] = {'sec': round(float(out.strip() or 0)),
+                                    'mb': round(os.path.getsize(f) / 1048576, 1)}
+            except Exception:
+                res['meta'][rel] = {'sec': 0, 'mb': round(os.path.getsize(f) / 1048576, 1)}
         return {'ok': True, **res}
 
     return {'error': 'неизвестное действие: %s' % action}
@@ -1444,6 +1550,26 @@ def add_channel_auth(job_id, user='pavel', is_local=True, proxy='', login_hint='
         ]
         UPLOAD_JOBS[job_id]['status'] = 'running'
 
+        # Прокси этого канала прописываем в окружение ДО первого сетевого вызова и
+        # чистим прошлый. Иначе обмен кода на токен уходил через прокси предыдущего
+        # канала (или через локальный порт Octo, который уже закрыт) — и байер видел
+        # «Connection refused» с просьбой переавторизоваться, хотя его новый прокси живой.
+        proxy = normalize_proxy(proxy)
+        for _v in ('HTTPS_PROXY', 'HTTP_PROXY', 'ALL_PROXY',
+                   'https_proxy', 'http_proxy', 'all_proxy'):
+            os.environ.pop(_v, None)
+        if proxy:
+            os.environ['HTTPS_PROXY'] = proxy
+            os.environ['HTTP_PROXY'] = proxy
+            try:
+                from urllib.parse import urlparse as _up
+                _pp = _up(proxy)
+                UPLOAD_JOBS[job_id]['log'].append('🔒 Идём через прокси: %s:%s' % (_pp.hostname, _pp.port))
+            except Exception:
+                pass
+        else:
+            UPLOAD_JOBS[job_id]['log'].append('🌐 Без прокси — напрямую с этого компьютера')
+
         # При ПЕРЕавторизации берём проект, к которому канал уже привязан.
         # Иначе панель уходила в проект с наименьшим расходом за день: аккаунт
         # не в его Test users -> Google блокирует вход, и вдобавок сгорает слот
@@ -1498,7 +1624,22 @@ def add_channel_auth(job_id, user='pavel', is_local=True, proxy='', login_hint='
         creds = _finish_channel_auth(job_id, creds, user, proxy, secret_file, login_hint)
     except Exception as e:
         UPLOAD_JOBS[job_id]['status'] = 'error'
-        UPLOAD_JOBS[job_id]['log'].append(f'❌ Ошибка: {str(e)}')
+        msg = str(e)
+        # «Connection refused» через прокси — это не про авторизацию, а про то, что
+        # до Google не дошли. Пишем прямо, иначе байер идёт переавторизовывать канал.
+        if 'Connection refused' in msg or 'Max retries exceeded' in msg:
+            where = ''
+            try:
+                from urllib.parse import urlparse as _up
+                _pp = _up(os.environ.get('HTTPS_PROXY', ''))
+                where = ' (%s:%s)' % (_pp.hostname, _pp.port) if _pp.hostname else ' (без прокси)'
+            except Exception:
+                pass
+            UPLOAD_JOBS[job_id]['log'].append(
+                '❌ Не получилось связаться с Google через прокси%s. Канал и авторизация тут '
+                'ни при чём — прокси не отвечает с этого компьютера. Проверь, что вписан '
+                'ТОТ прокси, что стоит на аккаунте, и что он SOCKS5.' % where)
+        UPLOAD_JOBS[job_id]['log'].append(f'❌ Ошибка: {msg}')
 
 def _finish_channel_auth(job_id, creds, user, proxy='', secret_file=None, login_hint=''):
     from googleapiclient.discovery import build
@@ -3091,6 +3232,13 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
       .sv-hero img{width:86px;height:86px;object-fit:cover;border-radius:9px;display:block;background:var(--border2);}
       .sv-hero b{font-size:12px;display:block;margin-top:5px;}
       .sv-hero span{font-size:10.5px;color:var(--text3);line-height:1.25;display:block;}
+      .sv-hero.noface{border-style:dashed;}
+      .sv-noface{width:86px;height:86px;border-radius:9px;background:var(--border2);display:flex;
+            flex-direction:column;align-items:center;justify-content:center;font-size:10.5px;
+            color:var(--text3);text-align:center;line-height:1.4;}
+      .sv-noface u{color:var(--accent1);}
+      .sv-rec{display:inline-block;margin-top:4px;font-style:normal;font-size:9.5px;font-weight:700;
+            color:#16a34a;background:rgba(34,197,94,.13);border-radius:5px;padding:1px 5px;}
       .sv-done{display:flex;align-items:center;gap:10px;background:rgba(34,197,94,.1);color:#16a34a;
             border-radius:11px;padding:11px 14px;font-size:13.5px;font-weight:700;margin-top:10px;}
       .sv-err{background:rgba(255,101,132,.12);color:#e11d48;border-radius:11px;padding:11px 14px;
@@ -3171,6 +3319,38 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
           <div class="sv-sub" id="sv-s3sub"></div></div>
         <div class="sv-tabs" id="sv-htabs"></div>
         <div class="sv-heroes" id="sv-heroes"></div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:2px 0 4px;">
+          <button class="sv-btn ghost" style="padding:5px 12px;font-size:12px;"
+                  id="sv-facesall" onclick="svFacesGeo()">Сделать недостающие лица</button>
+          <button class="sv-btn ghost" style="padding:5px 12px;font-size:12px;"
+                  onclick="svNewHeroBox()">+ Свой герой</button>
+          <span id="sv-face-note" style="font-size:12px;color:var(--text3);"></span>
+        </div>
+        <!-- Свой герой: описание словами по-русски. Раньше добавить героя можно
+             было только правкой personas.py руками. -->
+        <div id="sv-newhero" style="display:none;border:1px solid var(--border);border-radius:12px;
+             padding:12px 14px;background:var(--surface2);margin:8px 0;">
+          <div class="sv-row">
+            <div class="sv-fld"><label>Имя</label>
+              <input id="sv-nh-name" placeholder="Урсула" style="width:120px;padding:8px 10px;
+                border:1.5px solid var(--border);border-radius:9px;background:var(--surface);
+                color:var(--text);font-family:inherit;"></div>
+            <div class="sv-fld"><label>Пол</label>
+              <select id="sv-nh-sex"><option value="m">мужчина</option>
+                <option value="f">женщина</option></select></div>
+            <div class="sv-fld"><label>Возраст</label>
+              <input id="sv-nh-age" type="number" value="45" min="20" max="85" style="width:74px;"></div>
+            <div class="sv-fld" style="flex:1;min-width:240px;"><label>Как выглядит</label>
+              <input id="sv-nh-desc" placeholder="усталая, волосы собраны, простая кофта, кухня"
+                style="width:100%;padding:8px 10px;border:1.5px solid var(--border);border-radius:9px;
+                background:var(--surface);color:var(--text);font-family:inherit;"></div>
+            <button class="sv-btn" onclick="svAddHero()">Добавить и сделать лицо</button>
+          </div>
+          <div class="sv-hint">Страна берётся из шага 1. Опишешь по-русски — переведу
+            сам и сразу сгенерирую лицо. Герой останется в панели навсегда.</div>
+        </div>
+        <div class="sv-bar" id="sv-bar8"><i></i></div>
+        <div class="sv-log" id="sv-log8"></div>
         <div class="sv-hint">Один герой может вести несколько роликов — выбирай для каждого свой или один и тот же. Прокла к ролику делается тем же героем.</div>
         <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
           <button class="sv-btn" id="sv-b3" onclick="svBuildAll()">Собрать ролики</button>
@@ -3186,29 +3366,52 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
         <div class="sv-log" id="sv-log3"></div>
         <div id="sv-videos"></div>
 
-        <div id="sv-bgbox" style="display:none;border-top:1px solid var(--border);
+        <!-- Звук и хвост. Раньше Павел собирал это руками в CapCut: скачивал
+             ролик, накидывал дорожки, снова скачивал. Теперь всё здесь.
+             Дорожки берутся из его папки «Звуки и хвосты», громкость считается
+             от речи героя: под голосом еле слышно, на хвосте — на полную. -->
+        <div id="sv-mixbox" style="display:none;border-top:1px solid var(--border);
              margin-top:16px;padding-top:14px;">
-          <div style="font-weight:800;font-size:14px;margin-bottom:10px;">Фоновый звук</div>
-          <div class="sv-row">
-            <div class="sv-fld"><label>Голосов на фоне</label>
-              <select id="sv-bgv"><option value="2" selected>два</option>
-                <option value="1">один</option><option value="0">без голосов</option></select></div>
-            <div class="sv-fld"><label>Шум</label>
-              <select id="sv-bgn"><option value="city" selected>город</option>
-                <option value="sea">море</option><option value="rain">дождь</option>
-                <option value="none">без шума</option></select></div>
-            <div class="sv-fld" style="flex:1;min-width:220px;">
-              <label>Громкость фона: <b id="sv-bgvol-l">6%</b></label>
-              <input id="sv-bgvol" type="range" min="1" max="20" value="6"
-                     oninput="document.getElementById('sv-bgvol-l').textContent=this.value+'%'"
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+            <div style="font-weight:800;font-size:14px;">🎚 Звук и хвост</div>
+            <span id="sv-mix-cat" style="font-size:12px;color:var(--text3);"></span>
+            <button class="sv-btn ghost" style="padding:4px 10px;font-size:12px;margin-left:auto;"
+                    onclick="svMixLoad()">Обновить список</button>
+          </div>
+          <div id="sv-mix-sounds" style="display:flex;flex-wrap:wrap;gap:6px 16px;margin:10px 0 4px;
+               font-size:12px;"></div>
+          <div class="sv-row" style="margin-top:8px;">
+            <div class="sv-fld"><label>Хвост в конце</label>
+              <select id="sv-mix-tail">
+                <option value="0">без хвоста</option>
+                <option value="30">30 секунд</option>
+                <option value="60">1 минута</option>
+                <option value="90" selected>1.5 минуты</option>
+                <option value="120">2 минуты</option>
+                <option value="180">3 минуты</option>
+              </select></div>
+            <div class="sv-fld"><label>Какой хвост</label>
+              <select id="sv-mix-tf"><option value="">свой на каждый ролик</option></select></div>
+            <div class="sv-fld" style="flex:1;min-width:230px;">
+              <label>Пока говорит герой: <b id="sv-mix-ql">−20 dB, еле слышно</b></label>
+              <input id="sv-mix-q" type="range" min="12" max="30" value="20" oninput="svMixLbl()"
+                     style="width:100%;direction:rtl;"></div>
+            <div class="sv-fld" style="flex:1;min-width:200px;">
+              <label>На хвосте: <b id="sv-mix-ll">+2 dB, громко</b></label>
+              <input id="sv-mix-l" type="range" min="-8" max="6" value="2" oninput="svMixLbl()"
                      style="width:100%;"></div>
-            <button class="sv-btn ghost" onclick="svBgPreview()">Послушать превью</button>
-            <button class="sv-btn" onclick="svBgApply()">Наложить на все ролики</button>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;">
+            <button class="sv-btn ghost" onclick="svMixPreview()">Смонтировать один — послушать</button>
+            <button class="sv-btn" onclick="svMixApply()">Смонтировать все ролики</button>
           </div>
           <div class="sv-bar" id="sv-bar6"><i></i></div>
           <div class="sv-log" id="sv-log6"></div>
-          <div id="sv-bgprev"></div>
-          <div class="sv-hint">Дорожки берутся из банка и у каждого ролика своя пара, свой сдвиг и своя громкость — одинакового фона на двух роликах не будет. Стоит ноль: банк уже собран.</div>
+          <div id="sv-mixprev"></div>
+          <div class="sv-hint">Громкость дорожек считается от речи героя, поэтому
+            «дождь» больше не орёт громче остальных. У каждого ролика свой набор
+            сдвигов и своя громкость — двух одинаковых дорожек не будет.
+            Ролик без звука остаётся в out/batch/nobg, пересобрать можно сколько угодно раз.</div>
         </div>
       </div>
 
@@ -3332,6 +3535,30 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
         <div id="sv-ready" style="display:none;margin-top:14px;">
           <div class="sv-hint">Готовые проклы и сундуки заливает тех — панель поставит ему таску с материалами связки.</div>
           <button class="sv-btn" style="margin-top:10px;" onclick="svTask()">Поставить таску теху</button>
+        </div>
+
+        <!-- Разбор чужой проклы. Раньше Павел кидал её мне в чат и получал
+             разбор там; теперь то же самое живёт в панели и остаётся под рукой. -->
+        <div style="margin-top:16px;border-top:1px solid var(--border);padding-top:14px;">
+          <div style="font-weight:800;font-size:14px;margin-bottom:8px;">🔍 Разобрать чужую проклу</div>
+          <div class="sv-row">
+            <input id="sv-td-url" placeholder="ссылка на чужую проклу"
+                   style="flex:1;min-width:240px;padding:9px 11px;border:1.5px solid var(--border);
+                   border-radius:10px;background:var(--surface2);color:var(--text);font-family:inherit;">
+            <button class="sv-btn ghost" onclick="document.getElementById('sv-td-file').click()">…или файлом</button>
+            <label style="font-size:12px;color:var(--text3);display:flex;align-items:center;gap:6px;">
+              <input type="checkbox" id="sv-td-text" checked> с полным переводом
+            </label>
+            <button class="sv-btn" onclick="svTeardown()">Разобрать</button>
+          </div>
+          <input type="file" id="sv-td-file" accept=".zip,.html,.htm" style="display:none;"
+                 onchange="svTeardownFile(this.files[0])">
+          <div class="sv-hint">Ссылка, сохранённая страница или архив из спая. Отдам
+            разбор — жанр, на что давит, из чего собрана, что брать и чего брать нельзя —
+            и следом весь её текст по-русски.</div>
+          <div class="sv-bar" id="sv-bar9"><i></i></div>
+          <div class="sv-log" id="sv-log9"></div>
+          <div id="sv-td-res"></div>
         </div>
       </div>
 
@@ -5073,8 +5300,20 @@ async function svLoad(){
 function svTabs(){
   document.getElementById('sv-tabs').innerHTML = svScripts.map((x,i)=>
     '<div class="sv-tab '+(i===svCur?'on':'')+'" onclick="svGo('+i+')">Ролик '+x.n+'</div>').join('');
+  // Галочка = «этот ролик собирать». Кликом по названию переключаем вкладку,
+  // кликом по галочке — отметку, чтобы не собирать всю папку разом.
   document.getElementById('sv-htabs').innerHTML = svScripts.map((x,i)=>
-    '<div class="sv-tab '+(i===svCur?'on':'')+(x._hero?' ok':'')+'" onclick="svGo('+i+')">Ролик '+x.n+'</div>').join('');
+    '<div class="sv-tab '+(i===svCur?'on':'')+(x._hero?' ok':'')+'">'
+    + '<input type="checkbox" '+(x._pick?'checked':'')+' onclick="svPick(event,'+i+')" '
+    + 'style="margin-right:6px;accent-color:var(--accent1);cursor:pointer;">'
+    + '<span onclick="svGo('+i+')" style="cursor:pointer;">Ролик '+x.n+'</span></div>').join('');
+}
+function svPick(e, i){
+  e.stopPropagation();
+  svScripts[i]._pick = e.target.checked;
+  const n = svScripts.filter(s=>s._pick).length;
+  const b = document.getElementById('sv-b3');
+  if(b) b.textContent = n ? ('Собрать выбранные: ' + n) : 'Собрать ролики';
 }
 const SV_FORMATS = [['direct','Наезд на зрителя'],['mirror','Зеркало — его день по минутам'],
   ['wife','Взгляд жены'],['ultimatum','Два пути'],['burn','Сжигание альтернатив'],
@@ -5124,6 +5363,7 @@ function svApprove(){
   if(svTextChanged){ svSay(2, 'Сначала сохрани правку или отмени её.', true); return; }
   svOpen(3);
   svHeroCards();
+  svFiles();      // покажет уже собранные ролики и блок монтажа
 }
 
 // ── ШАГ 3 ────────────────────────────────────────────────
@@ -5131,13 +5371,61 @@ async function svHeroCards(){
   const r = await svApi('heroes', svParams());
   svHeroes = r.heroes || [];
   const s = svScripts[svCur];
-  if(s && !s._hero && svHeroes.length) s._hero = svHeroes[svCur % svHeroes.length].key;
+  // По умолчанию берём подходящего по полу и возрасту, а не первого попавшегося.
+  if(s && !s._hero && svHeroes.length){
+    const good = svHeroes.filter(h=>h.rec);
+    const pool = good.length ? good : svHeroes;
+    s._hero = pool[svCur % pool.length].key;
+  }
   document.getElementById('sv-s3sub').textContent = s ? ('настраиваем ролик ' + s.n) : '';
   document.getElementById('sv-heroes').innerHTML = svHeroes.map(h=>
-    '<div class="sv-hero '+(s && s._hero===h.key?'on':'')+'" onclick="svPickHero(\''+h.key+'\')">'
-    + '<img src="/vf_face?key='+h.key+'" onerror="this.style.opacity=.25">'
-    + '<b>'+(h.name||'')+'</b><span>'+(h.ru||'')+'</span></div>').join('');
+    '<div class="sv-hero '+(s && s._hero===h.key?'on':'')+(h.face?'':' noface')+'" '
+    + 'onclick="svPickHero(\''+h.key+'\')">'
+    + (h.face
+        ? '<img src="/vf_face?key='+h.key+'&v='+(window.svFaceV||0)+'">'
+        : '<div class="sv-noface" onclick="event.stopPropagation();svFaceGen(\''+h.key+'\')">'
+          + 'нет лица<br><u>сделать</u></div>')
+    + '<b>'+(h.name||'')+(h.sex==='f'?' ♀':' ♂')+'</b>'
+    + '<span>'+(h.ru||'')+'</span>'
+    + (h.rec ? '<i class="sv-rec">под оффер</i>' : '')
+    + '</div>').join('');
+  const note = document.getElementById('sv-face-note');
+  if(note) note.textContent = r.noface
+    ? ('без лица: ' + r.noface + ' из ' + svHeroes.length + ' · одно лицо ≈ $0.04')
+    : ('лица есть у всех ' + svHeroes.length);
   svTabs();
+}
+// Лицо конкретному герою — по клику на пустой карточке.
+async function svFaceGen(key){
+  const r = await svJob('face_gen', {key: key}, 8, 'Делаю лицо…');
+  if(r.ok){ window.svFaceV = Date.now(); await svHeroCards(); svSay(8, 'Лицо готово.'); }
+}
+async function svFacesGeo(){
+  const miss = svHeroes.filter(h=>!h.face).length;
+  if(!miss){ svSay(8, 'Лица уже есть у всех героев этой страны.'); return; }
+  if(!confirm('Сделать ' + miss + ' лиц? Выйдет примерно $' + (miss*0.04).toFixed(2) + '.')) return;
+  const r = await svJob('faces_geo', svParams(), 8, 'Делаю недостающие лица…');
+  if(r.ok){ window.svFaceV = Date.now(); await svHeroCards(); svSay(8, 'Готово.'); }
+}
+function svNewHeroBox(){
+  const b = document.getElementById('sv-newhero');
+  b.style.display = b.style.display === 'none' ? 'block' : 'none';
+}
+async function svAddHero(){
+  const p = svParams();
+  p.name = document.getElementById('sv-nh-name').value.trim();
+  p.sex  = document.getElementById('sv-nh-sex').value;
+  p.age  = parseInt(document.getElementById('sv-nh-age').value) || 45;
+  p.desc = document.getElementById('sv-nh-desc').value.trim();
+  if(!p.name){ svSay(8, 'Как его зовут?', true); return; }
+  const r = await svJob('persona_add', p, 8, 'Добавляю героя и делаю лицо…');
+  if(r.ok){
+    window.svFaceV = Date.now();
+    document.getElementById('sv-nh-name').value = '';
+    document.getElementById('sv-nh-desc').value = '';
+    await svHeroCards();
+    svSay(8, 'Герой добавлен — он теперь в списке.');
+  }
 }
 function svPickHero(key){
   const s = svScripts[svCur]; if(!s) return;
@@ -5157,51 +5445,186 @@ function svSkipBuild(){
   svOpen(4);
 }
 async function svBuildAll(){
-  for(let i=0;i<svScripts.length;i++){
-    svCur = i; svShow();
-    const s = svScripts[i];
+  // Собираем только отмеченные галочками сценарии. Раньше кнопка молча гнала все
+  // подряд: правишь текст одного ролика — а озвучка тратится на всю папку.
+  const picked = svScripts.filter(s=>s._pick);
+  const list = picked.length ? picked : svScripts;
+  if(!picked.length && svScripts.length > 1){
+    if(!confirm('Не отмечен ни один ролик. Собрать все ' + svScripts.length + '? Озвучка тратится на каждый.')) return;
+  }
+  for(let i=0;i<list.length;i++){
+    const s = list[i];
+    svCur = svScripts.indexOf(s); svShow();
     const p = svParams(); p.script = s.n; p.persona = s._hero;
-    const r = await svJob('build', p, 3, 'Собираю ролик ' + s.n + ' из ' + svScripts.length + '…');
+    const r = await svJob('build', p, 3, 'Собираю ролик ' + s.n + ' (' + (i+1) + ' из ' + list.length + ')…');
     if(!r.ok) return;
     s._done = true;
   }
-  svSay(3, 'Все ролики собраны.');
+  svSay(3, list.length === 1 ? ('Ролик ' + list[0].n + ' собран.') : ('Собрано роликов: ' + list.length + '.'));
   await svFiles();
-  document.getElementById('sv-bgbox').style.display = 'block';
+  document.getElementById('sv-mixbox').style.display = 'block';
+  svMixLoad();
 }
 async function svFiles(){
   const r = await svApi('files', svParams());
   const box = document.getElementById('sv-videos');
-  const vids = (r.videos||[]).slice(-8);
+  // _head — промежуточный липсинк, не готовый ролик: в счётчик его брать нельзя,
+  // иначе «готово 8», когда сделано 4. Показываем каждый ролик плеером с перемоткой.
+  const vids = (r.videos||[]).filter(f=>!/_head\.mp4$/i.test(f)).slice(-12);
+  // Ролики этой связки уже могли быть собраны в прошлый заход — тогда блок
+  // монтажа должен быть на месте сразу, а не только после кнопки «Собрать».
+  if(vids.length){
+    const mb = document.getElementById('sv-mixbox');
+    if(mb && mb.style.display === 'none'){ mb.style.display = 'block'; svMixLoad(); }
+  }
+  const meta = r.meta || {};
+  const mmss = s => Math.floor(s/60) + ':' + String(s%60).padStart(2,'0');
   box.innerHTML = vids.length ? ('<div class="sv-done">Готово роликов: ' + vids.length + '</div>'
-    + vids.map(f=>'<div style="display:flex;align-items:center;gap:10px;margin-top:8px;font-size:13px;">'
-      + '<span style="flex:1;color:var(--text3);">'+f.split('/').pop()+'</span>'
-      + '<a class="sv-btn ghost" style="text-decoration:none;" href="/vf_file?p='+encodeURIComponent(f)+'" download>Скачать</a></div>').join('')) : '';
+    + vids.map(f=>{
+        const src = '/vf_file?p='+encodeURIComponent(f);
+        const m = meta[f] || {};
+        const info = (m.sec ? mmss(m.sec) : '') + (m.mb ? ' · ' + m.mb + ' МБ' : '');
+        return '<div style="margin-top:12px;padding:10px;background:var(--bg2);border-radius:10px;">'
+          + '<div style="display:flex;align-items:center;gap:10px;font-size:13px;margin-bottom:8px;flex-wrap:wrap;">'
+          + '<span style="flex:1;color:var(--text3);">'+f.split('/').pop()
+          + (info ? ' <b style="color:var(--text2);">'+info+'</b>' : '') + '</span>'
+          + '<button class="sv-btn ghost" style="padding:5px 12px;font-size:12px;" '
+          + 'onclick="svCheckText(\''+f+'\')">Проверить текст</button>'
+          + '<a class="sv-btn ghost" style="text-decoration:none;padding:5px 12px;font-size:12px;" '
+          + 'href="'+src+'&dl=1" download>Скачать</a></div>'
+          // preload=auto + Range на сервере: перемотка работает, слушать можно
+          // прямо здесь, скачивать ради проверки больше не надо.
+          + '<video controls preload="auto" playsinline style="width:100%;max-height:340px;'
+          + 'border-radius:8px;background:#000;" src="'+src+'"></video>'
+          + '<div class="sv-txtchk" id="chk-'+btoa(unescape(encodeURIComponent(f))).replace(/=/g,'')+'"></div>'
+          + '</div>';
+      }).join('')) : '';
+}
+// «Проверить текст» — вытаскивает речь из готового ролика и сверяет со сценарием.
+// Нужно, чтобы не гадать, доехала правка текста до озвучки или нет.
+async function svCheckText(f){
+  const id = 'chk-' + btoa(unescape(encodeURIComponent(f))).replace(/=/g,'');
+  const box = document.getElementById(id);
+  if(box) box.innerHTML = '<div class="sv-hint">Слушаю ролик и сверяю со сценарием…</div>';
+  const p = svParams(); p.file = f;
+  const r = await svApi('checktext', p);
+  if(!box) return;
+  if(r.error){ box.innerHTML = '<div class="sv-hint" style="color:#dc2626;">'+r.error+'</div>'; return; }
+  const good = r.match >= 90;
+  box.innerHTML = '<div style="margin-top:8px;font-size:12.5px;line-height:1.5;">'
+    + '<b style="color:'+(good?'#16a34a':'#dc2626')+';">'
+    + (good ? 'Совпадает со сценарием на ' : 'РАСХОЖДЕНИЕ. Совпадение всего ')
+    + r.match + '%</b>'
+    + (good ? ' — в ролике звучит именно тот текст, что в панели.'
+            : ' — в ролике звучит НЕ тот текст. Пересобери ролик.')
+    + '<div style="margin-top:6px;color:var(--text3);"><b>слышно:</b> '
+    + (r.heard||'').replace(/</g,'&lt;') + '</div></div>';
 }
 
-// Фоновый звук: сначала слушаем превью, потом накладываем на всю связку.
-function svBgParams(){
+// Звук и хвост: дорожки из папки Павла ложатся на ролик прямо здесь.
+let svMixCat = null;
+function svMixLbl(){
+  const q = parseInt(document.getElementById('sv-mix-q').value);
+  const l = parseInt(document.getElementById('sv-mix-l').value);
+  const qw = q >= 26 ? 'почти не слышно' : (q >= 20 ? 'еле слышно' : (q >= 16 ? 'заметно' : 'громковато'));
+  document.getElementById('sv-mix-ql').textContent = '−' + q + ' dB, ' + qw;
+  document.getElementById('sv-mix-ll').textContent =
+    (l >= 0 ? '+' : '') + l + ' dB, ' + (l >= 2 ? 'громко' : (l >= -2 ? 'вровень с голосом' : 'сдержанно'));
+}
+async function svMixLoad(){
+  const r = await svApi('mix_list', {});
+  svMixCat = r;
+  const cat = document.getElementById('sv-mix-cat');
+  if(!r.ok || !r.dir){
+    cat.textContent = 'Папку со звуками не нашёл — положи её на рабочий стол: «Звуки и хвосты»';
+    return;
+  }
+  cat.textContent = 'папка: ' + r.dir.split('/').pop()
+    + ' · дорожек ' + (r.sounds||[]).length + ' · хвостов ' + (r.tails||[]).length;
+  document.getElementById('sv-mix-sounds').innerHTML = (r.sounds||[]).map((x,i)=>
+    '<label style="display:flex;align-items:center;gap:5px;cursor:pointer;">'
+    + '<input type="checkbox" class="sv-mix-s" value="' + x.file.replace(/"/g,'&quot;') + '" checked> '
+    + x.file.replace(/\.[^.]+$/,'') + (x.kind==='rain' ? ' <span style="color:var(--text3);">(прижму сильнее)</span>' : '')
+    + '</label>').join('');
+  const tf = document.getElementById('sv-mix-tf');
+  tf.innerHTML = '<option value="">свой на каждый ролик</option>'
+    + (r.tails||[]).map(t=>'<option value="' + t.file.replace(/"/g,'&quot;') + '">'
+       + t.file.replace(/\.[^.]+$/,'') + '</option>').join('');
+  svMixLbl();
+}
+function svMixParams(){
   const p = svParams();
-  p.voices = parseInt(document.getElementById('sv-bgv').value);
-  p.noise  = document.getElementById('sv-bgn').value;
-  p.vol    = parseInt(document.getElementById('sv-bgvol').value) / 100;
+  p.sounds = Array.from(document.querySelectorAll('.sv-mix-s:checked')).map(x=>x.value);
+  p.tail   = parseInt(document.getElementById('sv-mix-tail').value);
+  p.tailfile = document.getElementById('sv-mix-tf').value;
+  p.quiet  = parseInt(document.getElementById('sv-mix-q').value);
+  p.loud   = parseInt(document.getElementById('sv-mix-l').value);
   return p;
 }
-async function svBgPreview(){
-  const p = svBgParams(); p.preview = true;
-  const r = await svJob('bg', p, 6, 'Делаю превью со звуком…');
+async function svMixPreview(){
+  const p = svMixParams(); p.preview = true;
+  const r = await svJob('mix', p, 6, 'Монтирую один ролик — послушать…');
   if(!r.ok) return;
-  const f = await svApi('files', svParams());
-  const v = (f.videos||[]).slice(-1)[0];
-  document.getElementById('sv-bgprev').innerHTML =
-    '<video controls playsinline style="width:100%;max-width:320px;margin-top:10px;border-radius:12px;" '
-    + 'src="/vf_file?p=' + encodeURIComponent('out/bg_preview.mp4') + '"></video>'
-    + '<div class="sv-hint">Слушай баланс: голос героя должен быть чистым, фон — на грани слышимости.</div>';
-  svSay(6, 'Превью готово — послушай и подвинь ползунок, если надо.');
+  document.getElementById('sv-mixprev').innerHTML =
+    '<video controls playsinline style="width:100%;max-width:340px;margin-top:10px;border-radius:12px;background:#000;" '
+    + 'src="/vf_file?p=' + encodeURIComponent('out/mix_preview.mp4') + '&t=' + Date.now() + '"></video>'
+    + '<div class="sv-hint">Проверь на слух: пока герой говорит — фон на грани, '
+    + 'пошёл хвост — дорожки выходят на полную.</div>';
+  svSay(6, 'Превью готово. Устраивает — жми «Смонтировать все ролики».');
 }
-async function svBgApply(){
-  const r = await svJob('bg', svBgParams(), 6, 'Накладываю фон на все ролики…');
-  if(r.ok){ svSay(6, 'Фон наложен на все ролики.'); await svFiles(); svOpen(4); }
+async function svMixApply(){
+  const r = await svJob('mix', svMixParams(), 6, 'Монтирую все ролики…');
+  if(r.ok){ svSay(6, 'Готово: ролики со звуком и хвостом, можно заливать.'); await svFiles(); }
+}
+
+
+// Разбор чужой проклы: ссылка или файл -> контекст + полный текст по-русски.
+let svTdFile = '';
+function svTeardownFile(f){
+  if(!f) return;
+  const r = new FileReader();
+  r.onload = () => { svTdFile = r.result; svSay(9, 'Файл принят: ' + f.name + '. Жми «Разобрать».'); };
+  r.readAsDataURL(f);
+}
+async function svTeardown(){
+  const p = svParams();
+  p.url  = document.getElementById('sv-td-url').value.trim();
+  p.file = svTdFile;
+  p.text = document.getElementById('sv-td-text').checked;
+  if(!p.url && !p.file){ svSay(9, 'Дай ссылку или кинь файл проклы.', true); return; }
+  const j = await svJob('teardown', p, 9, 'Читаю проклу и разбираю…');
+  if(!j.ok) return;
+  const r = await svApi('teardown_read', {});
+  const box = document.getElementById('sv-td-res');
+  if(r.error){ box.innerHTML = '<div class="sv-hint" style="color:#dc2626;">'+r.error+'</div>'; return; }
+  const f = r.facts || {};
+  const yes = Object.keys(f.has||{}).filter(k=>f.has[k]);
+  const esc = s => (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;');
+  box.innerHTML =
+    '<div style="margin-top:12px;padding:12px 14px;background:var(--surface2);border-radius:12px;font-size:12.5px;line-height:1.7;">'
+    + '<b>' + esc(f.title||'') + '</b><br>'
+    + 'объём: ' + (f.chars||0) + ' знаков · цены: ' + ((f.prices||[]).join(', ')||'—') + ' ' + esc(f.currency||'')
+    + ' · поля формы: ' + ((f.form_fields||[]).join(', ')||'—') + '<br>'
+    + '<span style="color:#16a34a;">есть:</span> ' + (yes.join(', ')||'—') + '<br>'
+    + '<span style="color:#dc2626;">нет:</span> ' + ((f.missing||[]).join(', ')||'—')
+    + '</div>'
+    + '<div style="margin-top:10px;"><b style="font-size:13px;">Разбор</b>'
+    + '<button class="sv-btn ghost" style="padding:3px 10px;font-size:11px;margin-left:8px;" '
+    + 'onclick="svCopyEl(\'sv-td-md\')">копировать</button></div>'
+    + '<div id="sv-td-md" class="tk-result-text" style="max-height:420px;">' + esc(r.teardown) + '</div>'
+    + (r.text_ru ? ('<div style="margin-top:10px;"><b style="font-size:13px;">Полный текст проклы по-русски</b>'
+        + '<button class="sv-btn ghost" style="padding:3px 10px;font-size:11px;margin-left:8px;" '
+        + 'onclick="svCopyEl(\'sv-td-ru\')">копировать</button></div>'
+        + '<div id="sv-td-ru" class="tk-result-text" style="max-height:420px;">' + esc(r.text_ru) + '</div>') : '')
+    + (r.text ? ('<div style="margin-top:10px;"><b style="font-size:13px;">Оригинал</b>'
+        + '<button class="sv-btn ghost" style="padding:3px 10px;font-size:11px;margin-left:8px;" '
+        + 'onclick="svCopyEl(\'sv-td-or\')">копировать</button></div>'
+        + '<div id="sv-td-or" class="tk-result-text" style="max-height:300px;">' + esc(r.text) + '</div>') : '');
+  svSay(9, 'Готово.');
+}
+function svCopyEl(id){
+  const el = document.getElementById(id); if(!el) return;
+  navigator.clipboard.writeText(el.textContent);
 }
 
 // ── ШАГ 4 ────────────────────────────────────────────────
@@ -7990,26 +8413,58 @@ class Handler(BaseHTTPRequestHandler):
             f = os.path.join(VF_DIR, rel)
             if not vf_available() or not os.path.exists(f):
                 self.send_response(404); self.end_headers(); return
-            data = open(f, 'rb').read()
-            self.send_response(200)
             # Через этот же эндпоинт уходят пакеты прокл — с типом video/mp4
             # браузер сохранял zip как .mp4 и тех получал «битый архив».
             ext = os.path.splitext(f)[1].lower()
-            self.send_header('Content-Type', {'.zip': 'application/zip',
-                                              '.mp4': 'video/mp4',
-                                              '.png': 'image/png',
-                                              '.jpg': 'image/jpeg',
-                                              '.jpeg': 'image/jpeg',
-                                              '.webp': 'image/webp'}.get(ext,
-                                              'application/octet-stream'))
-            # Картинки материалов показываются миниатюрами прямо в панели —
-            # с attachment браузер вместо показа предлагал их скачать.
-            if ext not in ('.png', '.jpg', '.jpeg', '.webp') \
-                    and 'preview' not in os.path.basename(f):
+            ctype = {'.zip': 'application/zip', '.mp4': 'video/mp4', '.mov': 'video/quicktime',
+                     '.mp3': 'audio/mpeg', '.wav': 'audio/wav',
+                     '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+                     '.webp': 'image/webp'}.get(ext, 'application/octet-stream')
+            size = os.path.getsize(f)
+            # Перемотка в плеере работает только через Range: без неё браузер
+            # тянет весь файл целиком и ползунок не двигается. Раньше ролик
+            # приходилось скачивать, чтобы просто послушать середину.
+            rng = self.headers.get('Range', '')
+            start, end = 0, size - 1
+            partial = False
+            m = re.match(r'bytes=(\d*)-(\d*)', rng or '')
+            if m and (m.group(1) or m.group(2)):
+                if m.group(1):
+                    start = int(m.group(1))
+                    if m.group(2):
+                        end = min(int(m.group(2)), size - 1)
+                else:                                   # bytes=-500 — хвост файла
+                    start = max(0, size - int(m.group(2)))
+                if start >= size:
+                    self.send_response(416)
+                    self.send_header('Content-Range', 'bytes */%d' % size)
+                    self.end_headers(); return
+                partial = True
+            self.send_response(206 if partial else 200)
+            self.send_header('Content-Type', ctype)
+            self.send_header('Accept-Ranges', 'bytes')
+            if partial:
+                self.send_header('Content-Range', 'bytes %d-%d/%d' % (start, end, size))
+            # Скачивание — только по явному запросу (&dl=1). Иначе браузер
+            # предлагал сохранить файл вместо того, чтобы показать его плеером.
+            if (qs.get('dl') or [''])[0] == '1':
                 self.send_header('Content-Disposition',
                                  'attachment; filename="%s"' % os.path.basename(f))
-            self.send_header('Content-Length', str(len(data)))
-            self.end_headers(); self.wfile.write(data); return
+            self.send_header('Content-Length', str(end - start + 1))
+            self.end_headers()
+            with open(f, 'rb') as fh:
+                fh.seek(start)
+                left = end - start + 1
+                while left > 0:
+                    chunk = fh.read(min(262144, left))
+                    if not chunk:
+                        break
+                    try:
+                        self.wfile.write(chunk)
+                    except (BrokenPipeError, ConnectionResetError):
+                        return          # плеер перемотал и оборвал загрузку — это норма
+                    left -= len(chunk)
+            return
 
         if path == '/vf_page':
             # Отдать готовую проклу или сундук для превью в панели (iframe).
