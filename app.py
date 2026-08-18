@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.53"
+VERSION = "5.54"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -339,7 +339,8 @@ def vf_handle(action, p):
         args = ['mix.py', '--batch', offer, geo,
                 '--tail=%s' % int(p.get('tail', 90)),
                 '--quiet=%s' % float(p.get('quiet', 20)),
-                '--loud=%s' % float(p.get('loud', 2))]
+                '--loud=%s' % float(p.get('loud', 2)),
+                '--rain=%s' % float(p.get('rain', 12))]
         if p.get('sounds'):
             # Имена дорожек русские и с пробелами, поэтому разделитель — «|»:
             # запятая в имени файла разнесла бы одно имя на два.
@@ -3400,6 +3401,10 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
               <label>На хвосте: <b id="sv-mix-ll">+2 dB, громко</b></label>
               <input id="sv-mix-l" type="range" min="-8" max="6" value="2" oninput="svMixLbl()"
                      style="width:100%;"></div>
+            <div class="sv-fld" style="flex:1;min-width:210px;">
+              <label>Дождь и гроза тише прочих: <b id="sv-mix-rl">на 12 dB</b></label>
+              <input id="sv-mix-r" type="range" min="0" max="20" value="12" oninput="svMixLbl()"
+                     style="width:100%;"></div>
           </div>
           <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;">
             <button class="sv-btn ghost" onclick="svMixPreview()">Смонтировать один — послушать</button>
@@ -5530,6 +5535,9 @@ function svMixLbl(){
   document.getElementById('sv-mix-ql').textContent = '−' + q + ' dB, ' + qw;
   document.getElementById('sv-mix-ll').textContent =
     (l >= 0 ? '+' : '') + l + ' dB, ' + (l >= 2 ? 'громко' : (l >= -2 ? 'вровень с голосом' : 'сдержанно'));
+  const rn = parseInt(document.getElementById('sv-mix-r').value);
+  document.getElementById('sv-mix-rl').textContent =
+    rn === 0 ? 'как все' : ('на ' + rn + ' dB' + (rn >= 14 ? ', еле-еле' : (rn >= 8 ? ', заметно тише' : '')));
 }
 async function svMixLoad(){
   const r = await svApi('mix_list', {});
@@ -5559,6 +5567,7 @@ function svMixParams(){
   p.tailfile = document.getElementById('sv-mix-tf').value;
   p.quiet  = parseInt(document.getElementById('sv-mix-q').value);
   p.loud   = parseInt(document.getElementById('sv-mix-l').value);
+  p.rain   = parseInt(document.getElementById('sv-mix-r').value);
   return p;
 }
 async function svMixPreview(){
