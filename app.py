@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.56"
+VERSION = "5.57"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -243,6 +243,8 @@ def vf_handle(action, p):
             secs = round(words / 2.2)          # ~2.2 слова в секунду обычной речи
             out.append({'n': d.get('n'), 'angle': d.get('angle'), 'hook_ru': d.get('hook_ru'),
                         'ru': d.get('ru'), 'text': d.get('text'), 'version': d.get('version', 1),
+                        # текст Павла сохранён, а перевода на язык гео ещё нет
+                        'needs_tr': bool(d.get('ru')) and not (d.get('text') or '').strip(),
                         'style': d.get('style', 'direct'), 'style_ru': d.get('style_ru', ''),
                         'secs': secs, 'price': round(secs * VF_PRICE_PER_SEC, 2)})
         total = round(sum(x['price'] for x in out), 2)
@@ -5371,7 +5373,8 @@ async function svLoad(){
 function svTabs(){
   document.getElementById('sv-tabs').innerHTML = svScripts.map((x,i)=>
     '<div class="sv-tab '+(i===svCur?'on':'')+'" onclick="svGo('+i+')">Ролик '+x.n
-    + (x._dirty ? ' <b style="color:#d97706;" title="есть несохранённая правка">●</b>' : '')
+    + (x._dirty ? ' <b style="color:#d97706;" title="есть несохранённая правка">●</b>'
+                : (x.needs_tr ? ' <b style="color:#d97706;" title="нет перевода">⌛</b>' : ''))
     + '</div>').join('');
   // Галочка = «этот ролик собирать». Кликом по названию переключаем вкладку,
   // кликом по галочке — отметку, чтобы не собирать всю папку разом.
@@ -5394,10 +5397,17 @@ const SV_FORMATS = [['direct','Наезд на зрителя'],['mirror','Зе�
   ['story','История героя (мягкий)']];
 function svShow(){
   const s = svScripts[svCur]; if(!s) return;
-  document.getElementById('sv-angle').textContent = (s.version === 0 && !s.ru)
-    ? 'ролик ' + s.n + ' — поле пустое, текст твой'
-    : ('боль ролика: ' + (s.angle||'') + ' · ~' + (s.secs||0) + ' сек · '
-       + (s.price||0).toFixed(2) + ' $');
+  const ang = document.getElementById('sv-angle');
+  if(s.needs_tr){
+    ang.innerHTML = '<b style="color:#d97706;">ролик ' + s.n + ' — твой текст сохранён, '
+      + 'но на язык гео ещё не переведён.</b> Жми «Сохранить правку» — переведу. '
+      + 'Без перевода ролик не соберётся, и старый останется цел.';
+  } else if(s.version === 0 && !s.ru){
+    ang.textContent = 'ролик ' + s.n + ' — поле пустое, текст твой';
+  } else {
+    ang.textContent = 'боль ролика: ' + (s.angle||'') + ' · ~' + (s.secs||0) + ' сек · '
+       + (s.price||0).toFixed(2) + ' $';
+  }
   const ta = document.getElementById('sv-text');
   ta.value = (s._edited !== undefined ? s._edited : (s.ru || ''));
   ta.placeholder = 'Вставь сюда свой текст ролика по-русски. Потом «Сохранить правку» — '
@@ -5482,7 +5492,10 @@ async function svSaveText(){
   svCapture();
   // Сохраняем ВСЕ незаписанные правки, а не только открытую вкладку: правил-то
   // он несколько роликов подряд, а помнить, какие остались, — не его работа.
-  const list = svScripts.filter(s => s._dirty);
+  let list = svScripts.filter(s => s._dirty);
+  // Текст мог сохраниться, а перевод сорваться — тогда «Сохранить» повторяет
+  // именно перевод, и просить Павла что-то дописать ради этого незачем.
+  if(!list.length) list = svScripts.filter(s => s.needs_tr).map(s => (s._edited = s.ru, s));
   if(!list.length){ svSay(2, 'Тут нечего сохранять — текст и так сохранён.'); return; }
   for(let i = 0; i < list.length; i++){
     const s = list[i];
