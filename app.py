@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.58"
+VERSION = "5.59"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -5338,7 +5338,7 @@ function svStep1(){
 // ничего не стоит, существующие ролики не трогаются.
 async function svBlank(){
   const p = svParams();
-  p.n = Math.max(parseInt(document.getElementById('sv-n').value)||1, svScripts.length);
+  p.n = parseInt(document.getElementById('sv-n').value)||1;   // сколько поставил, столько и будет
   const r = await svJob('blank', p, 1, 'Готовлю поля…');
   if(!r.ok) return;
   await svLoad();
@@ -5673,11 +5673,14 @@ async function svBuildAll(){
     const p = svParams(); p.script = s.n; p.persona = s._hero;
     const r = await svJob('build', p, 3, 'Ролик ' + s.n + ' из ' + list.length
       + ' · герой ' + ((svHeroes.find(h=>h.key===s._hero)||{}).name || s._hero)
+      + ' · ~' + (s.price||0).toFixed(2) + ' $'
       + ' · озвучка и липсинк, обычно 3-5 минут…');
     if(!r.ok){ svSay(3, 'Ролик ' + s.n + ' не собрался. Прежний ролик не тронут.', true); return; }
     s._done = true;
   }
-  svSay(3, list.length === 1 ? ('Ролик ' + list[0].n + ' собран.') : ('Собрано роликов: ' + list.length + '.'));
+  const цена = list.reduce((a,s)=>a+(s.price||0), 0);
+  svSay(3, 'Собрано роликов: ' + list.length + ' · потрачено примерно '
+        + цена.toFixed(2) + ' $. На каждый сценарий ровно один ролик.');
   await svFiles();
   document.getElementById('sv-mixbox').style.display = 'block';
   svMixLoad();
