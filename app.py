@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.55"
+VERSION = "5.56"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -455,6 +455,12 @@ def vf_handle(action, p):
         run = [{'job': k, 'title': v.get('title', ''), 'log': v['log'][-3:]}
                for k, v in VF_JOBS.items() if v.get('status') == 'running']
         return {'ok': True, 'running': run}
+
+    if action == 'blank':
+        # Пустые поля под тексты Павла. Ничего не сочиняем и ничего не трогаем:
+        # существующие ролики остаются, добавляются недостающие номера.
+        return vf_run_bg(['script_gen.py', 'blank', offer, geo,
+                          str(int(p.get('n', 3))), str(dur)], 'Готовлю поля под тексты')
 
     if action == 'gen':
         return vf_run_bg(['script_gen.py', 'gen', offer, geo, str(int(p.get('n', 5))), str(dur),
@@ -3285,7 +3291,12 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
         </div>
         <div class="sv-price" id="sv-est"></div>
         <div style="margin-top:14px;">
-          <button class="sv-btn" id="sv-b1" onclick="svGen()">Написать тексты</button>
+          <!-- Тексты пишет Павел, а не панель (его слова, 18.08). Главная кнопка
+               просто открывает поля; сочинялка осталась ссылкой сбоку, на случай
+               если он сам захочет её позвать. -->
+          <button class="sv-btn" id="sv-b1" onclick="svBlank()">Перейти к текстам</button>
+          <a href="#" onclick="svGen();return false;"
+             style="font-size:12px;color:var(--text3);margin-left:12px;">написать за меня</a>
         </div>
         <div class="sv-bar" id="sv-bar1"><i></i></div>
         <div class="sv-log" id="sv-log1"></div>
@@ -3308,6 +3319,7 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
           <button class="sv-btn ghost" id="sv-b2s" onclick="svSaveText()">Сохранить правку</button>
           <button class="sv-btn ghost" id="sv-b2d" onclick="svDropDraft()"
                   style="display:none;">Вернуть сохранённый</button>
+          <button class="sv-btn ghost" onclick="svAddScript()">+ ещё ролик</button>
         </div>
         <div id="sv-dirty" style="font-size:12px;margin-top:6px;"></div>
         <div class="sv-bar" id="sv-bar2"><i></i></div>
@@ -5278,6 +5290,24 @@ function svStep1(){
   document.getElementById('sv-est').textContent =
     'Ролик ~' + p.dur + ' сек ≈ ' + price.toFixed(2) + ' $ · связка из ' + n + ' = ' + (price*n).toFixed(2) + ' $';
 }
+// Главный путь: панель даёт поля, текст пишет Павел. Ничего не сочиняется,
+// ничего не стоит, существующие ролики не трогаются.
+async function svBlank(){
+  const p = svParams();
+  p.n = Math.max(parseInt(document.getElementById('sv-n').value)||1, svScripts.length);
+  const r = await svJob('blank', p, 1, 'Готовлю поля…');
+  if(!r.ok) return;
+  await svLoad();
+  svOpen(2);
+  svSay(1, 'Вставляй свои тексты по-русски. Перевод на язык гео — по кнопке «Сохранить правку».');
+}
+// Ещё один ролик к связке, не трогая уже написанные.
+async function svAddScript(){
+  const p = svParams();
+  p.n = svScripts.length + 1;
+  const r = await svJob('blank', p, 2, 'Добавляю ролик…');
+  if(r.ok){ await svLoad(); svCur = svScripts.length - 1; svShow(); }
+}
 async function svGen(){
   const p = svParams();
   p.n = parseInt(document.getElementById('sv-n').value)||3;
@@ -5364,14 +5394,22 @@ const SV_FORMATS = [['direct','Наезд на зрителя'],['mirror','Зе�
   ['story','История героя (мягкий)']];
 function svShow(){
   const s = svScripts[svCur]; if(!s) return;
-  document.getElementById('sv-angle').textContent =
-    'боль ролика: ' + (s.angle||'') + ' · ~' + (s.secs||0) + ' сек · ' + (s.price||0).toFixed(2) + ' $';
-  document.getElementById('sv-text').value = (s._edited !== undefined ? s._edited : (s.ru || ''));
+  document.getElementById('sv-angle').textContent = (s.version === 0 && !s.ru)
+    ? 'ролик ' + s.n + ' — поле пустое, текст твой'
+    : ('боль ролика: ' + (s.angle||'') + ' · ~' + (s.secs||0) + ' сек · '
+       + (s.price||0).toFixed(2) + ' $');
+  const ta = document.getElementById('sv-text');
+  ta.value = (s._edited !== undefined ? s._edited : (s.ru || ''));
+  ta.placeholder = 'Вставь сюда свой текст ролика по-русски. Потом «Сохранить правку» — '
+    + 'переведу на язык гео и оставлю слово в слово, ничего не добавлю от себя.';
   // Формат виден и меняется у КАЖДОГО ролика по отдельности: подходящий формат
   // видно только по готовому тексту, а переписывать ради этого всю пачку —
   // терять уже утверждённые тексты.
   const box = document.getElementById('sv-fmt');
-  if(box) box.innerHTML = '<span style="color:var(--text3);">формат:</span> '
+  // «Переписать в этом формате» сочиняет текст заново. На своём тексте это
+  // ровно то, чего Павел просил не делать, — прячем.
+  if(box && s.style === 'own'){ box.innerHTML = ''; }
+  else if(box) box.innerHTML = '<span style="color:var(--text3);">формат:</span> '
     + '<select id="sv-fmt-sel" style="margin:0 8px;">'
     + SV_FORMATS.map(f=>'<option value="'+f[0]+'"'+(f[0]===s.style?' selected':'')+'>'+f[1]+'</option>').join('')
     + '</select><button class="sv-btn ghost" style="padding:5px 12px;font-size:12px;" '
