@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.57"
+VERSION = "5.58"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -745,22 +745,64 @@ def vf_handle(action, p):
                          ('prelas', 'prela/*/index.html')):
             files = sorted(_glob.glob(os.path.join(VF_DIR, pat)))
             res[key] = [os.path.relpath(f, VF_DIR) for f in files
-                        if os.path.basename(f).startswith(pref)
-                        or ('/prela/' in f and os.path.basename(os.path.dirname(f)).startswith(pref))]
-        # Длина и вес каждого ролика: Павел должен видеть, смонтирован ролик
-        # с хвостом или ещё голый, не открывая файл.
+                        # _head — промежуточный выход липсинка, не ролик. Он попадал
+                        # в список и удваивал счётчик: «готово 4» вместо двух.
+                        if not f.endswith(('_head.mp4', '.new.mp4'))
+                        and (os.path.basename(f).startswith(pref)
+                             or ('/prela/' in f
+                                 and os.path.basename(os.path.dirname(f)).startswith(pref)))]
+        # Про каждый ролик надо знать не только длину и вес, но и КТО в нём и
+        # СВЕЖИЙ ли он. Иначе в списке вперемешку лежат ролики прошлых прогонов
+        # с другими героями, и понять, что из этого твоё, невозможно.
+        import re as _re2
+        names = {}
+        try:
+            rr = subprocess.run([sys.executable, '-c',
+                                 'import json,personas;print(json.dumps({k:v.get("name","") '
+                                 'for k,v in personas.PERSONAS.items()},ensure_ascii=False))'],
+                                cwd=VF_DIR, capture_output=True, text=True, timeout=30)
+            names = json.loads(rr.stdout.strip() or '{}')
+        except Exception:
+            names = {}
         res['meta'] = {}
         for rel in res.get('videos', []):
             f = os.path.join(VF_DIR, rel)
+            m = _re2.match(r'%s(\d+)_(.+)\.mp4$' % _re2.escape(pref), os.path.basename(rel))
+            persona = m.group(2) if m else ''
+            built = os.path.getmtime(f)
+            # Сценарий правили после сборки — значит, ролик говорит старый текст.
+            stale = False
+            if m:
+                sj = os.path.join(sdir, '%02d.json' % int(m.group(1)))
+                stale = os.path.exists(sj) and os.path.getmtime(sj) > built + 5
             try:
                 out = subprocess.run(['ffprobe', '-v', 'error', '-show_entries',
                                       'format=duration', '-of', 'csv=p=0', f],
                                      capture_output=True, text=True, timeout=20).stdout
-                res['meta'][rel] = {'sec': round(float(out.strip() or 0)),
-                                    'mb': round(os.path.getsize(f) / 1048576, 1)}
+                sec = round(float(out.strip() or 0))
             except Exception:
-                res['meta'][rel] = {'sec': 0, 'mb': round(os.path.getsize(f) / 1048576, 1)}
+                sec = 0
+            res['meta'][rel] = {'sec': sec, 'mb': round(os.path.getsize(f) / 1048576, 1),
+                                'persona': persona, 'hero': names.get(persona, ''),
+                                'stale': stale,
+                                'built': time.strftime('%d.%m %H:%M', time.localtime(built))}
         return {'ok': True, **res}
+
+    if action == 'delvideo':
+        # Ролики прошлых прогонов надо уметь просто выкинуть, а не разглядывать.
+        rels = p.get('files') or ([p['file']] if p.get('file') else [])
+        gone = 0
+        for rel in rels:
+            rel = (rel or '').replace('..', '')
+            f = os.path.join(VF_DIR, rel)
+            if not (rel.startswith('out/batch/') or rel.startswith('out/uniq/')):
+                continue
+            for x in (f, f.replace('.mp4', '.mp3'), f.replace('.mp4', '_head.mp4'),
+                      os.path.join(os.path.dirname(f), 'nobg', os.path.basename(f))):
+                if os.path.exists(x):
+                    os.remove(x)
+            gone += 1
+        return {'ok': True, 'gone': gone}
 
     return {'error': 'неизвестное действие: %s' % action}
 
@@ -5358,6 +5400,7 @@ async function svLoad(){
       // черновик мог остаться с прошлого запуска браузера
       try { const d = localStorage.getItem(svDraftKey(s.n)); if(d !== null) s._edited = d; } catch(e){}
     }
+    if(s._pick === undefined) s._pick = true;   // отмечены сразу, вопрос не нужен
     if(s._edited !== undefined){
       s._dirty = s._edited.trim() !== (s.ru || '').trim();
       if(!s._dirty){ s._edited = undefined; try { localStorage.removeItem(svDraftKey(s.n)); } catch(e){} }
@@ -5611,17 +5654,27 @@ function svSkipBuild(){
 async function svBuildAll(){
   // Собираем только отмеченные галочками сценарии. Раньше кнопка молча гнала все
   // подряд: правишь текст одного ролика — а озвучка тратится на всю папку.
-  const picked = svScripts.filter(s=>s._pick);
-  const list = picked.length ? picked : svScripts;
-  if(!picked.length && svScripts.length > 1){
-    if(!confirm('Не отмечен ни один ролик. Собрать все ' + svScripts.length + '? Озвучка тратится на каждый.')) return;
+  const list = svScripts.filter(s=>s._pick);
+  if(!list.length){
+    svSay(3, 'Ни один ролик не отмечен — отметь галочкой те, что собирать.', true);
+    return;
+  }
+  // Без перевода собирать нечего: ролик всё равно пропустится, а Павел
+  // прождёт впустую и решит, что панель молчит.
+  const без = list.filter(s => s.needs_tr || !(s.ru||'').trim());
+  if(без.length){
+    svSay(3, 'Ролик ' + без.map(s=>s.n).join(', ') + ' без готового текста — '
+            + 'вернись на шаг 2 и нажми «Сохранить правку».', true);
+    return;
   }
   for(let i=0;i<list.length;i++){
     const s = list[i];
     svCur = svScripts.indexOf(s); svShow();
     const p = svParams(); p.script = s.n; p.persona = s._hero;
-    const r = await svJob('build', p, 3, 'Собираю ролик ' + s.n + ' (' + (i+1) + ' из ' + list.length + ')…');
-    if(!r.ok) return;
+    const r = await svJob('build', p, 3, 'Ролик ' + s.n + ' из ' + list.length
+      + ' · герой ' + ((svHeroes.find(h=>h.key===s._hero)||{}).name || s._hero)
+      + ' · озвучка и липсинк, обычно 3-5 минут…');
+    if(!r.ok){ svSay(3, 'Ролик ' + s.n + ' не собрался. Прежний ролик не тронут.', true); return; }
     s._done = true;
   }
   svSay(3, list.length === 1 ? ('Ролик ' + list[0].n + ' собран.') : ('Собрано роликов: ' + list.length + '.'));
@@ -5643,17 +5696,42 @@ async function svFiles(){
   }
   const meta = r.meta || {};
   const mmss = s => Math.floor(s/60) + ':' + String(s%60).padStart(2,'0');
-  box.innerHTML = vids.length ? ('<div class="sv-done">Готово роликов: ' + vids.length + '</div>'
+  // Герой в карточке должен совпадать с тем, кто уже говорит в собранном ролике,
+  // иначе на шаге 3 подсвечен один человек, а в превью снизу — другой.
+  vids.forEach(f => {
+    const m = meta[f] || {};
+    const num = parseInt((f.split('/').pop().match(/_(\d+)_/)||[])[1]);
+    const s = svScripts.find(x => x.n === num);
+    if(s && m.persona && !m.stale) s._hero = m.persona;
+  });
+  svTabs();
+  const старых = vids.filter(f => (meta[f]||{}).stale).length;
+  box.innerHTML = vids.length ? ('<div class="sv-done">Готово роликов: ' + (vids.length - старых)
+    + (старых ? ('<span style="color:#d97706;margin-left:auto;">старых: ' + старых
+       + ' <button class="sv-btn ghost" style="padding:4px 10px;font-size:11px;margin-left:8px;" '
+       + 'onclick="svDelStale()">Удалить старые</button></span>') : '') + '</div>'
     + vids.map(f=>{
         const src = '/vf_file?p='+encodeURIComponent(f);
         const m = meta[f] || {};
         const info = (m.sec ? mmss(m.sec) : '') + (m.mb ? ' · ' + m.mb + ' МБ' : '');
-        return '<div style="margin-top:12px;padding:10px;background:var(--bg2);border-radius:10px;">'
+        // Кто в ролике и свежий ли он. Без этого в списке лежат вперемешку
+        // ролики прошлых прогонов с чужими героями — Павел видел их как свои.
+        const кто = m.hero ? (m.hero + ' · ') : '';
+        const бейдж = m.stale
+          ? '<span style="background:rgba(217,119,6,.15);color:#d97706;border-radius:6px;'
+            + 'padding:2px 7px;font-size:11px;font-weight:800;">СТАРЫЙ · текст правился позже</span>'
+          : '';
+        return '<div style="margin-top:12px;padding:10px;background:var(--bg2);border-radius:10px;'
+          + (m.stale ? 'border:1.5px solid rgba(217,119,6,.45);opacity:.75;' : '') + '">'
           + '<div style="display:flex;align-items:center;gap:10px;font-size:13px;margin-bottom:8px;flex-wrap:wrap;">'
-          + '<span style="flex:1;color:var(--text3);">'+f.split('/').pop()
-          + (info ? ' <b style="color:var(--text2);">'+info+'</b>' : '') + '</span>'
+          + '<span style="flex:1;color:var(--text3);">' + кто + f.split('/').pop()
+          + (info ? ' <b style="color:var(--text2);">'+info+'</b>' : '')
+          + (m.built ? ' <span style="opacity:.7;">собран '+m.built+'</span>' : '')
+          + ' ' + бейдж + '</span>'
           + '<button class="sv-btn ghost" style="padding:5px 12px;font-size:12px;" '
           + 'onclick="svCheckText(\''+f+'\')">Проверить текст</button>'
+          + '<button class="sv-btn ghost" style="padding:5px 12px;font-size:12px;" '
+          + 'onclick="svDelVideo(\''+f+'\')">Удалить</button>'
           + '<a class="sv-btn ghost" style="text-decoration:none;padding:5px 12px;font-size:12px;" '
           + 'href="'+src+'&dl=1" download>Скачать</a></div>'
           // preload=auto + Range на сервере: перемотка работает, слушать можно
@@ -5663,6 +5741,21 @@ async function svFiles(){
           + '<div class="sv-txtchk" id="chk-'+btoa(unescape(encodeURIComponent(f))).replace(/=/g,'')+'"></div>'
           + '</div>';
       }).join('')) : '';
+}
+// Ролик прошлого прогона можно просто выкинуть, а не разглядывать.
+async function svDelVideo(f){
+  if(!confirm('Удалить ' + f.split('/').pop() + '?')) return;
+  await svApi('delvideo', {file: f});
+  await svFiles();
+}
+async function svDelStale(){
+  const r = await svApi('files', svParams());
+  const meta = r.meta || {};
+  const list = (r.videos||[]).filter(f => (meta[f]||{}).stale);
+  if(!list.length) return;
+  if(!confirm('Удалить ' + list.length + ' старых роликов? Свежие останутся.')) return;
+  await svApi('delvideo', {files: list});
+  await svFiles();
 }
 // «Проверить текст» — вытаскивает речь из готового ролика и сверяет со сценарием.
 // Нужно, чтобы не гадать, доехала правка текста до озвучки или нет.
