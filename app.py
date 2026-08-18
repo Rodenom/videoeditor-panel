@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.59"
+VERSION = "5.60"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -288,6 +288,42 @@ def vf_handle(action, p):
         if p.get('preview'):
             args.append('--preview')
         return vf_run_bg(args, 'Фоновый звук')
+
+    # ── Gemini: тексты роликов пишет он, разбор проклы остаётся на Claude ──
+    if action == 'gemini_state':
+        f = os.path.join(BASE_DIR, 'gemini_key.txt')
+        r = vf_run(['-c', 'import gemini;print(gemini.model())'])
+        return {'ok': True, 'has_key': os.path.exists(f) and bool(open(f).read().strip()),
+                'model': (r['out'] or '').strip().splitlines()[-1] if r['ok'] else 'gemini-2.5-pro'}
+
+    if action == 'gemini_key':
+        k = (p.get('key') or '').strip()
+        f = os.path.join(BASE_DIR, 'gemini_key.txt')
+        if not k:
+            if os.path.exists(f):
+                os.remove(f)
+            return {'ok': True, 'has_key': False}
+        if not k.isascii():
+            return {'error': 'В ключе не должно быть кириллицы — скопируй его заново'}
+        with open(f, 'w') as fh:
+            fh.write(k)
+        os.chmod(f, 0o600)
+        r = vf_run(['gemini.py', '--check'], timeout=120)
+        line = ((r['out'] or '') + (r['err'] or '')).strip().splitlines()
+        return {'ok': True, 'has_key': True, 'note': line[-1] if line else ''}
+
+    if action == 'gemini_script':
+        # Разбор чужой проклы -> Gemini -> текст ролика. Схема Павла от 19.08.
+        args = ['gemini.py', '--script', offer, '--sec=%d' % int(p.get('sec', 30))]
+        if p.get('extra'):
+            args.append('--extra=%s' % p['extra'])
+        return vf_run_bg(args, 'Gemini пишет текст ролика')
+
+    if action == 'gemini_read':
+        f = os.path.join(VF_DIR, 'out', 'gemini_last.txt')
+        if not os.path.exists(f):
+            return {'error': 'Текста ещё нет'}
+        return {'ok': True, 'text': open(f, encoding='utf-8').read().strip()}
 
     if action == 'teardown':
         # Разбор ЧУЖОЙ проклы: ссылка, сохранённый html или архив из спая.
@@ -3623,6 +3659,42 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
           <div class="sv-bar" id="sv-bar9"><i></i></div>
           <div class="sv-log" id="sv-log9"></div>
           <div id="sv-td-res"></div>
+
+          <!-- Схема Павла (19.08): разобрали чужую проклу → бросили разбор в
+               Gemini → он прямо здесь пишет текст ролика. Тексты роликов Павел
+               хочет от Gemini, разбор оставляем Claude — он читает html целиком. -->
+          <div style="margin-top:14px;border-top:1px dashed var(--border);padding-top:12px;">
+            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+              <b style="font-size:13px;">✍️ Текст ролика от Gemini</b>
+              <span id="sv-gm-state" style="font-size:12px;color:var(--text3);"></span>
+              <button class="sv-btn ghost" style="padding:4px 10px;font-size:12px;margin-left:auto;"
+                      onclick="svGmKeyBox()">Ключ</button>
+            </div>
+            <div id="sv-gm-key" style="display:none;margin-top:8px;">
+              <div class="sv-row">
+                <input id="sv-gm-key-in" type="password" placeholder="ключ с aistudio.google.com/apikey"
+                  style="flex:1;min-width:240px;padding:8px 11px;border:1.5px solid var(--border);
+                  border-radius:10px;background:var(--surface2);color:var(--text);font-family:inherit;">
+                <button class="sv-btn" onclick="svGmSaveKey()">Сохранить ключ</button>
+              </div>
+              <div class="sv-hint">Ключ бесплатный: заходишь на aistudio.google.com/apikey,
+                жмёшь Create API key, копируешь сюда. Лежать будет у тебя на диске.</div>
+            </div>
+            <div class="sv-row" style="margin-top:8px;">
+              <div class="sv-fld"><label>Длина ролика</label>
+                <select id="sv-gm-sec"><option value="20">20 секунд</option>
+                  <option value="30" selected>30 секунд</option>
+                  <option value="45">45 секунд</option>
+                  <option value="60">1 минута</option></select></div>
+              <input id="sv-gm-extra" placeholder="что подчеркнуть: жёстче · от лица жены · про ночь"
+                style="flex:1;min-width:220px;padding:9px 11px;border:1.5px solid var(--border);
+                border-radius:10px;background:var(--surface2);color:var(--text);font-family:inherit;">
+              <button class="sv-btn" onclick="svGmScript()">Написать текст по разбору</button>
+            </div>
+            <div class="sv-bar" id="sv-bar10"><i></i></div>
+            <div class="sv-log" id="sv-log10"></div>
+            <div id="sv-gm-out"></div>
+          </div>
         </div>
       </div>
 
@@ -5279,7 +5351,7 @@ function svOpen(step){
   }
   // Материалы оффера подтягиваются при открытии шага прокл: описание и
   // фотографии живут между сессиями, их не надо загружать заново каждый раз.
-  if(step === 4) svMaterials();
+  if(step === 4){ svMaterials(); svGmState(); }
   const el = document.getElementById('sv-s'+step);
   if(el) el.scrollIntoView({behavior:'smooth', block:'start'});
 }
@@ -5770,13 +5842,11 @@ async function svCheckText(f){
   const r = await svApi('checktext', p);
   if(!box) return;
   if(r.error){ box.innerHTML = '<div class="sv-hint" style="color:#dc2626;">'+r.error+'</div>'; return; }
-  const good = r.match >= 90;
+  const цвет = {ok:'#16a34a', check:'#d97706', bad:'#dc2626'}[r.verdict||'bad'];
   box.innerHTML = '<div style="margin-top:8px;font-size:12.5px;line-height:1.5;">'
-    + '<b style="color:'+(good?'#16a34a':'#dc2626')+';">'
-    + (good ? 'Совпадает со сценарием на ' : 'РАСХОЖДЕНИЕ. Совпадение всего ')
-    + r.match + '%</b>'
-    + (good ? ' — в ролике звучит именно тот текст, что в панели.'
-            : ' — в ролике звучит НЕ тот текст. Пересобери ролик.')
+    + '<b style="color:'+цвет+';">' + (r.say || ('Совпадение ' + r.match + '%')) + '</b>'
+    + ' <span style="color:var(--text3);">(совпадение ' + r.match + '%, слов '
+    + (r.words_want||0) + ' против ' + (r.words_heard||0) + ')</span>'
     + '<div style="margin-top:6px;color:var(--text3);"><b>слышно:</b> '
     + (r.heard||'').replace(/</g,'&lt;') + '</div></div>';
 }
@@ -5885,6 +5955,58 @@ async function svTeardown(){
         + 'onclick="svCopyEl(\'sv-td-or\')">копировать</button></div>'
         + '<div id="sv-td-or" class="tk-result-text" style="max-height:300px;">' + esc(r.text) + '</div>') : '');
   svSay(9, 'Готово.');
+}
+// ── Gemini: текст ролика по разбору чужой проклы ─────────
+async function svGmState(){
+  const r = await svApi('gemini_state', {});
+  const el = document.getElementById('sv-gm-state');
+  if(el) el.textContent = r.has_key ? ('ключ на месте · ' + (r.model||'')) : 'ключа нет — нажми «Ключ»';
+  return r;
+}
+function svGmKeyBox(){
+  const b = document.getElementById('sv-gm-key');
+  b.style.display = b.style.display === 'none' ? 'block' : 'none';
+}
+async function svGmSaveKey(){
+  const k = document.getElementById('sv-gm-key-in').value.trim();
+  const r = await svApi('gemini_key', {key: k});
+  if(r.error){ svSay(10, r.error, true); return; }
+  document.getElementById('sv-gm-key-in').value = '';
+  document.getElementById('sv-gm-key').style.display = 'none';
+  await svGmState();
+  svSay(10, r.note || 'Ключ сохранён.');
+}
+async function svGmScript(){
+  const st = await svGmState();
+  if(!st.has_key){ svSay(10, 'Сначала вставь ключ Gemini — кнопка «Ключ» справа.', true); return; }
+  const p = svParams();
+  p.sec = parseInt(document.getElementById('sv-gm-sec').value) || 30;
+  p.extra = document.getElementById('sv-gm-extra').value.trim();
+  const j = await svJob('gemini_script', p, 10, 'Gemini пишет текст по разбору…');
+  if(!j.ok) return;
+  const r = await svApi('gemini_read', {});
+  if(r.error){ svSay(10, r.error, true); return; }
+  const box = document.getElementById('sv-gm-out');
+  box.innerHTML = '<textarea id="sv-gm-text" class="sv-area" style="min-height:150px;margin-top:10px;">'
+    + (r.text||'').replace(/</g,'&lt;') + '</textarea>'
+    + '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px;">'
+    + '<span style="font-size:12px;color:var(--text3);">положить в ролик</span>'
+    + '<select id="sv-gm-to">'
+    + svScripts.map(x=>'<option value="'+x.n+'">Ролик '+x.n+'</option>').join('')
+    + '</select>'
+    + '<button class="sv-btn" onclick="svGmPut()">Положить и перевести</button>'
+    + '<button class="sv-btn ghost" onclick="svGmScript()">Написать другой вариант</button></div>';
+  svSay(10, 'Готово. Прочитай, поправь руками если надо — и клади в ролик.');
+}
+async function svGmPut(){
+  const txt = (document.getElementById('sv-gm-text')||{}).value || '';
+  const n = parseInt((document.getElementById('sv-gm-to')||{}).value);
+  if(!txt.trim() || !n){ svSay(10, 'Нечего класть.', true); return; }
+  const p = svParams(); p.script = n; p.ru = txt.trim();
+  const r = await svJob('settext', p, 10, 'Кладу текст в ролик ' + n + ' и перевожу…');
+  if(!r.ok) return;
+  await svLoad();
+  svSay(10, 'Текст лёг в ролик ' + n + '. Он на шаге 2, можно править дальше.');
 }
 function svCopyEl(id){
   const el = document.getElementById(id); if(!el) return;
