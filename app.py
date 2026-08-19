@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.66"
+VERSION = "5.67"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -1634,21 +1634,38 @@ def diagnose_proxy(proxy, timeout=12):
         s = _rq.Session()
         s.trust_env = False             # берём ИМЕННО этот прокси, а не из окружения
         pr = {'http': url, 'https': url}
-        try:
-            r = s.get('https://api.ipify.org', proxies=pr, timeout=timeout)
-            out['net'] = r.ok
-            out['ip'] = (r.text or '').strip()[:40]
-        except Exception as e:
-            out['net'] = False
-            out['error'] = str(e)[:120]
-        if out['net']:
+        # Тоже с повтором: у плавающего прокси и этот слой проваливается через
+        # раз, и один замер объявлял мёртвым живой прокси.
+        for i in range(2):
             try:
-                # Любой ответ Google годится: важно, что он дошёл через прокси.
-                s.get('https://oauth2.googleapis.com/tokeninfo', proxies=pr, timeout=timeout)
-                out['google'] = True
+                r = s.get('https://api.ipify.org', proxies=pr, timeout=timeout)
+                out['net'] = r.ok
+                out['ip'] = (r.text or '').strip()[:40]
+                break
             except Exception as e:
-                out['google'] = False
+                out['net'] = False
                 out['error'] = str(e)[:120]
+                if i == 0:
+                    time.sleep(1)
+        if out['net']:
+            # Пробуем НЕСКОЛЬКО раз. Дешёвые прокси не мёртвые, а «плавающие»:
+            # ловят окно в пару минут, когда TLS до Google не встаёт, потом снова
+            # работают. Замерено на боевых прокси Павла 19.08: два порта дали
+            # SSLError три раза из трёх, а через минуту — 40 успешных из 40.
+            # Один замер тут врёт в обе стороны, поэтому считаем удачные.
+            ok = 0
+            for i in range(3):
+                try:
+                    # Любой ответ Google годится: важно, что он дошёл через прокси.
+                    s.get('https://oauth2.googleapis.com/tokeninfo', proxies=pr, timeout=timeout)
+                    ok += 1
+                except Exception as e:
+                    out['error'] = str(e)[:120]
+                if i < 2:
+                    time.sleep(1)
+            out['google_ok'] = ok
+            out['google'] = ok > 0
+            out['flaky'] = 0 < ok < 3
     except ImportError:
         out['error'] = 'нет библиотеки requests'
     return out
@@ -1662,12 +1679,18 @@ def proxy_verdict(d):
     if d.get('tcp') is False:
         return 'прокси %s не принимает соединение — он мёртвый или сменились доступы' % where
     if d.get('net') is False:
-        return ('прокси %s отвечает, но интернета через него нет — чаще всего кончился '
-                'трафик или неверные логин с паролем' % where)
+        return ('прокси %s отвечает, но интернета через него сейчас нет. Так ведёт себя '
+                'и кончившийся трафик, и «плавающий» прокси, который через минуту снова '
+                'заработает. Если то пропадает, то появляется — меняй прокси, заливка '
+                'будет срываться' % where)
     if d.get('google') is False:
-        return ('прокси %s живой (выход через %s), но Google через него не отвечает — '
-                'этот IP у Google заблокирован, нужен другой прокси'
-                % (where, d.get('ip') or '?'))
+        return ('прокси %s живой (выход через %s), но Google через него не отвечает '
+                'ни с одной попытки — либо этот IP у Google в бане, либо прокси '
+                'ломает соединение. Нужен другой прокси' % (where, d.get('ip') or '?'))
+    if d.get('flaky'):
+        return ('прокси %s ПЛАВАЕТ: до Google достучались %d раза из 3. Заливка будет '
+                'срываться на середине. Это не токен и не канал — это прокси'
+                % (where, d.get('google_ok', 0)))
     if d.get('google'):
         return 'прокси %s полностью рабочий, выход через %s' % (where, d.get('ip') or '?')
     return 'прокси %s проверить не вышло: %s' % (where, d.get('error') or 'неизвестно')
@@ -1686,6 +1709,49 @@ def build_api(name, version, creds):
     except TypeError:
         # старая версия библиотеки — параметра нет
         return _b(name, version, credentials=creds, cache_discovery=False)
+
+
+def is_network_error(err):
+    """Это сорвалась связь, а не отказал токен?
+
+    Различать важно: токен чинится переавторизацией, а сорванная связь —
+    просто повтором. Раньше одно не отличалось от другого, и канал вылетал
+    из заливки навсегда из-за секундного провала прокси.
+    """
+    s = str(err)
+    return any(k in s for k in (
+        'ProxyError', 'Cannot connect to proxy', 'Tunnel connection failed', 'SOCKS',
+        'Max retries exceeded', 'NewConnectionError', 'Connection refused',
+        'Failed to establish', 'SSLError', 'SSLEOFError', 'EOF occurred',
+        'timed out', 'Timeout', 'Connection reset', 'BadStatusLine',
+        'RemoteDisconnected', 'ConnectionError'))
+
+
+def get_youtube_service_stubborn(token_file, proxy='', log=None, tries=3):
+    """То же подключение к каналу, но не сдающееся с первой попытки.
+
+    Дешёвые прокси не мёртвые, а «плавающие»: ловят окно в пару минут, когда
+    TLS до Google не встаёт, потом снова работают. Замерено на боевых прокси
+    19.08 — два порта дали SSLError три раза из трёх, а через минуту 40 из 40.
+    При старом поведении такое окно выбрасывало канал из заливки целиком, и
+    выглядело это как «всё сломалось», хотя чинить было нечего.
+
+    Повторяем ТОЛЬКО сетевые сбои. Отозванный токен повторять бессмысленно —
+    отдаём ошибку сразу, чтобы байер шёл переавторизовывать, а не ждал.
+    """
+    last = None
+    for i in range(1, tries + 1):
+        try:
+            return get_youtube_service(token_file, proxy=proxy)
+        except Exception as e:
+            last = e
+            if not is_network_error(e) or i == tries:
+                raise
+            if log is not None:
+                log.append('  ↻ связь через прокси сорвалась, пробую снова (%d из %d)'
+                           % (i + 1, tries))
+            time.sleep(3 * i)
+    raise last
 
 
 def get_youtube_service(token_file=None, proxy=''):
@@ -1924,7 +1990,7 @@ def upload_to_youtube(upload_job_id, files, title, description, privacy, channel
         if ch_proxy:
             log.append(f'🔒 Прокси: {ch_proxy.split("@")[-1] if "@" in ch_proxy else ch_proxy}')
         log.append('🔐 Авторизуемся...')
-        yt = get_youtube_service(ch_info['token_file'], proxy=ch_proxy)
+        yt = get_youtube_service_stubborn(ch_info['token_file'], ch_proxy, log)
         log.append('✅ Авторизация прошла')
 
         links = []
@@ -2123,7 +2189,7 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user, 
             try:
                 log.append('  🔐 Подключаемся к каналу (через прокси)...')
                 _ta = time.time()
-                yt = get_youtube_service(ch_info['token_file'], proxy=ch_proxy)
+                yt = get_youtube_service_stubborn(ch_info['token_file'], ch_proxy, log)
                 log[-1] = '  🔐 Канал подключён (%.0f сек)' % (time.time() - _ta)
             except Exception as _auth_err:
                 _auth_msg = friendly_upload_error(_auth_err)
@@ -2381,7 +2447,7 @@ def ready_upload_to_youtube(job_id, ready_files, n_sets, category, privacy, user
                 log.append(f'📦 Набор {i+1}/{n_sets} → канал: {ch_info["name"]}' + (' 🔒 прокси' if ch_proxy else ''))
                 log.append('  🔐 Подключаемся к каналу (через прокси)...')
                 _ta = time.time()
-                yt = get_youtube_service(ch_info['token_file'], proxy=ch_proxy)
+                yt = get_youtube_service_stubborn(ch_info['token_file'], ch_proxy, log)
                 log[-1] = '  🔐 Канал подключён (%.0f сек)' % (time.time() - _ta)
                 if not ch_proxy:
                     os.environ.pop('HTTPS_PROXY', None)
@@ -2524,7 +2590,7 @@ def mass_upload_to_youtube(job_id, files, n_sets, title, description, privacy, u
                 log.append(f'📦 Набор {i+1}/{n_sets} → канал: {ch_info["name"]}' + (f' 🔒 прокси' if ch_proxy else ''))
                 log.append('  🔐 Подключаемся к каналу (через прокси)...')
                 _ta = time.time()
-                yt = get_youtube_service(ch_info['token_file'], proxy=ch_proxy)
+                yt = get_youtube_service_stubborn(ch_info['token_file'], ch_proxy, log)
                 log[-1] = '  🔐 Канал подключён (%.0f сек)' % (time.time() - _ta)
                 if not ch_proxy:
                     os.environ.pop('HTTPS_PROXY', None)
