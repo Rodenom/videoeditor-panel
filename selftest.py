@@ -126,7 +126,7 @@ def main():
             cap = []
             class FR:
                 def __init__(s, p, t): cap.append((hashlib.md5(open(p, 'rb').read()).hexdigest()[:10], t)); s._i = 'v%d' % len(cap)
-                def next_chunk(s): return (None, {'id': s._i})
+                def next_chunk(s, num_retries=0): return (None, {'id': s._i})
             class FV:
                 def insert(s, part, body, media_body): return FR(media_body._p, body['snippet']['title'])
             app.get_youtube_service = lambda token_file=None, proxy='': type('Y', (), {'videos': lambda s: FV()})()
@@ -166,7 +166,7 @@ def main():
         seen = []
         class FR2:
             def __init__(s, *a): seen.append(os.environ.get('HTTPS_PROXY')); s._i = 'v%d' % len(seen)
-            def next_chunk(s): return (None, {'id': s._i})
+            def next_chunk(s, num_retries=0): return (None, {'id': s._i})
         import googleapiclient.http as gh2
         gh2.MediaFileUpload = lambda path, **k: type('M', (), {'_p': path})()
         def _svc(token_file=None, proxy=''):

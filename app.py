@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.68"
+VERSION = "5.69"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -2006,7 +2006,7 @@ def upload_to_youtube(upload_job_id, files, title, description, privacy, channel
             req = yt.videos().insert(part='snippet,status', body=body, media_body=media)
             response = None
             while response is None:
-                status, response = req.next_chunk()
+                status, response = req.next_chunk(num_retries=5)
                 if status:
                     pct = int(status.progress()*100)
                     log[-1] = f"⏳ Загружаем {f['fmt']} — {pct}%..."
@@ -2342,7 +2342,7 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user, 
                     req = yt.videos().insert(part='snippet,status', body=body, media_body=media)
                     response = None
                     while response is None:
-                        status_obj, response = req.next_chunk()
+                        status_obj, response = req.next_chunk(num_retries=5)
                         if status_obj:
                             pct = int(status_obj.progress() * 100)
                             log[-1] = f'  ⏳ {fmt_name} — {pct}%...'
@@ -2523,7 +2523,7 @@ def ready_upload_to_youtube(job_id, ready_files, n_sets, category, privacy, user
                     req = yt.videos().insert(part='snippet,status', body=body, media_body=media)
                     response = None
                     while response is None:
-                        status_obj, response = req.next_chunk()
+                        status_obj, response = req.next_chunk(num_retries=5)
                         if status_obj:
                             pct = int(status_obj.progress()*100)
                             log[-1] = f'  ⏳ {fmt} — {pct}%...'
@@ -2616,7 +2616,7 @@ def mass_upload_to_youtube(job_id, files, n_sets, title, description, privacy, u
                     req = yt.videos().insert(part='snippet,status', body=body, media_body=media)
                     response = None
                     while response is None:
-                        status_obj, response = req.next_chunk()
+                        status_obj, response = req.next_chunk(num_retries=5)
                         if status_obj:
                             pct = int(status_obj.progress()*100)
                             log[-1] = f'  ⏳ {f["fmt"]} — {pct}%...'
