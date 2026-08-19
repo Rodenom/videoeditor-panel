@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.62"
+VERSION = "5.63"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -8091,6 +8091,7 @@ function upSave(){
     // писала «потеряна», унося ссылки с собой.
     const rows = Array.from(document.querySelectorAll('.up-card')).map(c=>({
       job: c.dataset.job, name: c.dataset.name, sub: c.dataset.sub, num: c.dataset.num,
+      at: parseInt(c.dataset.at) || Date.now(),
       done: c.classList.contains('done'),
       when: c.dataset.when || '',
       sets: c._sets || null}));
@@ -8102,7 +8103,8 @@ function upSummary(){
   const run = document.querySelectorAll('.up-card.run').length;
   document.getElementById('up-queue-wrap').style.display = cards.length ? '' : 'none';
   document.getElementById('up-queue-sum').textContent = cards.length
-    ? (run ? ('идёт: ' + run + ' из ' + cards.length) : ('готово: ' + cards.length)) : '';
+    ? (run ? ('идёт: ' + run + ' из ' + cards.length + ' · следующее видео можно ставить прямо сейчас')
+           : ('всё закончено: ' + cards.length)) : '';
 }
 function upAdd(job, name, sub, saved){
   if(!job || document.querySelector('.up-card[data-job="'+job+'"]')) return;
@@ -8110,6 +8112,7 @@ function upAdd(job, name, sub, saved){
   const el = document.createElement('div');
   el.className = 'up-card run';
   el.dataset.job = job; el.dataset.name = name; el.dataset.sub = sub||''; el.dataset.num = num;
+  el.dataset.at = (saved && saved.at) || Date.now();
   el.innerHTML =
     '<div class="up-head"><span class="up-num">'+num+'</span>'
     + '<span class="up-name">'+(name||'видео').replace(/</g,'&lt;')+'</span>'
@@ -8245,7 +8248,13 @@ function upClearDone(){
 function upRestore(){
   let rows = [];
   try{ rows = JSON.parse(localStorage.getItem(UP_STORE)||'[]'); }catch(e){}
-  rows.forEach(r => upAdd(r.job, r.name, r.sub, r));
+  // Незаконченную карточку возвращаем только если ей меньше двух часов: иначе
+  // после перезапуска панели на экране висит мёртвая «потеряна» и мешает
+  // смотреть на живые загрузки.
+  const now = Date.now();
+  rows.filter(r => r.done || !r.at || (now - r.at) < 7200000)
+      .forEach(r => upAdd(r.job, r.name, r.sub, r));
+  upSave();
 }
 
 function renderMassSets(sets, bodyId){
