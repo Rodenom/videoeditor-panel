@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.67"
+VERSION = "5.68"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -3439,7 +3439,10 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
       <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:10px;">
         <div class="up-section-title" style="margin:0;">📺 Мои каналы</div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;">
-          <button onclick="checkAllTokens(this)" title="Реально проверить, живы ли токены — не дожидаясь падения заливки" style="font-size:12px;font-weight:700;padding:7px 13px;border-radius:8px;border:1.5px solid var(--accent1);background:var(--surface2);color:var(--accent1);cursor:pointer;">🩺 Проверить все токены</button>
+          <!-- Кнопка проверяет не только токены: сначала прокси канала по слоям,
+               потом уже токен. Называлась «Проверить все токены», и байер её не
+               находил, когда панель советовала «нажми Проверить каналы». -->
+          <button onclick="checkAllTokens(this)" title="Проверяет прокси канала и токен: живы ли, и что именно сломано — не дожидаясь падения заливки" style="font-size:12px;font-weight:700;padding:7px 13px;border-radius:8px;border:1.5px solid var(--accent1);background:var(--surface2);color:var(--accent1);cursor:pointer;">🩺 Проверить каналы</button>
           <button onclick="reauthAll(this)" title="Пройти по всем каналам, которым нужна переавторизация, по очереди" style="font-size:12px;font-weight:700;padding:7px 13px;border-radius:8px;border:1.5px solid #f59e0b;background:#fffbeb;color:#b45309;cursor:pointer;">🔄 Переавторизовать все</button>
         </div>
       </div>
