@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.64"
+VERSION = "5.65"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -120,11 +120,35 @@ VF_CHEST_BOTH = (
 # Панель показывает стоимость ДО запуска, чтобы не выходило «сделал 5 роликов — ушло $10».
 VF_PRICE_PER_SEC = 0.029
 
+def vf_env():
+    """Окружение для скриптов фабрики — без прокси канала.
+
+    Заливка на YouTube выставляет HTTPS_PROXY на ВЕСЬ процесс панели (см.
+    get_authenticated_service): видео обязано уходить через прокси своего канала,
+    а не с реального IP, и по-другому его туда не подсунуть. Прокси остаётся
+    выставленным и после заливки.
+
+    Скрипты фабрики — дочерние процессы панели и наследуют её окружение целиком.
+    В итоге перевод текста уходил не в Claude, а в прокси Octo и получал оттуда
+    двоичный мусор вместо ответа: «связь с Claude: ['@°Ýx». Выглядело так, будто
+    сломалась вкладка «Связки», хотя виновата была заливка в соседней вкладке
+    (Павел напоролся 19.08, полдня искали).
+
+    Фабрике прокси канала не нужен никогда: она ходит в Claude, Replicate и
+    ElevenLabs напрямую. Поэтому здесь он снимается — и только здесь, на саму
+    заливку это не влияет.
+    """
+    e = dict(os.environ)
+    for k in ('HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy',
+              'ALL_PROXY', 'all_proxy'):
+        e.pop(k, None)
+    return e
+
 def vf_run(args, timeout=3600):
     """Запустить скрипт фабрики и вернуть его вывод (синхронно, для быстрых команд)."""
     import subprocess
-    r = subprocess.run([sys.executable] + args, cwd=VF_DIR, capture_output=True,
-                       text=True, timeout=timeout)
+    r = subprocess.run([sys.executable] + args, cwd=VF_DIR, env=vf_env(),
+                       capture_output=True, text=True, timeout=timeout)
     return {'ok': r.returncode == 0, 'out': (r.stdout or '')[-6000:],
             'err': (r.stderr or '')[-2000:]}
 
@@ -142,7 +166,7 @@ def vf_run_bg(args, title, timeout=7200):
     def work():
         job = VF_JOBS[job_id]
         try:
-            p = subprocess.Popen([sys.executable, '-u'] + args, cwd=VF_DIR,
+            p = subprocess.Popen([sys.executable, '-u'] + args, cwd=VF_DIR, env=vf_env(),
                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                  text=True, bufsize=1)
             for line in p.stdout:
@@ -187,7 +211,7 @@ def vf_handle(action, p):
             r = _sp.run([sys.executable, '-c',
                          'import json,personas;print(json.dumps({k:{"name":v.get("name",""),'
                          '"ru":v.get("ru","")} for k,v in personas.PERSONAS.items()},ensure_ascii=False))'],
-                        cwd=VF_DIR, capture_output=True, text=True, timeout=30)
+                        cwd=VF_DIR, env=vf_env(), capture_output=True, text=True, timeout=30)
             meta = json.loads(r.stdout.strip() or '{}')
         except Exception:
             meta = {}
@@ -418,7 +442,7 @@ def vf_handle(action, p):
                          'import json,personas as p;'
                          'print(json.dumps(p.all_for(%r,%r),ensure_ascii=False))'
                          % (offer, geo)],
-                        cwd=VF_DIR, capture_output=True, text=True, timeout=30)
+                        cwd=VF_DIR, env=vf_env(), capture_output=True, text=True, timeout=30)
             heroes = json.loads(r.stdout.strip() or '[]')
         except Exception as e:
             return {'ok': True, 'heroes': [], 'note': str(e)[:120]}
@@ -796,7 +820,7 @@ def vf_handle(action, p):
             rr = subprocess.run([sys.executable, '-c',
                                  'import json,personas;print(json.dumps({k:v.get("name","") '
                                  'for k,v in personas.PERSONAS.items()},ensure_ascii=False))'],
-                                cwd=VF_DIR, capture_output=True, text=True, timeout=30)
+                                cwd=VF_DIR, env=vf_env(), capture_output=True, text=True, timeout=30)
             names = json.loads(rr.stdout.strip() or '{}')
         except Exception:
             names = {}
