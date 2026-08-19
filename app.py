@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.69"
+VERSION = "5.70"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -800,6 +800,26 @@ def vf_handle(action, p):
         # ролики прошлых прогонов — выглядело так, будто сгенерировалось восемь штук
         # вместо двух, и деньги якобы улетели.
         pref = '%s_%s_' % (offer, geo)
+        # Подобрать ролики, которые собрались, но не успели переименоваться:
+        # сборка идёт во временный <тег>.new.mp4 и подменяет им готовый файл в
+        # самом конце. Прервали процесс между этими шагами (например, перезапуск
+        # панели во время сборки) — на диске лежит готовый ролик под временным
+        # именем, а в списке его нет. Выглядит как «сделал два, вижу один».
+        # Берём только те, что никто не пишет прямо сейчас и что ffprobe
+        # признаёт целыми; битые огрызки убираем.
+        for tmp in _glob.glob(os.path.join(VF_DIR, 'out', 'batch', '*.new.mp4')):
+            try:
+                if time.time() - os.path.getmtime(tmp) < 120:
+                    continue
+                pr = subprocess.run(['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+                                     '-show_entries', 'format=duration', '-of', 'csv=p=0', tmp],
+                                    capture_output=True, text=True, timeout=30)
+                if pr.returncode == 0 and float((pr.stdout or '0').strip() or 0) > 1:
+                    os.replace(tmp, tmp[:-len('.new.mp4')] + '.mp4')
+                else:
+                    os.remove(tmp)
+            except Exception:
+                pass
         res = {}
         for key, pat in (('videos', 'out/batch/*.mp4'), ('copies', 'out/uniq/*.mp4'),
                          ('prelas', 'prela/*/index.html')):
