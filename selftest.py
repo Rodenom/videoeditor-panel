@@ -247,7 +247,14 @@ def main():
 
     print('\n9. Понятные тексты ошибок')
     fe = app.friendly_upload_error
-    check('SOCKS -> «прокси не отвечает»', 'прокси не отвечает' in fe(Exception("SOCKSHTTPSConnectionPool ... Max retries exceeded")))
+    # Сетевая ошибка НЕ должна утверждать, кто виноват: в эту же ветку падает и
+    # мёртвый прокси, и заблокированный Google, и сбой у самого провайдера.
+    # Раньше текст гласил «прокси не отвечает (токен живой)» — байер чинил живой
+    # прокси, пока настоящая причина была в другом (Вика, 19.08).
+    _net = fe(Exception("SOCKSHTTPSConnectionPool ... Max retries exceeded"))
+    check('сетевая ошибка отправляет к проверке, а не обвиняет прокси',
+          'Проверить каналы' in _net)
+    check('сетевая ошибка не врёт про живой токен', 'токен живой' not in _net)
     check('Failed to parse -> про формат', 'формат' in fe(Exception("Failed to parse: 1.2.3.4:80:u:p")))
     check('invalid_grant -> про токен', 'токен' in fe(Exception("invalid_grant: Token has been expired")))
     check('uploadLimitExceeded -> про лимит', 'лимит' in fe(Exception("uploadLimitExceeded")))

@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.65"
+VERSION = "5.66"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -1588,6 +1588,91 @@ def normalize_proxy(p):
     return p
 
 
+def diagnose_proxy(proxy, timeout=12):
+    """Проверить прокси канала ПО СЛОЯМ и вернуть факты, а не догадку.
+
+    Зачем: friendly_upload_error() ловил любую сетевую ошибку («Max retries
+    exceeded», «Connection refused») и объявлял виноватым прокси, дописывая
+    «(токен живой)» — хотя ни прокси, ни токен никто не проверял. Байер видел
+    «прокси не отвечает» на живом прокси и не понимал, куда смотреть
+    (Вика напоролась 19.08). Теперь три слоя проверяются отдельно:
+
+      tcp     — прокси вообще принимает соединение
+      net     — через него виден интернет, и с какого IP мы выходим
+      google  — через него отвечает сервер авторизации Google
+
+    Дальше уже видно, что чинить: прокси, доступ к Google или сам токен.
+    """
+    out = {'given': bool((proxy or '').strip()), 'url': '', 'host': '', 'port': 0,
+           'tcp': None, 'net': None, 'ip': '', 'google': None, 'error': ''}
+    if not out['given']:
+        return out
+    url = normalize_proxy(proxy)
+    out['url'] = url
+    try:
+        from urllib.parse import urlparse as _up
+        pu = _up(url)
+        out['host'], out['port'] = pu.hostname or '', pu.port or 0
+    except Exception as e:
+        out['error'] = 'прокси не разобрался: %s' % str(e)[:80]
+        return out
+    if not out['host'] or not out['port']:
+        out['error'] = 'в прокси не видно хоста или порта'
+        return out
+
+    import socket as _sk
+    try:
+        _sk.create_connection((out['host'], out['port']), timeout=timeout).close()
+        out['tcp'] = True
+    except Exception as e:
+        out['tcp'] = False
+        out['error'] = str(e)[:120]
+        return out                      # дальше проверять нечего
+
+    try:
+        import requests as _rq
+        s = _rq.Session()
+        s.trust_env = False             # берём ИМЕННО этот прокси, а не из окружения
+        pr = {'http': url, 'https': url}
+        try:
+            r = s.get('https://api.ipify.org', proxies=pr, timeout=timeout)
+            out['net'] = r.ok
+            out['ip'] = (r.text or '').strip()[:40]
+        except Exception as e:
+            out['net'] = False
+            out['error'] = str(e)[:120]
+        if out['net']:
+            try:
+                # Любой ответ Google годится: важно, что он дошёл через прокси.
+                s.get('https://oauth2.googleapis.com/tokeninfo', proxies=pr, timeout=timeout)
+                out['google'] = True
+            except Exception as e:
+                out['google'] = False
+                out['error'] = str(e)[:120]
+    except ImportError:
+        out['error'] = 'нет библиотеки requests'
+    return out
+
+
+def proxy_verdict(d):
+    """Человеческая строка по результату diagnose_proxy() — без гаданий."""
+    if not d.get('given'):
+        return 'канал идёт без прокси, напрямую с этого компьютера'
+    where = '%s:%s' % (d.get('host') or '?', d.get('port') or '?')
+    if d.get('tcp') is False:
+        return 'прокси %s не принимает соединение — он мёртвый или сменились доступы' % where
+    if d.get('net') is False:
+        return ('прокси %s отвечает, но интернета через него нет — чаще всего кончился '
+                'трафик или неверные логин с паролем' % where)
+    if d.get('google') is False:
+        return ('прокси %s живой (выход через %s), но Google через него не отвечает — '
+                'этот IP у Google заблокирован, нужен другой прокси'
+                % (where, d.get('ip') or '?'))
+    if d.get('google'):
+        return 'прокси %s полностью рабочий, выход через %s' % (where, d.get('ip') or '?')
+    return 'прокси %s проверить не вышло: %s' % (where, d.get('error') or 'неизвестно')
+
+
 def build_api(name, version, creds):
     """build() Google API без загрузки схемы по сети.
 
@@ -2244,7 +2329,12 @@ def friendly_upload_error(err):
     if ('ProxyError' in s or 'Cannot connect to proxy' in s or 'Tunnel connection failed' in s
             or 'SOCKS' in s or 'Max retries exceeded' in s or 'NewConnectionError' in s
             or 'Connection refused' in s or 'Failed to establish' in s):
-        return 'прокси не отвечает — проверь/смени прокси этого канала (токен живой)'
+        # Раньше здесь стояло «(токен живой)» — утверждение, которого никто не
+        # проверял: в эту же ветку падает любая сетевая ошибка. Байер видел
+        # «прокси не отвечает» на живом прокси и чинил не то. Точный виновник
+        # определяется в diagnose_proxy(), кнопкой «Проверить каналы».
+        return ('связи нет — жми «Проверить каналы», панель скажет, прокси это или токен'
+                ' [%s]' % s[:70])
     return 'ошибка: ' + s[:120]
 
 
@@ -4743,10 +4833,33 @@ async function checkAllTokens(btn){
     const d = await r.json();
     const dead = (d.results||[]).filter(x=>!x.alive);
     let html = `<b style="color:${dead.length?'#dc2626':'#16a34a'};">Живых ${d.alive} из ${d.checked}</b>`;
+    // Показываем состояние прокси у КАЖДОГО канала, а не только у мёртвых.
+    // Бывает так: прокси живой, интернет через него есть, а Google этот IP не
+    // принимает. Канал при этом «живой», но заливка с него не пойдёт — и раньше
+    // об этом нигде не говорилось, байер видел рабочий прокси и не понимал, что
+    // не так (Вика, 19.08).
+    const warn = (d.results||[]).filter(x=>x.alive && x.proxy && /не отвечает|заблокирован|нет интернета|не принимает/.test(x.proxy));
+    if(warn.length){
+      html += '<div style="margin-top:6px;">' + warn.map(x=>
+        `<div style="color:#d97706;">⚠ ${x.name} — ${x.proxy}</div>`).join('') + '</div>';
+    }
     if(dead.length){
       html += '<div style="margin-top:6px;">' + dead.map(x=>
         `<div style="color:#dc2626;">✕ ${x.name} — ${x.reason||'мёртв'}</div>`).join('') + '</div>';
-      html += '<div style="color:var(--text3);margin-top:4px;">Нажми «Переавторизовать» у этих каналов.</div>';
+      // Совет по делу: переавторизация лечит токен и бесполезна, когда виноват прокси.
+      const proxyFault = dead.some(x=>/прокси/.test(x.reason||''));
+      const tokenFault = dead.some(x=>/токен/.test(x.reason||''));
+      let tip = [];
+      if(tokenFault) tip.push('где написано про токен — жми «Переавторизовать»');
+      if(proxyFault) tip.push('где написано про прокси — переавторизация не поможет, меняй прокси у канала');
+      html += '<div style="color:var(--text3);margin-top:4px;">' +
+              (tip.join('; ') || 'Нажми «Переавторизовать» у этих каналов.') + '</div>';
+    }
+    const okList = (d.results||[]).filter(x=>x.alive && x.proxy && !warn.includes(x));
+    if(okList.length){
+      html += '<details style="margin-top:6px;"><summary style="cursor:pointer;color:var(--text3);">' +
+              'рабочие каналы и их выходной IP</summary>' + okList.map(x=>
+        `<div style="color:var(--text3);font-size:11px;">${x.name} — ${x.proxy}</div>`).join('') + '</details>';
     }
     box.innerHTML = html;
     loadChannels();
@@ -9143,8 +9256,24 @@ class Handler(BaseHTTPRequestHandler):
                             with open(tf, 'w') as _f:
                                 _f.write(creds.to_json())
                         res.update(alive=bool(creds.valid), reason='' if creds.valid else 'токен невалиден')
+                        # Даже когда всё хорошо — говорим, через какой IP выходит канал.
+                        # Это единственное место, где байер вообще может это увидеть.
+                        if _p:
+                            res['proxy'] = proxy_verdict(diagnose_proxy(_p))
                     except Exception as e:
-                        res.update(alive=False, reason=friendly_upload_error(e))
+                        # НЕ гадаем. Смотрим по слоям: прокси, интернет через него,
+                        # Google через него — и только потом называем виноватого.
+                        # Раньше тут любая сетевая ошибка превращалась в «прокси не
+                        # отвечает (токен живой)», и байер чинил рабочий прокси.
+                        d = diagnose_proxy(_p) if _p else {'given': False}
+                        res['proxy'] = proxy_verdict(d)
+                        if _p and (d.get('tcp') is False or d.get('net') is False
+                                   or d.get('google') is False):
+                            res.update(alive=False, reason=res['proxy'])
+                        else:
+                            res.update(alive=False,
+                                       reason='токен: %s · %s' % (friendly_upload_error(e),
+                                                                  res['proxy']))
                 # синхронизируем метку ошибки со свежей правдой
                 if res['alive'] and ch_info.get('last_error'):
                     ch_info.pop('last_error', None); changed = True
