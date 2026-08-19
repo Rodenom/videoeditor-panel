@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.60"
+VERSION = "5.61"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -3046,6 +3046,41 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
       <div style="display:flex;gap:8px;margin-bottom:18px;">
         <button id="mode-auto-btn" onclick="setUploadMode('auto')" style="flex:1;padding:10px;border-radius:10px;border:2px solid #4f46e5;background:#4f46e5;color:#fff;font-weight:700;font-size:13px;cursor:pointer;">⚡ Авто (конвертация)</button>
         <button id="mode-ready-btn" onclick="setUploadMode('ready')" style="flex:1;padding:10px;border-radius:10px;border:2px solid #d1d5db;background:var(--surface2);color:var(--text3);font-weight:700;font-size:13px;cursor:pointer;">📁 Готовые видео</button>
+      </div>
+
+      <!-- Очередь загрузок. Раньше прогресс был один на всю вкладку и кнопка
+           гасла до конца: второе видео нельзя было поставить, не дождавшись
+           первого. Сервер-то умеет несколько разом — упиралось всё в экран.
+           Теперь каждая загрузка живёт своей карточкой со своим прогрессом. -->
+      <style>
+        .up-card{border:1.5px solid var(--border);border-radius:12px;padding:11px 13px;
+              margin-bottom:10px;background:var(--surface2);}
+        .up-card.run{border-color:#4f46e5;}
+        .up-card.done{border-color:#16a34a;}
+        .up-card.err{border-color:#dc2626;}
+        .up-head{display:flex;align-items:center;gap:9px;flex-wrap:wrap;font-size:13px;}
+        .up-num{width:22px;height:22px;border-radius:7px;background:var(--grad1);color:#fff;
+              font-size:11px;font-weight:800;display:flex;align-items:center;justify-content:center;flex-shrink:0;}
+        .up-name{font-weight:700;color:var(--text);}
+        .up-sub{font-size:11.5px;color:var(--text3);}
+        .up-state{margin-left:auto;font-size:12px;font-weight:800;}
+        .up-bar{height:6px;border-radius:4px;background:var(--border2);margin-top:8px;overflow:hidden;}
+        .up-bar i{display:block;height:100%;background:var(--grad1);width:0;transition:width .4s;}
+        .up-log{display:none;background:#0d0d1a;color:#7eff7e;border-radius:9px;padding:9px;
+              font-size:11px;font-family:monospace;max-height:150px;overflow-y:auto;
+              white-space:pre-wrap;margin-top:8px;}
+        .up-links{margin-top:8px;font-size:11.5px;}
+        .up-links a{color:#6c63ff;word-break:break-all;}
+      </style>
+      <div id="up-queue-wrap" style="display:none;margin-bottom:18px;">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:9px;">
+          <b style="font-size:14px;">📤 Мои загрузки</b>
+          <span id="up-queue-sum" style="font-size:12px;color:var(--text3);"></span>
+          <button onclick="upClearDone()" style="margin-left:auto;padding:4px 10px;font-size:11px;
+            border:1px solid var(--border);border-radius:8px;background:var(--surface2);
+            color:var(--text3);cursor:pointer;">Убрать законченные</button>
+        </div>
+        <div id="up-queue"></div>
       </div>
 
       <!-- Свой текст (работает в обоих режимах) -->
@@ -8040,6 +8075,110 @@ function setMassPrivacy(p){
   });
 }
 
+// ── Очередь загрузок ─────────────────────────────────────
+// Каждая загрузка — своя карточка со своим опросом. Сервер держит несколько
+// работ параллельно (MASS_UPLOAD_JOBS — словарь по job_id), упиралось всё в
+// один прогресс-бар на экране. Список job'ов лежит в localStorage: закрыл
+// вкладку, открыл заново — загрузки на месте и видно, что с ними.
+const UP_STORE = 've_uploads';
+let upSeq = 0;
+
+function upSave(){
+  try{
+    const rows = Array.from(document.querySelectorAll('.up-card')).map(c=>({
+      job: c.dataset.job, name: c.dataset.name, sub: c.dataset.sub, num: c.dataset.num}));
+    localStorage.setItem(UP_STORE, JSON.stringify(rows.slice(-12)));
+  }catch(e){}
+}
+function upSummary(){
+  const cards = document.querySelectorAll('.up-card');
+  const run = document.querySelectorAll('.up-card.run').length;
+  document.getElementById('up-queue-wrap').style.display = cards.length ? '' : 'none';
+  document.getElementById('up-queue-sum').textContent = cards.length
+    ? (run ? ('идёт: ' + run + ' из ' + cards.length) : ('готово: ' + cards.length)) : '';
+}
+function upAdd(job, name, sub){
+  if(!job || document.querySelector('.up-card[data-job="'+job+'"]')) return;
+  const num = ++upSeq;
+  const el = document.createElement('div');
+  el.className = 'up-card run';
+  el.dataset.job = job; el.dataset.name = name; el.dataset.sub = sub||''; el.dataset.num = num;
+  el.innerHTML =
+    '<div class="up-head"><span class="up-num">'+num+'</span>'
+    + '<span class="up-name">'+(name||'видео').replace(/</g,'&lt;')+'</span>'
+    + '<span class="up-sub">'+(sub||'')+'</span>'
+    + '<span class="up-state" style="color:#4f46e5;">готовлю…</span></div>'
+    + '<div class="up-bar"><i></i></div>'
+    + '<div style="display:flex;gap:10px;margin-top:6px;">'
+    + '<button onclick="upToggleLog(this)" style="border:none;background:none;color:var(--text3);'
+    + 'font-size:11px;cursor:pointer;padding:0;">показать лог</button></div>'
+    + '<div class="up-log"></div><div class="up-links"></div>';
+  document.getElementById('up-queue').appendChild(el);
+  document.getElementById('up-queue-wrap').style.display = '';
+  upSave(); upSummary(); upPoll(el);
+}
+function upToggleLog(btn){
+  const log = btn.closest('.up-card').querySelector('.up-log');
+  const on = log.style.display === 'block';
+  log.style.display = on ? 'none' : 'block';
+  btn.textContent = on ? 'показать лог' : 'спрятать лог';
+}
+function upPoll(el){
+  const job = el.dataset.job;
+  const tick = () => {
+    fetch('/mass_yt_status/'+job).then(r=>r.json()).then(d=>{
+      const pct = d.total>0 ? Math.round(d.done/d.total*100) : 0;
+      el.querySelector('.up-bar i').style.width = pct+'%';
+      const st = el.querySelector('.up-state');
+      const log = el.querySelector('.up-log');
+      log.textContent = (d.log||[]).join('\n'); log.scrollTop = 99999;
+      // Задания живут в памяти панели. Перезапустили её — задание не найдётся,
+      // и карточка опрашивала бы пустоту вечно. Даём пару попыток и закрываем.
+      if(d.status==='unknown'){
+        el._lost = (el._lost||0) + 1;
+        if(el._lost > 3){
+          clearInterval(el._t);
+          el.classList.remove('run'); el.classList.add('err');
+          st.textContent = 'потеряна — панель перезапускали';
+          st.style.color = 'var(--text3)';
+          upSummary();
+        }
+        return;
+      }
+      el._lost = 0;
+      if(d.status==='done' || d.status==='error'){
+        clearInterval(el._t);
+        el.classList.remove('run');
+        el.classList.add(d.status==='done' ? 'done' : 'err');
+        st.textContent = d.status==='done' ? ('готово · ' + d.done + ' из ' + d.total)
+                                           : 'ошибка — открой лог';
+        st.style.color = d.status==='done' ? '#16a34a' : '#dc2626';
+        const links = el.querySelector('.up-links');
+        links.innerHTML = (d.sets||[]).map(sset =>
+          '<div style="margin-top:5px;"><b style="color:var(--text2);">'+sset.channel+'</b> '
+          + (sset.links||[]).map(l=>'<a href="'+l.link+'" target="_blank">'+l.fmt+'</a>').join(' · ')
+          + '</div>').join('');
+      } else {
+        st.textContent = d.total ? (d.done + ' из ' + d.total) : 'готовлю…';
+      }
+      upSummary();
+    }).catch(()=>{});
+  };
+  tick();
+  el._t = setInterval(tick, 2000);
+}
+function upClearDone(){
+  document.querySelectorAll('.up-card.done, .up-card.err').forEach(c=>{
+    clearInterval(c._t); c.remove();
+  });
+  upSave(); upSummary();
+}
+function upRestore(){
+  let rows = [];
+  try{ rows = JSON.parse(localStorage.getItem(UP_STORE)||'[]'); }catch(e){}
+  rows.forEach(r => upAdd(r.job, r.name, r.sub));
+}
+
 function renderMassSets(sets, bodyId){
   const tbody = document.getElementById(bodyId);
   sets.forEach(s=>{
@@ -8221,18 +8360,21 @@ function updateReadyBtn(){
 async function startReadyUpload(){
   const n = parseInt(document.getElementById('ready-n').value)||1;
   const files = Object.values(readyFiles);
-  document.getElementById('ready-progress-wrap').style.display = '';
-  document.getElementById('ready-log').style.display = '';
-  document.getElementById('ready-result').style.display = 'none';
-  document.getElementById('ready-run-btn').disabled = true;
   const res = await fetch('/ready_upload',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({files, n_sets:n, category:readyCat, privacy:readyPrivacy,
       custom_title:(document.getElementById('custom-up-title').value||'').trim(),
       custom_desc:(document.getElementById('custom-up-desc').value||'').trim(),
       uniqueize:(document.getElementById('uq-copies')||{}).checked||false})});
   const data = await res.json();
-  readyJobId = data.job_id;
-  readyPollTimer = setInterval(()=>pollReadyJob(), 1500);
+  if(!data.job_id){ alert('Не удалось запустить загрузку'); return; }
+  const имена = files.map(f=>(f.name||f.path||'').split('/').pop()).filter(Boolean);
+  upAdd(data.job_id, имена[0] || 'готовые видео',
+        'готовые · ' + (readyCat||'') + ' · файлов ' + files.length + ' · ' + n + ' акк.');
+  // Список файлов сбрасываем: следующая загрузка — это следующий набор.
+  readyFiles = {};
+  const lst = document.getElementById('ready-files-list');
+  if(lst) lst.innerHTML = '';
+  document.getElementById('ready-run-btn').disabled = true;
 }
 
 function pollReadyJob(){
@@ -8333,42 +8475,23 @@ function updateAutoRunBtn(){
 
 async function startAutoUpload(){
   const n = parseInt(document.getElementById('auto-n').value)||1;
-  const btn = document.getElementById('auto-run-btn');
-  btn.disabled = true;
-  document.getElementById('auto-log').style.display = 'block';
-  document.getElementById('auto-log').textContent = '';
-  document.getElementById('auto-progress-wrap').style.display = 'block';
-  document.getElementById('auto-result').style.display = 'none';
-  document.getElementById('auto-result-body').innerHTML = '';
-
+  // Кнопку НЕ гасим: можно поставить второе видео, не дожидаясь первого.
+  // Прогресс каждой загрузки живёт в своей карточке наверху вкладки.
   const _ctitle = (document.getElementById('custom-up-title').value||'').trim() || (document.getElementById('auto-ai-title').textContent||'').trim();
   const _cdesc = (document.getElementById('custom-up-desc').value||'').trim() || (document.getElementById('auto-ai-desc').textContent||'').trim();
   const res = await fetch('/auto_upload',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({src_video:autoVideoPath, n_sets:n, category:autoCat, privacy:autoPrivacy, custom_title:_ctitle, custom_desc:_cdesc,
       uniqueize:(document.getElementById('uq-copies')||{}).checked||false})});
   const data = await res.json();
-  autoJobId = data.job_id;
-
-  let logLen=0, lastSetCount=0;
-  autoPollTimer = setInterval(()=>{
-    fetch('/mass_yt_status/'+autoJobId).then(r=>r.json()).then(d=>{
-      const newLogs=d.log.slice(logLen); logLen=d.log.length;
-      const lb=document.getElementById('auto-log');
-      newLogs.forEach(l=>{lb.textContent+=l+'\n';}); lb.scrollTop=lb.scrollHeight;
-      const pct = d.total>0 ? Math.round(d.done/d.total*100) : 0;
-      document.getElementById('auto-progress-fill').style.width=pct+'%';
-      document.getElementById('auto-progress-text').textContent=`${d.done} / ${d.total}`;
-      if(d.sets.length > lastSetCount){
-        renderMassSets(d.sets.slice(lastSetCount),'auto-result-body');
-        document.getElementById('auto-result').style.display='block';
-        lastSetCount=d.sets.length;
-      }
-      if(d.status==='done'||d.status==='error'){
-        clearInterval(autoPollTimer);
-        btn.disabled=false;
-      }
-    });
-  },1500);
+  if(!data.job_id){ alert('Не удалось запустить загрузку'); return; }
+  const имя = (autoVideoPath||'видео').split('/').pop();
+  upAdd(data.job_id, имя, 'авто · ' + (autoCat||'') + ' · ' + n + ' акк. × 3 формата');
+  // Поле очищаем, чтобы следующее видео не ушло по ошибке тем же файлом.
+  autoVideoPath = '';
+  const fi = document.getElementById('auto-file-info');
+  if(fi) fi.textContent = 'выбери следующее видео';
+  const rb = document.getElementById('auto-run-btn');
+  if(rb) rb.disabled = true;
 }
 
 // ── Mass upload from build tab ──
@@ -8490,6 +8613,11 @@ function showYtLinks(links){
 // Theme toggle
 fetch('/version').then(r=>r.json()).then(d=>{ document.getElementById('app-version').textContent='v'+d.version; });
 
+window.addEventListener('DOMContentLoaded', ()=>{
+  // Загрузки идут на сервере и переживают закрытую вкладку — возвращаем их
+  // карточки на экран, иначе кажется, что всё пропало.
+  try{ upRestore(); }catch(e){}
+});
 window.addEventListener('DOMContentLoaded', async ()=>{
   try{
     const r = await fetch('/update');
