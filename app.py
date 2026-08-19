@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.61"
+VERSION = "5.62"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -8085,9 +8085,16 @@ let upSeq = 0;
 
 function upSave(){
   try{
+    // Готовую загрузку храним ВМЕСТЕ СО ССЫЛКАМИ. Задания живут в памяти панели
+    // и умирают с её перезапуском, а ссылки на залитые видео — единственное, что
+    // от загрузки остаётся. Хранили только job — и после перезапуска карточка
+    // писала «потеряна», унося ссылки с собой.
     const rows = Array.from(document.querySelectorAll('.up-card')).map(c=>({
-      job: c.dataset.job, name: c.dataset.name, sub: c.dataset.sub, num: c.dataset.num}));
-    localStorage.setItem(UP_STORE, JSON.stringify(rows.slice(-12)));
+      job: c.dataset.job, name: c.dataset.name, sub: c.dataset.sub, num: c.dataset.num,
+      done: c.classList.contains('done'),
+      when: c.dataset.when || '',
+      sets: c._sets || null}));
+    localStorage.setItem(UP_STORE, JSON.stringify(rows.slice(-20)));
   }catch(e){}
 }
 function upSummary(){
@@ -8097,7 +8104,7 @@ function upSummary(){
   document.getElementById('up-queue-sum').textContent = cards.length
     ? (run ? ('идёт: ' + run + ' из ' + cards.length) : ('готово: ' + cards.length)) : '';
 }
-function upAdd(job, name, sub){
+function upAdd(job, name, sub, saved){
   if(!job || document.querySelector('.up-card[data-job="'+job+'"]')) return;
   const num = ++upSeq;
   const el = document.createElement('div');
@@ -8115,6 +8122,19 @@ function upAdd(job, name, sub){
     + '<div class="up-log"></div><div class="up-links"></div>';
   document.getElementById('up-queue').appendChild(el);
   document.getElementById('up-queue-wrap').style.display = '';
+  if(saved && saved.done){
+    // Загрузка уже была закончена — показываем результат и никуда не стучимся.
+    el.classList.remove('run'); el.classList.add('done');
+    el.dataset.when = saved.when || '';
+    el._sets = saved.sets || [];
+    el.querySelector('.up-bar i').style.width = '100%';
+    const st = el.querySelector('.up-state');
+    st.textContent = 'готово' + (saved.when ? (' · ' + saved.when) : '');
+    st.style.color = '#16a34a';
+    upLinks(el, el._sets);
+    upSummary();
+    return;
+  }
   upSave(); upSummary(); upPoll(el);
 }
 function upToggleLog(btn){
@@ -8139,9 +8159,9 @@ function upPoll(el){
         if(el._lost > 3){
           clearInterval(el._t);
           el.classList.remove('run'); el.classList.add('err');
-          st.textContent = 'потеряна — панель перезапускали';
+          st.textContent = 'шла, когда панель перезапустили — проверь канал';
           st.style.color = 'var(--text3)';
-          upSummary();
+          upSave(); upSummary();
         }
         return;
       }
@@ -8150,14 +8170,15 @@ function upPoll(el){
         clearInterval(el._t);
         el.classList.remove('run');
         el.classList.add(d.status==='done' ? 'done' : 'err');
-        st.textContent = d.status==='done' ? ('готово · ' + d.done + ' из ' + d.total)
-                                           : 'ошибка — открой лог';
+        el._sets = d.sets || [];
+        el.dataset.when = new Date().toLocaleString('ru-RU',
+          {day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit'});
+        st.textContent = d.status==='done'
+          ? ('готово · ' + d.done + ' из ' + d.total + ' · ' + el.dataset.when)
+          : 'ошибка — открой лог';
         st.style.color = d.status==='done' ? '#16a34a' : '#dc2626';
-        const links = el.querySelector('.up-links');
-        links.innerHTML = (d.sets||[]).map(sset =>
-          '<div style="margin-top:5px;"><b style="color:var(--text2);">'+sset.channel+'</b> '
-          + (sset.links||[]).map(l=>'<a href="'+l.link+'" target="_blank">'+l.fmt+'</a>').join(' · ')
-          + '</div>').join('');
+        upLinks(el, el._sets);
+        upSave();
       } else {
         st.textContent = d.total ? (d.done + ' из ' + d.total) : 'готовлю…';
       }
@@ -8167,6 +8188,54 @@ function upPoll(el){
   tick();
   el._t = setInterval(tick, 2000);
 }
+// Ссылки видно целиком и копируются одним кликом — и по одной, и все три
+// разом, и весь набор по каналам. В первой версии карточки я оставил только
+// подписи «9:16 · 1:1 · 16:9», и стало хуже, чем было: Павел копировал их
+// одной кнопкой, а тут пришлось бы тыкать в каждую.
+function upCopy(btn, text){
+  navigator.clipboard.writeText(text);
+  const было = btn.textContent;
+  btn.textContent = '✓ скопировано';
+  setTimeout(()=>{ btn.textContent = было; }, 1300);
+}
+function upLinks(el, sets){
+  const box = el.querySelector('.up-links');
+  if(!sets.length){ box.innerHTML = ''; return; }
+  const все = [];
+  sets.forEach(s => (s.links||[]).forEach(l => все.push(l.link)));
+  const кнопка = (txt, data) =>
+    '<button onclick="upCopy(this, ' + JSON.stringify(data).replace(/"/g,'&quot;') + ')" '
+    + 'style="border:1px solid var(--border);background:var(--surface);color:var(--text2);'
+    + 'border-radius:7px;padding:3px 9px;font-size:11px;font-weight:700;cursor:pointer;">'
+    + txt + '</button>';
+  box.innerHTML =
+    (все.length > 3
+      ? '<div style="margin:6px 0;">' + кнопка('копировать все ' + все.length + ' ссылок',
+                                               все.join('\n')) + '</div>'
+      : '')
+    + sets.map(s => {
+        const list = s.links || [];
+        return '<div style="margin-top:7px;padding:7px 9px;background:var(--surface);'
+          + 'border-radius:9px;">'
+          + '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">'
+          + '<b style="color:var(--text2);font-size:12px;">' + s.channel + '</b>'
+          + '<span style="margin-left:auto;">'
+          + кнопка('копировать ' + list.length, list.map(l=>l.link).join('\n'))
+          + '</span></div>'
+          + list.map(l =>
+              '<div style="display:flex;align-items:center;gap:7px;margin-top:3px;">'
+              + '<span style="width:34px;flex-shrink:0;color:var(--text3);font-size:11px;">'
+              + l.fmt + '</span>'
+              + '<a href="' + l.link + '" target="_blank" style="flex:1;font-size:11px;'
+              + 'word-break:break-all;">' + l.link + '</a>'
+              + '<button onclick="upCopy(this, ' + JSON.stringify(l.link).replace(/"/g,'&quot;')
+              + ')" style="border:none;background:var(--surface2);border-radius:6px;'
+              + 'padding:2px 7px;cursor:pointer;font-size:11px;flex-shrink:0;">📋</button>'
+              + '</div>').join('')
+          + '</div>';
+      }).join('');
+}
+
 function upClearDone(){
   document.querySelectorAll('.up-card.done, .up-card.err').forEach(c=>{
     clearInterval(c._t); c.remove();
@@ -8176,7 +8245,7 @@ function upClearDone(){
 function upRestore(){
   let rows = [];
   try{ rows = JSON.parse(localStorage.getItem(UP_STORE)||'[]'); }catch(e){}
-  rows.forEach(r => upAdd(r.job, r.name, r.sub));
+  rows.forEach(r => upAdd(r.job, r.name, r.sub, r));
 }
 
 function renderMassSets(sets, bodyId){
