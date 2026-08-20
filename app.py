@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.71"
+VERSION = "5.72"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -171,7 +171,9 @@ def vf_run(args, timeout=3600):
     return {'ok': r.returncode == 0, 'out': (r.stdout or '')[-6000:],
             'err': (r.stderr or '')[-2000:]}
 
-def vf_run_bg(args, title, timeout=7200):
+CLIP_DIR = os.path.expanduser('~/Desktop/ClipFarm/tools')
+
+def vf_run_bg(args, title, timeout=7200, cwd=None):
     """Долгие команды (тексты, ролик, прокла) — в фоне, с живым логом.
 
     Раньше это шло синхронно: браузер полторы минуты ждал ответа, панель выглядела
@@ -185,7 +187,7 @@ def vf_run_bg(args, title, timeout=7200):
     def work():
         job = VF_JOBS[job_id]
         try:
-            p = subprocess.Popen([sys.executable, '-u'] + args, cwd=VF_DIR, env=vf_env(),
+            p = subprocess.Popen([sys.executable, '-u'] + args, cwd=(cwd or VF_DIR), env=vf_env(),
                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                  text=True, bufsize=1)
             for line in p.stdout:
@@ -393,6 +395,35 @@ def vf_handle(action, p):
         if not os.path.exists(f):
             return {'error': 'Разбора ещё нет'}
         return read_json(f) or {'error': 'Разбор не прочитался'}
+
+    if action == 'dress':
+        # Глубокая обработка ролика скриптами ClipFarm — то, что Павел вчера
+        # гонял руками через чат: голос (тон, pitch bend, провал на 3 кГц),
+        # фон толпы на языке гео с ducking, картинка (дрейф кадра, дыхание
+        # зума, перебивки из футажа, виньетка, зерно) и хвост copy-склейкой.
+        # Это НЕ то же, что «Звук и хвост»: тот кладёт дорожки из папки Павла,
+        # а этот переодевает сам ролик. Вместе их гонять нельзя — фон и хвост
+        # лягут дважды.
+        if not os.path.isdir(CLIP_DIR):
+            return {'error': 'Не нашёл ~/Desktop/ClipFarm/tools — обработка живёт там'}
+        rel = (p.get('file') or '').strip()
+        src = vf_inside(rel, 'out', ['.mp4'])
+        if not src:
+            return {'error': 'Не нашёл этот ролик на диске'}
+        # Язык фона = язык гео. Для чего фона нет — берём английский, он в фоне не режет ухо.
+        amb = os.path.expanduser('~/Desktop/ClipFarm/assets/ambience')
+        lang = geo if os.path.exists(os.path.join(amb, 'crowd_%s.wav' % geo)) else 'en'
+        args = ['pipeline.py', src, '--lang', lang,
+                '--out', os.path.join(VF_DIR, 'out', 'batch')]
+        # Хвост берём из папки Павла, свой на каждый ролик.
+        import random as _rnd
+        tails_dir = os.path.expanduser('~/Desktop/Звуки и хвосты')
+        tails = sorted(f for f in os.listdir(tails_dir)
+                       if f.lower().endswith('.mp4')) if os.path.isdir(tails_dir) else []
+        if tails and p.get('tail', True):
+            args += ['--tail', os.path.join(tails_dir,
+                                            _rnd.Random(os.path.basename(src)).choice(tails))]
+        return vf_run_bg(args, 'Глубокая обработка ролика', cwd=CLIP_DIR)
 
     if action == 'upload':
         # Ролик из «Связок» уходит на YouTube ОТСЮДА ЖЕ, без выгрузки на диск.
@@ -6095,6 +6126,9 @@ async function svFiles(){
           + ' ' + бейдж + '</span>'
           + '<button class="sv-btn ghost" style="padding:5px 12px;font-size:12px;" '
           + 'onclick="svCheckText(\''+f+'\')">Проверить текст</button>'
+          + '<button class="sv-btn ghost" style="padding:5px 12px;font-size:12px;" '
+          + 'onclick="svDress(\''+f+'\')" title="Голос, фон толпы на языке гео, дрейф кадра, '
+          + 'перебивки, зерно и хвост — то, что раньше гонялось скриптом вручную">Переодеть ролик</button>'
           + '<button class="sv-btn" style="padding:5px 12px;font-size:12px;" '
           + 'onclick="svUpload(\''+f+'\')">Залить на YouTube</button>'
           + '<button class="sv-btn ghost" style="padding:5px 12px;font-size:12px;" '
@@ -6152,6 +6186,18 @@ function svUploadWatch(job, box){
       if(d.status === 'error') box.innerHTML += '<div class="sv-hint" style="color:#dc2626;">Заливка не дошла до конца — смотри лог во вкладке «Загрузить на YouTube».</div>';
     }
   }, 2000);
+}
+// Глубокая обработка скриптами ClipFarm. Отдельно от «Звук и хвост»: тот кладёт
+// дорожки из папки поверх, а этот переодевает сам ролик — голос, фон толпы,
+// картинку. Вместе не гонять: фон и хвост лягут дважды.
+async function svDress(f){
+  if(!confirm('Переодеть «' + f.split('/').pop() + '»?\n\n'
+    + 'Голос, фон толпы на языке гео, дрейф кадра, перебивки, зерно и хвост.\n'
+    + 'Займёт примерно столько же, сколько длится ролик.\n\n'
+    + 'Если на нём уже наложены «Звук и хвост» — не надо, фон ляжет дважды.')) return;
+  const r = await svJob('dress', Object.assign(svParams(), {file: f}), 6,
+                        'Переодеваю ролик — голос, фон, картинка, хвост…');
+  if(r.ok){ svSay(6, 'Готово: рядом появился файл с пометкой _ready.'); await svFiles(); }
 }
 // Ролик прошлого прогона можно просто выкинуть, а не разглядывать.
 async function svDelVideo(f){
