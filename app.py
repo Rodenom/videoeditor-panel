@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.72"
+VERSION = "5.73"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -904,6 +904,55 @@ def vf_handle(action, p):
                     os.remove(tmp)
             except Exception:
                 pass
+        import re as _re2
+        names = {}
+        try:
+            rr = subprocess.run([sys.executable, '-c',
+                                 'import json,personas;print(json.dumps({k:v.get("name","") '
+                                 'for k,v in personas.PERSONAS.items()},ensure_ascii=False))'],
+                                cwd=VF_DIR, env=vf_env(), capture_output=True, text=True, timeout=30)
+            names = json.loads(rr.stdout.strip() or '{}')
+        except Exception:
+            names = {}
+        # Ролики прошлых прогонов не должны лежать вперемешку с нынешними.
+        # Павел нажал «сделать 1 ролик» на простатит Алжир и увидел СЕМЬ превью:
+        # на диске с 11 и 14 августа остались сценарии 03-05, которых в связке
+        # давно нет, по два героя на один сценарий и огрызок ..._ready от ручной
+        # сборки. Лишнее уводим в _прошлые — не удаляем, деньги за него уплачены.
+        # Номера сценариев берём из ВСЕХ связок этого оффера и гео (25/60/90 сек
+        # лежат в разных папках, а имя ролика длительности не знает), иначе
+        # список для одной длительности вычистил бы ролики другой.
+        live = set()
+        for d in _glob.glob(os.path.join(VF_DIR, 'scripts', '%s_%s' % (offer, geo))) + \
+                 _glob.glob(os.path.join(VF_DIR, 'scripts', '%s_%s_*' % (offer, geo))):
+            for j in _glob.glob(os.path.join(d, '[0-9][0-9].json')):
+                live.add(int(os.path.basename(j)[:2]))
+        if live:
+            keep, drop = {}, []
+            for f in _glob.glob(os.path.join(VF_DIR, 'out', 'batch', pref + '*.mp4')):
+                mm = _re2.match(r'%s(\d+)_(.+)\.mp4$' % _re2.escape(pref), os.path.basename(f))
+                if not mm or f.endswith(('_head.mp4', '.new.mp4')):
+                    continue
+                num, persona = int(mm.group(1)), mm.group(2)
+                if (names and persona not in names) or num not in live:
+                    drop.append(f)            # огрызок или сценарий, которого больше нет
+                    continue
+                prev = keep.get(num)          # на один сценарий — один ролик, самый свежий
+                if prev is None:
+                    keep[num] = f
+                elif os.path.getmtime(f) > os.path.getmtime(prev):
+                    keep[num] = f
+                    drop.append(prev)
+                else:
+                    drop.append(f)
+            if drop:
+                oldbox = os.path.join(VF_DIR, 'out', 'batch', '_прошлые')
+                os.makedirs(oldbox, exist_ok=True)
+                for f in drop:
+                    try:
+                        os.replace(f, os.path.join(oldbox, os.path.basename(f)))
+                    except Exception:
+                        pass
         res = {}
         for key, pat in (('videos', 'out/batch/*.mp4'), ('copies', 'out/uniq/*.mp4'),
                          ('prelas', 'prela/*/index.html')):
@@ -918,16 +967,6 @@ def vf_handle(action, p):
         # Про каждый ролик надо знать не только длину и вес, но и КТО в нём и
         # СВЕЖИЙ ли он. Иначе в списке вперемешку лежат ролики прошлых прогонов
         # с другими героями, и понять, что из этого твоё, невозможно.
-        import re as _re2
-        names = {}
-        try:
-            rr = subprocess.run([sys.executable, '-c',
-                                 'import json,personas;print(json.dumps({k:v.get("name","") '
-                                 'for k,v in personas.PERSONAS.items()},ensure_ascii=False))'],
-                                cwd=VF_DIR, env=vf_env(), capture_output=True, text=True, timeout=30)
-            names = json.loads(rr.stdout.strip() or '{}')
-        except Exception:
-            names = {}
         res['meta'] = {}
         for rel in res.get('videos', []):
             f = os.path.join(VF_DIR, rel)
