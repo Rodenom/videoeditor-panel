@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.73"
+VERSION = "5.74"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -990,6 +990,39 @@ def vf_handle(action, p):
                                 'stale': stale,
                                 'built': time.strftime('%d.%m %H:%M', time.localtime(built))}
         return {'ok': True, **res}
+
+    if action == 'delscript':
+        # Поставил 1 ролик, а в связке 2: лишний остался с прошлого прогона, и
+        # blank() его не сносит — в нём написанный текст, а чужой текст мы не
+        # удаляем никогда. Значит, нужна кнопка. Убираем только с конца: номер
+        # ролика зашит в имя видеофайла, дырка в нумерации рассыпала бы связь
+        # «сценарий ↔ собранный ролик».
+        try:
+            n = int(p.get('n') or 0)
+        except Exception:
+            n = 0
+        nums = sorted(int(os.path.basename(x)[:2])
+                      for x in _glob.glob(os.path.join(sdir, '[0-9][0-9].json')))
+        if n not in nums:
+            return {'error': 'ролика %s в связке нет' % n}
+        if len(nums) < 2:
+            return {'error': 'это последний ролик связки — убирать нечего'}
+        if n != nums[-1]:
+            return {'error': 'убрать можно только последний ролик — сейчас это %d' % nums[-1]}
+        box = os.path.join(sdir, '_прошлые')
+        os.makedirs(box, exist_ok=True)
+        os.replace(os.path.join(sdir, '%02d.json' % n),
+                   os.path.join(box, '%02d_%s.json' % (n, time.strftime('%d.%m_%H%M'))))
+        moved, vbox = 0, os.path.join(VF_DIR, 'out', 'batch', '_прошлые')
+        for f in _glob.glob(os.path.join(VF_DIR, 'out', 'batch',
+                                         '%s_%s_%02d_*.mp4' % (offer, geo, n))):
+            try:
+                os.makedirs(vbox, exist_ok=True)
+                os.replace(f, os.path.join(vbox, os.path.basename(f)))
+                moved += 1
+            except Exception:
+                pass
+        return {'ok': True, 'n': n, 'videos': moved}
 
     if action == 'delvideo':
         # Ролики прошлых прогонов надо уметь просто выкинуть, а не разглядывать.
@@ -3725,6 +3758,8 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
           <button class="sv-btn ghost" id="sv-b2d" onclick="svDropDraft()"
                   style="display:none;">Вернуть сохранённый</button>
           <button class="sv-btn ghost" onclick="svAddScript()">+ ещё ролик</button>
+          <button class="sv-btn ghost" id="sv-bdel" onclick="svDelScript()"
+                  style="display:none;">Убрать ролик</button>
         </div>
         <div id="sv-dirty" style="font-size:12px;margin-top:6px;"></div>
         <div class="sv-bar" id="sv-bar2"><i></i></div>
@@ -5772,6 +5807,19 @@ async function svAddScript(){
   const r = await svJob('blank', p, 2, 'Добавляю ролик…');
   if(r.ok){ await svLoad(); svCur = svScripts.length - 1; svShow(); }
 }
+// Лишний ролик из прошлого прогона. Без подтверждения: текст не пропадает,
+// он уезжает в архив, и об этом сказано прямо в ответе.
+async function svDelScript(){
+  const s = svScripts[svCur]; if(!s) return;
+  const p = svParams(); p.n = s.n;
+  const r = await svApi('delscript', p);
+  if(!r || r.error){ svSay(2, (r && r.error) || 'не вышло убрать ролик', true); return; }
+  await svLoad();
+  svCur = Math.max(0, svScripts.length - 1);
+  svShow();
+  svSay(2, 'Ролик ' + r.n + ' убран. Текст в scripts/…/_прошлые'
+    + (r.videos ? (', собранных роликов уехало в out/batch/_прошлые: ' + r.videos) : '') + '.');
+}
 async function svGen(){
   const p = svParams();
   p.n = parseInt(document.getElementById('sv-n').value)||3;
@@ -5887,6 +5935,14 @@ function svShow(){
     + SV_FORMATS.map(f=>'<option value="'+f[0]+'"'+(f[0]===s.style?' selected':'')+'>'+f[1]+'</option>').join('')
     + '</select><button class="sv-btn ghost" style="padding:5px 12px;font-size:12px;" '
     + 'onclick="svRestyle()">Переписать в этом формате</button>';
+  // «Убрать ролик» показываем только на последнем и только если он не
+  // единственный: убирать из середины нельзя — номер зашит в имя видеофайла.
+  const bd = document.getElementById('sv-bdel');
+  if(bd){
+    const last = svCur === svScripts.length - 1 && svScripts.length > 1;
+    bd.style.display = last ? '' : 'none';
+    bd.textContent = 'Убрать ролик ' + s.n;
+  }
   svTabs();
   svDirtyNote();
   svHeroCards();
