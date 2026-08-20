@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.70"
+VERSION = "5.71"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -143,6 +143,25 @@ def vf_env():
               'ALL_PROXY', 'all_proxy'):
         e.pop(k, None)
     return e
+
+def vf_inside(rel, sub='', exts=None):
+    """Разрешить путь ВНУТРИ папки фабрики и вернуть его — или пустое.
+
+    Вырезание «..» из строки защитой не является: '../../../etc/hosts' после
+    него становится '///etc/hosts', а os.path.join с абсолютным путём просто
+    отбрасывает начало — и наружу уходил совсем чужой файл. Проверяем по факту:
+    раскрываем путь целиком и требуем, чтобы он лежал под нужной папкой.
+    """
+    if not rel:
+        return ''
+    root = os.path.realpath(os.path.join(VF_DIR, sub) if sub else VF_DIR)
+    full = os.path.realpath(os.path.join(VF_DIR, rel))
+    if full != root and not full.startswith(root + os.sep):
+        return ''
+    if exts and not full.lower().endswith(tuple(exts)):
+        return ''
+    return full
+
 
 def vf_run(args, timeout=3600):
     """Запустить скрипт фабрики и вернуть его вывод (синхронно, для быстрых команд)."""
@@ -375,11 +394,45 @@ def vf_handle(action, p):
             return {'error': 'Разбора ещё нет'}
         return read_json(f) or {'error': 'Разбор не прочитался'}
 
+    if action == 'upload':
+        # Ролик из «Связок» уходит на YouTube ОТСЮДА ЖЕ, без выгрузки на диск.
+        # Раньше между «панель сделала видео» и «панель залила видео» был ручной
+        # мост: скачать файл, прогнать уникализацию сторонним скриптом, скачать
+        # снова, открыть вкладку заливки, выбрать файл. Четыре шага руками на
+        # каждый ролик — из-за них панель для Павла стала медленнее, а не быстрее
+        # (сказал прямо 19.08). Конвертация в три формата, уникализация каждой
+        # копии и раскладка по аккаунтам и так живут в auto_convert_and_upload —
+        # не хватало только вызова.
+        # Путь приходит из браузера, поэтому проверяем его по факту, а не на
+        # глаз. Вырезание «..» из строки не спасает: '../../../etc/hosts' после
+        # него превращается в '///etc/hosts', а os.path.join с абсолютным путём
+        # отбрасывает начало — и заливка получала совсем чужой файл.
+        rel = (p.get('file') or '').strip()
+        src = os.path.realpath(os.path.join(VF_DIR, rel))
+        root = os.path.realpath(os.path.join(VF_DIR, 'out'))
+        if (not rel or not src.startswith(root + os.sep)
+                or not os.path.isfile(src) or not src.lower().endswith('.mp4')):
+            return {'error': 'Не нашёл этот ролик на диске'}
+        cat = {'prostate': 'Простатит', 'potency': 'Потенция', 'joints': 'Суставы',
+               'diabetes': 'Диабет', 'pressure': 'Гипертония', 'weight': 'Похудение',
+               'parasites': 'Паразиты', 'cystitis': 'Цистит', 'vision': 'Зрение',
+               'memory': 'Память'}.get(offer, 'Видео')
+        job_id = uuid.uuid4().hex[:8]
+        MASS_UPLOAD_JOBS[job_id] = {'status': 'pending', 'log': [], 'sets': [],
+                                    'total': 0, 'done': 0}
+        threading.Thread(target=auto_convert_and_upload, args=(
+            job_id, src, int(p.get('n_sets', 1)), cat,
+            p.get('privacy', 'unlisted'), p.get('_user') or 'pavel',
+            p.get('custom_title', ''), p.get('custom_desc', ''),
+            True                      # уникализация каждой копии — то, что он гонял руками
+        ), daemon=True).start()
+        return {'ok': True, 'upload_job': job_id}
+
     if action == 'checktext':
         # Что реально звучит в готовом ролике. Слушает Whisper локально, денег
         # не стоит. Нужно, чтобы правка текста проверялась фактом, а не на слово.
-        rel = (p.get('file') or '').replace('..', '')
-        if not rel:
+        rel = (p.get('file') or '').strip()
+        if not vf_inside(rel, 'out', ['.mp4']):
             return {'error': 'Не сказано, какой ролик проверять'}
         r = vf_run(['check_text.py', rel, '--json'], timeout=900)
         try:
@@ -873,9 +926,8 @@ def vf_handle(action, p):
         rels = p.get('files') or ([p['file']] if p.get('file') else [])
         gone = 0
         for rel in rels:
-            rel = (rel or '').replace('..', '')
-            f = os.path.join(VF_DIR, rel)
-            if not (rel.startswith('out/batch/') or rel.startswith('out/uniq/')):
+            f = vf_inside((rel or '').strip(), 'out', ['.mp4'])
+            if not f or not ('/out/batch/' in f or '/out/uniq/' in f):
                 continue
             for x in (f, f.replace('.mp4', '.mp3'), f.replace('.mp4', '_head.mp4'),
                       os.path.join(os.path.dirname(f), 'nobg', os.path.basename(f))):
@@ -6007,7 +6059,19 @@ async function svFiles(){
   });
   svTabs();
   const старых = vids.filter(f => (meta[f]||{}).stale).length;
-  box.innerHTML = vids.length ? ('<div class="sv-done">Готово роликов: ' + (vids.length - старых)
+  // Настройки заливки — один раз на всю связку, а не на каждый ролик.
+  const шапкаЗалива = vids.length ? (
+    '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:10px 0 4px;'
+    + 'font-size:12px;color:var(--text3);">заливать на'
+    + '<input id="sv-up-n" type="number" value="2" min="1" max="10" style="width:56px;'
+    + 'padding:4px 6px;border:1.5px solid var(--border);border-radius:8px;'
+    + 'background:var(--surface2);color:var(--text);"> аккаунта'
+    + '<select id="sv-up-priv" style="padding:4px 8px;">'
+    + '<option value="unlisted" selected>по ссылке</option>'
+    + '<option value="public">публичное</option>'
+    + '<option value="private">приватное</option></select>'
+    + '<span>· каждая копия уникализируется</span></div>') : '';
+  box.innerHTML = vids.length ? (шапкаЗалива + '<div class="sv-done">Готово роликов: ' + (vids.length - старых)
     + (старых ? ('<span style="color:#d97706;margin-left:auto;">старых: ' + старых
        + ' <button class="sv-btn ghost" style="padding:4px 10px;font-size:11px;margin-left:8px;" '
        + 'onclick="svDelStale()">Удалить старые</button></span>') : '') + '</div>'
@@ -6031,6 +6095,8 @@ async function svFiles(){
           + ' ' + бейдж + '</span>'
           + '<button class="sv-btn ghost" style="padding:5px 12px;font-size:12px;" '
           + 'onclick="svCheckText(\''+f+'\')">Проверить текст</button>'
+          + '<button class="sv-btn" style="padding:5px 12px;font-size:12px;" '
+          + 'onclick="svUpload(\''+f+'\')">Залить на YouTube</button>'
           + '<button class="sv-btn ghost" style="padding:5px 12px;font-size:12px;" '
           + 'onclick="svDelVideo(\''+f+'\')">Удалить</button>'
           + '<a class="sv-btn ghost" style="text-decoration:none;padding:5px 12px;font-size:12px;" '
@@ -6039,9 +6105,53 @@ async function svFiles(){
           // прямо здесь, скачивать ради проверки больше не надо.
           + '<video controls preload="auto" playsinline style="width:100%;max-height:340px;'
           + 'border-radius:8px;background:#000;" src="'+src+'"></video>'
-          + '<div class="sv-txtchk" id="chk-'+btoa(unescape(encodeURIComponent(f))).replace(/=/g,'')+'"></div>'
+          + '<div class="sv-txtchk" id="chk-'+svKey(f)+'"></div>'
+          + '<div id="up-'+svKey(f)+'"></div>'
           + '</div>';
       }).join('')) : '';
+}
+// Залить ролик прямо отсюда. Убирает четыре ручных шага: скачать файл,
+// прогнать уникализацию сторонним скриптом, скачать снова, выбрать его во
+// вкладке заливки. Конвертация в три формата, уникализация каждой копии и
+// раскладка по аккаунтам делаются внутри — то же самое, что во вкладке
+// «Загрузить на YouTube», просто без ручного переноса файла.
+async function svUpload(f){
+  const n = parseInt((document.getElementById('sv-up-n')||{}).value) || 1;
+  const priv = (document.getElementById('sv-up-priv')||{}).value || 'unlisted';
+  const имя = f.split('/').pop();
+  if(!confirm('Залить «' + имя + '» на ' + n + ' аккаунт(ов)?\n\n'
+      + 'Получится ' + (n*3) + ' видео: 3 формата на каждый аккаунт, каждая копия своя.')) return;
+  const box = document.getElementById('up-' + svKey(f));
+  box.innerHTML = '<div class="sv-hint">Запускаю заливку…</div>';
+  const p = svParams(); p.file = f; p.n_sets = n; p.privacy = priv;
+  const r = await svApi('upload', p);
+  if(r.error){ box.innerHTML = '<div class="sv-hint" style="color:#dc2626;">'+r.error+'</div>'; return; }
+  svUploadWatch(r.upload_job, box);
+}
+function svUploadWatch(job, box){
+  const t = setInterval(async () => {
+    let d;
+    try { d = await (await fetch('/mass_yt_status/' + job)).json(); } catch(e){ return; }
+    const pct = d.total ? Math.round(d.done / d.total * 100) : 0;
+    const строка = (d.log || []).slice(-1)[0] || 'работаю…';
+    box.innerHTML =
+      '<div style="margin-top:8px;font-size:12px;">'
+      + '<div style="height:6px;border-radius:4px;background:var(--border2);overflow:hidden;">'
+      + '<i style="display:block;height:100%;width:'+pct+'%;background:var(--grad1);"></i></div>'
+      + '<div style="color:var(--text3);margin-top:4px;">' + (d.done||0) + ' из ' + (d.total||0)
+      + ' · ' + строка.replace(/</g,'&lt;') + '</div>'
+      + (d.sets||[]).map(x =>
+          '<div style="margin-top:5px;"><b>'+x.channel+'</b> '
+          + (x.links||[]).map(l=>'<a href="'+l.link+'" target="_blank">'+l.fmt+'</a>').join(' · ')
+          + ' <button class="sv-btn ghost" style="padding:2px 8px;font-size:11px;" '
+          + 'onclick="navigator.clipboard.writeText(\''
+          + (x.links||[]).map(l=>l.link).join('\\n') + '\');this.textContent=\'✓\';">копировать</button></div>').join('')
+      + '</div>';
+    if(d.status === 'done' || d.status === 'error'){
+      clearInterval(t);
+      if(d.status === 'error') box.innerHTML += '<div class="sv-hint" style="color:#dc2626;">Заливка не дошла до конца — смотри лог во вкладке «Загрузить на YouTube».</div>';
+    }
+  }, 2000);
 }
 // Ролик прошлого прогона можно просто выкинуть, а не разглядывать.
 async function svDelVideo(f){
@@ -6060,8 +6170,9 @@ async function svDelStale(){
 }
 // «Проверить текст» — вытаскивает речь из готового ролика и сверяет со сценарием.
 // Нужно, чтобы не гадать, доехала правка текста до озвучки или нет.
+function svKey(f){ return btoa(unescape(encodeURIComponent(f))).replace(/[^A-Za-z0-9]/g,''); }
 async function svCheckText(f){
-  const id = 'chk-' + btoa(unescape(encodeURIComponent(f))).replace(/=/g,'');
+  const id = 'chk-' + svKey(f);
   const box = document.getElementById(id);
   if(box) box.innerHTML = '<div class="sv-hint">Слушаю ролик и сверяю со сценарием…</div>';
   const p = svParams(); p.file = f;
@@ -9021,9 +9132,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/vf_file':
             # Скачивание готового ролика — Павел должен видеть, что файл у него.
             qs = parse_qs(urlparse(self.path).query)
-            rel = (qs.get('p') or [''])[0].replace('..', '')
-            f = os.path.join(VF_DIR, rel)
-            if not vf_available() or not os.path.exists(f):
+            rel = (qs.get('p') or [''])[0]
+            f = vf_inside(rel)
+            if not vf_available() or not f or not os.path.isfile(f):
                 self.send_response(404); self.end_headers(); return
             # Через этот же эндпоинт уходят пакеты прокл — с типом video/mp4
             # браузер сохранял zip как .mp4 и тех получал «битый архив».
@@ -10366,6 +10477,8 @@ class Handler(BaseHTTPRequestHandler):
         elif path.startswith('/vf_'):
             length = int(self.headers.get('Content-Length',0))
             params = json.loads(self.rfile.read(length)) if length else {}
+            # Кто заливает — нужно действию «upload»: каналы у каждого свои.
+            params['_user'] = user
             self.json(vf_handle(path[4:], params))
         elif path == '/ai_generate':
             length = int(self.headers.get('Content-Length',0))
