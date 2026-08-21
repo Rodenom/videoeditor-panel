@@ -103,12 +103,15 @@ def main():
     _counts = {'date': time.strftime('%Y-%m-%d'), 'counts': {}}
     # Все подменяемые функции сохраняем и возвращаем в finally — иначе заглушки
     # протекают в следующие секции и те молча проверяют не то, что думают.
+    # journal_add тоже глушим: без этого тестовые ролики v1..v4 попадают в
+    # боевой журнал Павла и он видит в панели ролики, которых не заливал.
     _STUBBED = ('load_uploads_today', 'save_uploads_today', 'increment_project_upload',
-                'load_channels', 'save_channels', 'get_youtube_service')
+                'load_channels', 'save_channels', 'get_youtube_service', 'journal_add')
     _saved = {n: getattr(app, n) for n in _STUBBED}
     app.load_uploads_today = lambda: _counts
     app.save_uploads_today = lambda d: None
     app.increment_project_upload = lambda *a, **k: None
+    app.journal_add = lambda *a, **k: None
     try:
         files = [{'path': mk_video(os.path.join(tmp, 'a.mp4')), 'fmt': '9:16', 'title': 'T'},
                  {'path': mk_video(os.path.join(tmp, 'b.mp4'), '640x640'), 'fmt': '1:1', 'title': 'T'}]
@@ -154,12 +157,14 @@ def main():
     # и видео уходило с реального IP панели вместо прокси аккаунта.
     tmp = tempfile.mkdtemp(prefix='vepx_')
     _PSTUB = ('load_uploads_today', 'save_uploads_today', 'increment_project_upload',
-              'load_channels', 'save_channels', 'get_youtube_service', 'get_anthropic_key')
+              'load_channels', 'save_channels', 'get_youtube_service', 'get_anthropic_key',
+              'journal_add')
     _psaved = {n: getattr(app, n) for n in _PSTUB}
     _pc = {'date': time.strftime('%Y-%m-%d'), 'counts': {}}
     app.load_uploads_today = lambda: _pc
     app.save_uploads_today = lambda d: None
     app.increment_project_upload = lambda *a, **k: None
+    app.journal_add = lambda *a, **k: None
     try:
         vid = mk_video(os.path.join(tmp, 'p.mp4'), '320x180', 1)
         PROXY = 'socks5://user:pass@1.2.3.4:1080'

@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.74"
+VERSION = "5.75"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -1413,6 +1413,204 @@ def load_projects(user):
 def save_projects(user, projects):
     write_json(get_projects_file(user), projects, indent=2, ensure_ascii=False)
 
+# ── Журнал роликов ───────────────────────────────────────────────
+# Павел 21.08: «какие-то видосы проходят и крутят, какие-то нет, а сравнить
+# не с чем — текстов прошлых роликов нигде нет, и что править, непонятно».
+# Поэтому панель запоминает каждый залитый ролик вместе с его текстом, а потом
+# сама спрашивает у YouTube, жив ли он и сколько у него просмотров. Сравнивать
+# тексты прошедших с текстами снятых — единственный способ понять, за что
+# цепляется модерация; на память этого не удержать.
+JOURNAL_FILE = os.path.join(BASE_DIR, "journal.json")
+
+
+def load_journal():
+    try:
+        with open(JOURNAL_FILE, encoding='utf-8') as f:
+            d = json.load(f)
+        return d if isinstance(d, list) else []
+    except Exception:
+        return []
+
+
+def save_journal(recs):
+    tmp = JOURNAL_FILE + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(recs[-3000:], f, ensure_ascii=False, indent=1)
+    os.replace(tmp, JOURNAL_FILE)
+
+
+def journal_script(path):
+    """Текст ролика по имени файла фабрики: neuropathy_pl_01_pl_man45.mp4 →
+    scripts/neuropathy_pl/01.json. Ролик, залитый из чужого файла, останется
+    без текста — записать его всё равно надо, ссылка и статус тоже нужны."""
+    out = {}
+    try:
+        base = os.path.basename(path or '')
+        m = re.match(r'^([a-z]+)_([a-z]{2})_(\d+)_([a-z0-9_]+?)(?:_(?:\d+|916|11|169|[0-9]+x[0-9]+))?\.mp4$', base)
+        if not m:
+            return out
+        offer, geo, n, persona = m.group(1), m.group(2), int(m.group(3)), m.group(4)
+        out.update({'offer': offer, 'geo': geo, 'n': n, 'persona': persona})
+        if not vf_available():
+            return out
+        import glob as _g
+        dirs = [os.path.join(VF_DIR, 'scripts', '%s_%s' % (offer, geo))]
+        dirs += sorted(_g.glob(os.path.join(VF_DIR, 'scripts', '%s_%s_*' % (offer, geo))))
+        for d in dirs:
+            j = os.path.join(d, '%02d.json' % n)
+            if os.path.exists(j):
+                sc = json.load(open(j, encoding='utf-8'))
+                out['ru'] = (sc.get('ru') or '').strip()
+                out['text'] = (sc.get('text') or '').strip()
+                out['angle'] = sc.get('angle') or ''
+                break
+    except Exception:
+        pass
+    return out
+
+
+def journal_add(user, ch_id, ch_info, vid_id, fpath, title='', desc='', hint=''):
+    """Запись о залитом ролике. Падать тут нельзя: заливка важнее журнала."""
+    try:
+        rec = {'video': vid_id, 'link': 'https://youtu.be/%s' % vid_id,
+               'user': user, 'channel': ch_id,
+               'channel_name': (ch_info or {}).get('name', ''),
+               'date': time.strftime('%Y-%m-%d %H:%M'), 'ts': time.time(),
+               'title': title or '', 'desc': desc or '',
+               'file': os.path.basename(fpath or ''),
+               'status': '', 'views': None, 'checked': ''}
+        # Имя нарезанной копии может не совпасть с исходным — пробуем оба.
+        got = journal_script(fpath) or {}
+        if not got.get('ru') and hint:
+            got = journal_script(hint) or got
+        rec.update(got)
+        recs = load_journal()
+        recs.append(rec)
+        save_journal(recs)
+    except Exception:
+        pass
+
+
+def journal_sync(user):
+    """Подтянуть в журнал то, что уже залито до его появления.
+
+    Текста у старых роликов взять неоткуда — он нигде не сохранялся, это и есть
+    та самая боль. Но название, дата, просмотры и «жив ли» доступны у YouTube,
+    и уже по ним видно, какие ролики крутят, а какие сняли."""
+    recs = load_journal()
+    have = {r.get('video') for r in recs if r.get('user') == user}
+    channels = load_channels(user)
+    added, errors = 0, []
+    for ch_id, info in channels.items():
+        tf = info.get('token_file')
+        if not tf or not os.path.exists(tf):
+            continue
+        try:
+            yt = get_youtube_service_stubborn(tf, info.get('proxy', ''), [])
+            me = yt.channels().list(part='contentDetails', mine=True).execute()
+            items = me.get('items') or []
+            if not items:
+                continue
+            pl = items[0]['contentDetails']['relatedPlaylists']['uploads']
+            token, seen = None, 0
+            while seen < 200:
+                r = yt.playlistItems().list(part='snippet,contentDetails', playlistId=pl,
+                                            maxResults=50, pageToken=token).execute()
+                for it in r.get('items', []):
+                    seen += 1
+                    vid = it['contentDetails']['videoId']
+                    if vid in have:
+                        continue
+                    sn = it.get('snippet', {})
+                    recs.append({'video': vid, 'link': 'https://youtu.be/%s' % vid,
+                                 'user': user, 'channel': ch_id,
+                                 'channel_name': info.get('name', ''),
+                                 'date': (sn.get('publishedAt') or '')[:16].replace('T', ' '),
+                                 'ts': 0, 'title': sn.get('title', ''), 'desc': '',
+                                 'file': '', 'status': '', 'views': None,
+                                 'checked': '', 'from': 'youtube'})
+                    have.add(vid)
+                    added += 1
+                token = r.get('nextPageToken')
+                if not token:
+                    break
+        except Exception as e:
+            msg = str(e)
+            if '403' in msg:
+                # Канал заводили до того, как панель стала просить scope readonly.
+                msg = ('канал заведён со старыми правами — читать его список '
+                       'роликов YouTube не даёт. Пройдёт само при следующей '
+                       'переавторизации канала')
+            elif 'Connection refused' in msg or 'Socket error' in msg:
+                msg = 'прокси канала сейчас не отвечает'
+            else:
+                msg = msg[:120]
+            errors.append('%s: %s' % (info.get('name') or ch_id, msg))
+    recs.sort(key=lambda r: r.get('date') or '')
+    save_journal(recs)
+    return {'ok': True, 'added': added, 'errors': errors}
+
+
+def _journal_one(url):
+    """Что YouTube показывает миру про этот ролик. Через yt-dlp, а не через API:
+    у старых каналов выдан только scope upload, и videos.list им отвечает 403 —
+    а проверять надо все ролики, а не те, которым повезло со scope."""
+    import shutil as _sh
+    exe = _sh.which('yt-dlp')
+    if not exe:
+        return {'status': 'нет yt-dlp'}
+    try:
+        r = subprocess.run([exe, '-J', '--no-warnings', '--skip-download',
+                            '--socket-timeout', '15', url],
+                           capture_output=True, text=True, timeout=90)
+    except Exception as e:
+        return {'status': 'не ответил', 'why': str(e)[:80]}
+    if r.returncode != 0:
+        err = (r.stderr or '').lower()
+        if 'private' in err:
+            return {'status': 'скрыт'}
+        if ('removed' in err or 'unavailable' in err or 'terminated' in err
+                or 'not exist' in err or 'violat' in err):
+            return {'status': 'снят'}
+        return {'status': 'не ответил', 'why': (r.stderr or '').strip()[:120]}
+    try:
+        d = json.loads(r.stdout or '{}')
+    except Exception:
+        return {'status': 'не ответил'}
+    views = d.get('view_count')
+    av = d.get('availability') or ''
+    if av in ('private',):
+        return {'status': 'скрыт', 'views': views}
+    return {'status': 'крутит' if (views or 0) > 0 else 'живой', 'views': views}
+
+
+def journal_check(user, limit=120):
+    """Пройтись по записанным роликам и спросить, жив ли каждый и сколько
+    у него просмотров. Это и есть ответ на «какие проходят, а какие нет»."""
+    from concurrent.futures import ThreadPoolExecutor
+    recs = load_journal()
+    mine = [r for r in recs if r.get('user') == user and r.get('video')][-limit:]
+    if not mine:
+        return {'ok': True, 'checked': 0, 'errors': []}
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        got = list(ex.map(_journal_one, [r['link'] for r in mine]))
+    now = time.strftime('%d.%m %H:%M')
+    bad = 0
+    for r, g in zip(mine, got):
+        if g.get('status') == 'не ответил':
+            bad += 1
+            r['checked'] = now
+            continue
+        r['status'] = g.get('status', '')
+        if 'views' in g:
+            r['views'] = g.get('views')
+        r['why'] = g.get('why', '')
+        r['checked'] = now
+    save_journal(recs)
+    errors = ['%d роликов не ответили — проверь связь и нажми ещё раз' % bad] if bad else []
+    return {'ok': True, 'checked': len(mine), 'errors': errors}
+
+
 def get_project_uploads_file(user):
     return os.path.join(BASE_DIR, f'proj_uploads_{user}.json')
 
@@ -2188,6 +2386,7 @@ def upload_to_youtube(upload_job_id, files, title, description, privacy, channel
             vid_id = response['id']
             link = f"https://youtu.be/{vid_id}"
             links.append({'fmt': f['fmt'], 'link': link, 'title': ftitle})
+            journal_add(user, ch_id, ch_info, vid_id, fpath, ftitle, description)
             log.append(f"✅ {f['fmt']} → {link}")
             # Обновляем счётчик каналов
             bump_upload_count(ch_id)
@@ -2524,6 +2723,8 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user, 
                     vid_id = response['id']
                     link = f'https://youtu.be/{vid_id}'
                     set_links.append({'fmt': fmt_name, 'link': link})
+                    journal_add(user, ch_id, ch_info, vid_id, fpath, fmt_title,
+                                fmt_desc, src_video)
                     log[-1] = f'  ✅ {fmt_name} → {link}'
                     bump_upload_count(ch_id)
                     proj_id = ch_info.get('project_id')
@@ -2705,6 +2906,7 @@ def ready_upload_to_youtube(job_id, ready_files, n_sets, category, privacy, user
                     vid_id = response['id']
                     link = f'https://youtu.be/{vid_id}'
                     set_links.append({'fmt': fmt, 'link': link})
+                    journal_add(user, ch_id, ch_info, vid_id, fpath, up_title, up_desc)
                     log[-1] = f'  ✅ {fmt} → {link}'
                     bump_upload_count(ch_id)
                     proj_id = ch_info.get('project_id')
@@ -2798,6 +3000,7 @@ def mass_upload_to_youtube(job_id, files, n_sets, title, description, privacy, u
                     vid_id = response['id']
                     link = f'https://youtu.be/{vid_id}'
                     set_links.append({'fmt': f['fmt'], 'link': link})
+                    journal_add(user, ch_id, ch_info, vid_id, fpath, ftitle, fdesc)
                     log[-1] = f'  ✅ {f["fmt"]} → {link}'
                     bump_upload_count(ch_id)
                     proj_id = ch_info.get('project_id')
@@ -3009,6 +3212,7 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
     <button class="tab-btn" onclick="switchTab('ads')">📢 Заголовки и описания</button>
     <button class="tab-btn" onclick="switchTab('upload')">📤 Загрузить на YouTube</button>
     <button class="tab-btn" onclick="switchTab('tasks')">📋 Таски</button>
+    <button class="tab-btn" onclick="switchTab('journal')">📓 Журнал</button>
     <button class="tab-btn" onclick="switchTab('binom')" style="display:none;">📊 Binom</button>
     <button class="tab-btn" onclick="switchTab('static')">🖼️ Статика</button>
     <button class="tab-btn" id="tab-btn-svyazki" onclick="switchTab('svyazki')" style="display:none;">🔗 Связки</button>
@@ -4400,6 +4604,43 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
   </div>
 
   <!-- TASKS TAB -->
+  <div id="tab-journal" class="tab-pane">
+    <div style="max-width:1100px;">
+      <h2 style="margin:0 0 6px;">📓 Журнал роликов</h2>
+      <div style="color:var(--text3);font-size:13px;margin-bottom:14px;">
+        Каждый залитый ролик записывается вместе со своим текстом. Кнопка ниже
+        спрашивает у YouTube, жив ли он и сколько просмотров — так видно, какие
+        тексты проходят, а какие снимают.</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:14px;">
+        <button class="btn" onclick="jrCheck()" id="jr-check">Проверить статусы</button>
+        <button class="btn" onclick="jrSync()" id="jr-sync">Подтянуть с YouTube</button>
+        <select id="jr-filter" onchange="jrRender()" style="padding:8px 10px;border-radius:9px;
+                background:var(--surface2);color:var(--text);border:1.5px solid var(--border);">
+          <option value="">все ролики</option>
+          <option value="m:прошёл">мои отметки: прошёл</option>
+          <option value="m:не прошёл">мои отметки: не прошёл</option>
+          <option value="m:">без отметки</option>
+          <option value="крутит">есть просмотры</option>
+          <option value="живой">жив, но без просмотров</option>
+          <option value="снят">снятые с YouTube</option>
+        </select>
+        <input id="jr-q" oninput="jrRender()" placeholder="оффер, гео, герой или слово из текста"
+               style="flex:1;min-width:220px;padding:8px 11px;border-radius:9px;
+                      background:var(--surface2);color:var(--text);border:1.5px solid var(--border);">
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px;">
+        <input id="jr-link" placeholder="ссылка на уже залитый ролик — добавить в журнал"
+               style="flex:1;min-width:240px;padding:8px 11px;border-radius:9px;
+                      background:var(--surface2);color:var(--text);border:1.5px solid var(--border);">
+        <input id="jr-file" placeholder="имя файла ролика, если из фабрики"
+               style="width:260px;padding:8px 11px;border-radius:9px;
+                      background:var(--surface2);color:var(--text);border:1.5px solid var(--border);">
+        <button class="btn" onclick="jrAdd()">Добавить</button>
+      </div>
+      <div id="jr-sum" style="font-size:13px;color:var(--text3);margin-bottom:10px;"></div>
+      <div id="jr-list"></div>
+    </div>
+  </div>
   <div id="tab-tasks" class="tab-pane">
   <style>
     .tk-wrap{max-width:700px;margin:0 auto;padding:20px 0;}
@@ -6812,6 +7053,116 @@ function switchTab(tab){
   if(tab==='tasks') tkInit();
   if(tab==='upload'){ loadChannels(); loadProjects(); }
   if(tab==='binom'){ loadBinomTargets().then(loadBinom); }
+  if(tab==='journal') jrLoad();
+}
+
+// ── Журнал роликов ───────────────────────────────────────────────
+// Без него правку текста приходится угадывать: что именно в снятом ролике
+// было не так, на память не восстановить.
+let jrItems = [];
+const JR_COLOR = {'крутит':'#16a34a','живой':'#64748b','снят':'#e11d48',
+                  'отклонён':'#e11d48','скрыт':'#d97706'};
+async function jrLoad(){
+  const r = await fetch('/journal', {method:'POST', headers:{'Content-Type':'application/json'},
+                                     body:'{}'}).then(x=>x.json()).catch(()=>null);
+  jrItems = (r && r.items) || [];
+  jrRender();
+}
+async function jrCheck(){
+  const b = document.getElementById('jr-check');
+  b.disabled = true; b.textContent = 'Спрашиваю YouTube…';
+  const r = await fetch('/journal', {method:'POST', headers:{'Content-Type':'application/json'},
+                                     body: JSON.stringify({do:'check'})}).then(x=>x.json()).catch(()=>null);
+  b.disabled = false; b.textContent = 'Проверить статусы';
+  if(r && r.errors && r.errors.length)
+    alert('Часть каналов не опросилась:\n' + r.errors.join('\n'));
+  jrLoad();
+}
+// Ролики, залитые до появления журнала. Текста у них нет и взять его негде,
+// но название, дата и «жив ли» у YouTube есть — с этого и начинаем.
+async function jrSync(){
+  const b = document.getElementById('jr-sync');
+  b.disabled = true; b.textContent = 'Собираю с каналов…';
+  const r = await fetch('/journal', {method:'POST', headers:{'Content-Type':'application/json'},
+                                     body: JSON.stringify({do:'sync'})}).then(x=>x.json()).catch(()=>null);
+  b.disabled = false; b.textContent = 'Подтянуть с YouTube';
+  if(r && r.errors && r.errors.length) alert('Часть каналов не ответила:\n' + r.errors.join('\n'));
+  if(r && r.ok) await jrCheck(); else jrLoad();
+}
+async function jrAdd(){
+  const link = document.getElementById('jr-link').value.trim();
+  if(!link) return;
+  const r = await fetch('/journal', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({do:'add', link: link,
+                          file: document.getElementById('jr-file').value.trim()})})
+    .then(x=>x.json()).catch(()=>null);
+  if(!r || !r.ok){ alert((r && r.error) || 'не вышло'); return; }
+  document.getElementById('jr-link').value = '';
+  document.getElementById('jr-file').value = '';
+  jrLoad();
+}
+function jrEsc(t){ return (t||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+// Прошло ли объявление в Google Ads, знает только Павел: YouTube ролик не
+// снимает, его просто не крутят. Поэтому вердикт ставит он, а панель хранит
+// вердикт рядом с текстом — сравнивать иначе не с чем.
+function jrMarkBtn(r, val, col){
+  const on = (r.mark || '') === val;
+  return '<button onclick="jrMark(\''+r.video+'\',\''+val+'\')" style="cursor:pointer;'
+    + 'padding:3px 10px;border-radius:8px;font-size:12px;font-family:inherit;'
+    + 'border:1.5px solid '+(on?col:'var(--border)')+';background:'+(on?col:'transparent')
+    + ';color:'+(on?'#fff':'var(--text2)')+';">'+val+'</button>';
+}
+async function jrMark(video, mark){
+  const cur = (jrItems.find(x=>x.video===video)||{}).mark;
+  const val = cur === mark ? '' : mark;
+  await fetch('/journal', {method:'POST', headers:{'Content-Type':'application/json'},
+                           body: JSON.stringify({do:'mark', video: video, mark: val})});
+  jrItems.forEach(x => { if(x.video === video) x.mark = val; });
+  jrRender();
+}
+function jrText(i){
+  const d = document.getElementById('jr-t'+i);
+  if(d) d.style.display = d.style.display === 'none' ? '' : 'none';
+}
+function jrRender(){
+  const f = document.getElementById('jr-filter').value;
+  const q = (document.getElementById('jr-q').value || '').toLowerCase().trim();
+  const rows = jrItems.filter(r => (!f
+      || (f.startsWith('m:') ? (r.mark||'') === f.slice(2) : (r.status||'') === f)) && (!q ||
+      [r.offer, r.geo, r.persona, r.title, r.ru, r.channel_name, r.file]
+        .join(' ').toLowerCase().includes(q)));
+  const cnt = {};
+  jrItems.forEach(r => { const k = r.mark || r.status || 'без отметки'; cnt[k] = (cnt[k]||0)+1; });
+  document.getElementById('jr-sum').textContent = jrItems.length
+    ? ('всего ' + jrItems.length + ' · ' + Object.keys(cnt).map(k=>k+': '+cnt[k]).join(' · '))
+    : 'Пока пусто — записи появятся после первой заливки из панели.';
+  document.getElementById('jr-list').innerHTML = rows.map((r,i)=>{
+    const st = r.status || 'не проверен';
+    const col = JR_COLOR[st] || 'var(--text3)';
+    const who = [r.offer, r.geo, r.persona].filter(Boolean).join(' · ');
+    return '<div style="border:1.5px solid var(--border);border-radius:12px;padding:12px 14px;'
+      + 'margin-bottom:10px;background:var(--surface2);">'
+      + '<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;font-size:13px;">'
+      + '<b style="color:'+col+';">'+st+'</b>'
+      + (r.views !== null && r.views !== undefined ? '<span style="color:var(--text3);">'+r.views+' просмотров</span>' : '')
+      + (r.why ? '<span style="color:#e11d48;">'+jrEsc(r.why)+'</span>' : '')
+      + '<span style="color:var(--text3);">'+jrEsc(r.date||'')+'</span>'
+      + '<span style="color:var(--text3);">'+jrEsc(r.channel_name||'')+'</span>'
+      + (who ? '<span style="color:var(--text3);">'+jrEsc(who)+'</span>' : '')
+      + '<a href="'+r.link+'" target="_blank" style="color:var(--accent1);">открыть</a>'
+      + (r.ru ? '<a onclick="jrText('+i+')" style="cursor:pointer;color:var(--accent1);">текст</a>' : '')
+      + '</div>'
+      + '<div style="display:flex;gap:6px;align-items:center;margin-top:8px;font-size:12px;">'
+      + '<span style="color:var(--text3);">объявление:</span>'
+      + jrMarkBtn(r, 'прошёл', '#16a34a') + jrMarkBtn(r, 'не прошёл', '#e11d48')
+      + (r.mark ? '<span style="color:var(--text3);">' + jrEsc(r.mark) + '</span>' : '')
+      + '</div>'
+      + '<div style="font-size:13px;margin-top:6px;">'+jrEsc(r.title||'')+'</div>'
+      + (r.ru ? '<div id="jr-t'+i+'" style="display:none;white-space:pre-wrap;font-size:13px;'
+        + 'color:var(--text2);margin-top:8px;border-top:1px solid var(--border);padding-top:8px;">'
+        + jrEsc(r.ru)+'</div>' : '')
+      + '</div>';
+  }).join('') || '<div style="color:var(--text3);">Ничего не подошло под фильтр.</div>';
 }
 
 // ===== STATIC CREATIVE GENERATOR =====
@@ -10552,6 +10903,46 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 import traceback
                 self.json({'error': str(e), 'log': traceback.format_exc()})
+        elif path == '/journal':
+            length = int(self.headers.get('Content-Length', 0))
+            jp = json.loads(self.rfile.read(length)) if length else {}
+            act = jp.get('do') or 'list'
+            if act == 'check':
+                self.json(journal_check(user)); return
+            if act == 'sync':
+                self.json(journal_sync(user)); return
+            if act == 'add':
+                # Ролики, залитые до журнала. Ссылку Павел вставляет сам —
+                # подтянуть их с канала нельзя: у старых каналов выдан только
+                # scope upload, и YouTube на чтение отвечает 403.
+                raw = (jp.get('link') or '').strip()
+                m = re.search(r'(?:youtu\.be/|v=|shorts/|embed/)([A-Za-z0-9_-]{11})', raw)
+                vid = m.group(1) if m else (raw if re.fullmatch(r'[A-Za-z0-9_-]{11}', raw) else '')
+                if not vid:
+                    self.json({'ok': False, 'error': 'не похоже на ссылку YouTube'}); return
+                recs = load_journal()
+                if any(r.get('video') == vid and r.get('user') == user for r in recs):
+                    self.json({'ok': False, 'error': 'этот ролик уже в журнале'}); return
+                rec = {'video': vid, 'link': 'https://youtu.be/%s' % vid, 'user': user,
+                       'channel': '', 'channel_name': jp.get('channel_name', ''),
+                       'date': time.strftime('%Y-%m-%d %H:%M'), 'ts': time.time(),
+                       'title': '', 'desc': '', 'file': jp.get('file', ''),
+                       'status': '', 'views': None, 'checked': '', 'from': 'руками'}
+                rec.update(journal_script(jp.get('file', '')) or {})
+                recs.append(rec)
+                save_journal(recs)
+                self.json({'ok': True, 'video': vid}); return
+            if act == 'mark':
+                recs = load_journal()
+                vid = jp.get('video')
+                for r in recs:
+                    if r.get('video') == vid and r.get('user') == user:
+                        r['mark'] = jp.get('mark', '')
+                        r['note'] = jp.get('note', r.get('note', ''))
+                save_journal(recs)
+                self.json({'ok': True}); return
+            recs = [r for r in load_journal() if r.get('user') == user]
+            self.json({'ok': True, 'items': list(reversed(recs))[:400]})
         elif path == '/add_project':
             length = int(self.headers.get('Content-Length', 0))
             data = json.loads(self.rfile.read(length))
