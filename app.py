@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.75"
+VERSION = "5.76"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -8788,9 +8788,23 @@ function startJob(){
     .then(r=>r.json()).then(d=>{ jobId=d.job_id; logLen=0; pollTimer=setInterval(poll,800); });
 }
 
+// Задания живут в памяти процесса: перезапустили панель — задание исчезло,
+// а страница продолжала крутить прогресс вечно. Павел просидел так со вчера.
+// Теперь панель честно говорит, что задание потеряно, и возвращает кнопку.
+function jobLost(d, timer, logId, btnId, what){
+  if(!d || d.status !== 'unknown') return false;
+  clearInterval(timer);
+  const lb = document.getElementById(logId);
+  if(lb) lb.textContent += '\n⚠️ Задание потеряно: панель перезапускалась, '
+    + 'пока оно шло. Ничего не залито. Выбери файл заново и запусти ' + (what||'загрузку') + '.\n';
+  const b = document.getElementById(btnId);
+  if(b){ b.disabled = false; }
+  return true;
+}
 let logLen=0;
 function poll(){
   fetch('/status/'+jobId).then(r=>r.json()).then(d=>{
+    if(jobLost(d, pollTimer, 'log-box', 'go-btn', 'нарезку')) return;
     const newLogs=d.log.slice(logLen); logLen=d.log.length;
     const lb=document.getElementById('log-box');
     newLogs.forEach(l=>{lb.textContent+=l+'\n';}); lb.scrollTop=lb.scrollHeight;
@@ -8926,6 +8940,7 @@ async function startMassUpload(){
   let massLogLen=0, lastSetCount=0;
   massPollTimer = setInterval(()=>{
     fetch('/mass_yt_status/'+massJobId).then(r=>r.json()).then(d=>{
+      if(jobLost(d, massPollTimer, 'mass-log', 'mass-run-btn')) return;
       const newLogs=d.log.slice(massLogLen); massLogLen=d.log.length;
       const lb=document.getElementById('mass-log');
       newLogs.forEach(l=>{lb.textContent+=l+'\n';}); lb.scrollTop=lb.scrollHeight;
@@ -9066,6 +9081,7 @@ async function startReadyUpload(){
 
 function pollReadyJob(){
   fetch('/mass_yt_status/'+readyJobId).then(r=>r.json()).then(d=>{
+    if(jobLost(d, readyPollTimer, 'ready-log', 'ready-run-btn')) return;
     document.getElementById('ready-log').textContent = d.log.join('\n');
     document.getElementById('ready-log').scrollTop = 9999;
     const pct = d.total>0 ? Math.round(d.done/d.total*100) : 0;
@@ -9181,6 +9197,7 @@ async function startAutoUpload(){
   let logLen=0, lastSetCount=0;
   autoPollTimer = setInterval(()=>{
     fetch('/mass_yt_status/'+autoJobId).then(r=>r.json()).then(d=>{
+      if(jobLost(d, autoPollTimer, 'auto-log', 'auto-run-btn')) return;
       const newLogs=d.log.slice(logLen); logLen=d.log.length;
       const lb=document.getElementById('auto-log');
       newLogs.forEach(l=>{lb.textContent+=l+'\n';}); lb.scrollTop=lb.scrollHeight;
@@ -9225,6 +9242,7 @@ function startBuildMassUpload(){
     let logLen=0, lastSetCount=0;
     buildMassPollTimer=setInterval(()=>{
       fetch('/mass_yt_status/'+buildMassJobId).then(r=>r.json()).then(d=>{
+        if(jobLost(d, buildMassPollTimer, 'build-mass-log', 'build-mass-btn')) return;
         const newLogs=d.log.slice(logLen); logLen=d.log.length;
         const lb=document.getElementById('build-mass-log');
         newLogs.forEach(l=>{lb.textContent+=l+'\n';}); lb.scrollTop=lb.scrollHeight;
