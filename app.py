@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.80"
+VERSION = "5.81"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -650,15 +650,33 @@ def vf_handle(action, p):
         # другом (Павел 22.08: «ролики с проклой не логичны между собой»).
         # Теперь диск главнее выпадашки: если ролик уже собран, берём его героя.
         persona = (p.get('persona') or '').strip()
+        warn = ''
         try:
             n_ = int(p.get('script') or 0)
             done = [x for x in sorted(_glob.glob(os.path.join(
                         VF_DIR, 'out', 'batch', '%s_%s_%02d_*.mp4' % (offer, geo, n_))))
                     if not x.endswith(('_head.mp4', '.new.mp4'))]
-            if done:
-                from_video = (journal_script(done[0]) or {}).get('persona', '')
-                if from_video and from_video != persona:
-                    persona = from_video
+            # Роликов на сценарий может лежать несколько (пересобирали другим
+            # героем). Берём тот, что выбран в панели, если он есть; иначе —
+            # самый свежий, а не первый по алфавиту.
+            pick = ''
+            for x in done:
+                if (journal_script(x) or {}).get('persona', '') == persona:
+                    pick = persona
+                    break
+            if not pick and done:
+                newest = max(done, key=os.path.getmtime)
+                pick = (journal_script(newest) or {}).get('persona', '')
+            if pick and pick != persona:
+                # Герой ролика может быть из другой страны — так вышло на
+                # болгарской связке с алжирцами. Молча подставлять его нельзя:
+                # это закрепит ошибку и оплатит новые кадры чужому герою.
+                if pick.split('_')[0] != geo:
+                    warn = ('ролик этого сценария собран на герое %s — он не из «%s». '
+                            'Прокла собрана на выбранном герое; ролик стоит пересобрать.'
+                            % (pick, geo))
+                else:
+                    persona = pick
         except Exception:
             pass
         args = ['prela_gen.py', offer, geo, str(p.get('script')), persona]
@@ -672,6 +690,8 @@ def vf_handle(action, p):
         note = 'Делаю проклу №%s' % p.get('script')
         if persona and persona != (p.get('persona') or '').strip():
             note += ' · герой взят с готового ролика: %s' % persona
+        if warn:
+            note += ' · ⚠ ' + warn
         return vf_run_bg(args, note)
 
     if action == 'uniq':
@@ -1044,12 +1064,21 @@ def vf_handle(action, p):
                 pass
         return {'ok': True, 'n': n, 'videos': moved}
 
+    def _card_file():
+        # offer и geo приходят из браузера. Без проверки «../../..» уводил бы
+        # запись куда угодно по диску — режем всё, кроме букв и цифр.
+        o = re.sub(r'[^a-z0-9]', '', (offer or '').lower())[:24]
+        g = re.sub(r'[^a-z0-9]', '', (geo or '').lower())[:8]
+        if not o or not g:
+            return ''
+        return os.path.join(VF_DIR, 'bundles', '%s_%s.json' % (o, g))
+
     if action == 'card_get':
         # Товар, форма, цена, метка и домен вводились заново при каждом заходе:
         # файла-описателя связки не существовало, всё уезжало флагами в скрипты
         # и там растворялось. Теперь помним — по офферу и гео, длительность на
         # товар не влияет.
-        f = os.path.join(VF_DIR, 'bundles', '%s_%s.json' % (offer, geo))
+        f = _card_file()
         try:
             with open(f, encoding='utf-8') as fh:
                 return {'ok': True, 'card': json.load(fh)}
@@ -1059,15 +1088,16 @@ def vf_handle(action, p):
     if action == 'card_save':
         keep = ('product', 'form', 'price', 'mark', 'domain')
         card = {k: str(p.get(k) or '').strip() for k in keep}
-        d = os.path.join(VF_DIR, 'bundles')
-        os.makedirs(d, exist_ok=True)
-        f = os.path.join(d, '%s_%s.json' % (offer, geo))
+        f = _card_file()
+        if not f:
+            return {'error': 'связка не выбрана'}
+        os.makedirs(os.path.dirname(f), exist_ok=True)
         try:
             with open(f, encoding='utf-8') as fh:
                 old = json.load(fh)
         except Exception:
             old = {}
-        old.update({k: v for k, v in card.items() if v != ''})
+        old.update(card)          # стёр поле — оно стёрлось, а не вернулось
         old['updated'] = time.strftime('%Y-%m-%d %H:%M')
         tmp = f + '.tmp'
         with open(tmp, 'w', encoding='utf-8') as fh:
@@ -1101,26 +1131,37 @@ def vf_handle(action, p):
                 v_persona = (journal_script(vids[0]) or {}).get('persona', '') if vids else ''
                 lps = [x for x in sorted(_glob.glob(os.path.join(
                             VF_DIR, 'prela', '%s_%s_%02d_*' % (off_, geo_, n_))))
-                       if os.path.isdir(x)]
-                lp_persona = ''
+                       if os.path.isdir(x) and os.path.exists(os.path.join(x, 'index.html'))]
+
+                def _lp_persona(path):
+                    k = os.path.basename(path).split('_%02d_' % n_, 1)[-1]
+                    return k[:-3] if k.endswith('_ru') else k
+
+                lp_persona, lp_pick = '', ''
                 if lps:
-                    lp_persona = os.path.basename(lps[0]).split('_%02d_' % n_, 1)[-1]
-                    if lp_persona.endswith('_ru'):
-                        lp_persona = lp_persona[:-3]
+                    # Пересобрал проклу — старая папка остаётся рядом. Если
+                    # брать первую по алфавиту, сводка будет красной вечно.
+                    same = [x for x in lps if _lp_persona(x) == v_persona]
+                    lp_pick = same[0] if same else max(lps, key=os.path.getmtime)
+                    lp_persona = _lp_persona(lp_pick)
                 bad = bool(v_persona and lp_persona and v_persona != lp_persona)
                 rows.append({
                     'bundle': bundle, 'offer': off_, 'geo': geo_, 'dur': dur_, 'n': n_,
+                    # Ролики и проклы не знают про длительность: имена у них
+                    # одинаковые. Значит связка _90s смотрит на те же файлы,
+                    # что и базовая, и в счётчик её класть второй раз нельзя.
+                    'shared': bool(dur_),
                     'has_text': bool((sc.get('ru') or sc.get('text') or '').strip()),
                     'video': os.path.basename(vids[0]) if vids else '',
                     'video_hero': people.get(v_persona, v_persona),
                     'video_persona': v_persona,
-                    'lp': os.path.basename(lps[0]) if lps else '',
+                    'lp': os.path.basename(lp_pick) if lp_pick else '',
                     'lp_hero': people.get(lp_persona, lp_persona),
                     'lp_persona': lp_persona,
                     'mismatch': bad,
                 })
         return {'ok': True, 'rows': rows,
-                'bad': sum(1 for r in rows if r['mismatch'])}
+                'bad': len({(r['offer'], r['geo'], r['n']) for r in rows if r['mismatch']})}
 
     if action == 'delvideo':
         # Ролики прошлых прогонов надо уметь просто выкинуть, а не разглядывать.
@@ -1571,6 +1612,22 @@ def acc_clean(row):
     return out
 
 
+def looks_secret(token):
+    """Похоже на пароль или ключ двухфакторки? Тогда в панели ему не место."""
+    t = (token or '').strip()
+    if len(t) < 6:
+        return False
+    low = t.lower()
+    if 'otpauth' in low or '2fa' in low or 'secret' in low:
+        return True
+    if len(t) >= 16 and re.fullmatch(r'[A-Z2-7]+', t):       # база32, ключ 2FA
+        return True
+    if (len(t) >= 8 and re.search(r'[a-z]', t) and re.search(r'[A-Z]', t)
+            and re.search(r'\d', t) and '.' not in t and '@' not in t):
+        return True                                          # типичный пароль
+    return False
+
+
 def acc_parse_bulk(text):
     """Разобрать вставленную пачку. Аккаунты выдают строками вида
     «ACC6215_VLAD_FARM  почта@gmail.com  pottkind.com.de», разделитель —
@@ -1596,6 +1653,9 @@ def acc_parse_bulk(text):
                 rest.append(x)
         if not rec['acc']:
             continue                       # строка без аккаунта — не аккаунт
+        # Обещали, что пароль и двухфакторка не сохранятся, — значит они не
+        # должны оседать и в заметке. Выбрасываем всё, что похоже на секрет.
+        rest = [x for x in rest if not looks_secret(x)]
         if rest:
             rec['note'] = ' '.join(rest)
         rows.append(rec)
@@ -1721,9 +1781,13 @@ def save_journal(recs):
                 for r in old:
                     a.write(json.dumps(r, ensure_ascii=False) + '\n')
         except Exception:
-            return                      # не смогли сохранить старое — не режем
-        recs = recs[-JOURNAL_KEEP:]
-    tmp = JOURNAL_FILE + '.tmp'
+            pass                        # архив не пишется — пусть растёт, но не пропадает
+        else:
+            recs = recs[-JOURNAL_KEEP:]
+    # Имя временного файла своё у каждого потока: общий .tmp два писателя
+    # затирали друг у друга на полуслове, и журнал становился нечитаемым —
+    # то есть пропадала вся история разом.
+    tmp = '%s.tmp.%d.%d' % (JOURNAL_FILE, os.getpid(), threading.get_ident())
     with open(tmp, 'w', encoding='utf-8') as f:
         json.dump(recs, f, ensure_ascii=False, indent=1)
     os.replace(tmp, JOURNAL_FILE)
@@ -1848,13 +1912,48 @@ def journal_from_ru(stem):
         geo = next((k for k, v in (maps.get('g') or {}).items() if v == geo_ru), '')
         if not offer or not geo:
             return {}
-        persona = next((k for k, v in (vf_personas() or {}).items()
-                        if v == who and k.startswith(geo + '_')), '')
+        # Имена у героев повторяются (dz_grandpa и dz_man55 оба «Мохамед»),
+        # поэтому сперва смотрим, кто реально в собранном ролике этого
+        # сценария, и только если ролика нет — ищем по имени.
+        import glob as _g2
+        vids = [x for x in sorted(_g2.glob(os.path.join(
+                    VF_DIR, 'out', 'batch', '%s_%s_%02d_*.mp4' % (offer, geo, n))))
+                if not x.endswith(('_head.mp4', '.new.mp4'))]
+        persona = ''
+        if vids:
+            newest = max(vids, key=os.path.getmtime)
+            m2 = re.match(r'^%s_%s_%02d_(.+)\.mp4$' % (offer, geo, n),
+                          os.path.basename(newest))
+            cand = m2.group(1) if m2 else ''
+            people = vf_personas()
+            while cand and people and cand not in people and '_' in cand:
+                cand = cand.rsplit('_', 1)[0]
+            if cand and (not people or cand in people):
+                persona = cand
         if not persona:
-            persona = next((k for k, v in (vf_personas() or {}).items() if v == who), '')
+            same = [k for k, v in (vf_personas() or {}).items()
+                    if v == who and k.startswith(geo + '_')]
+            persona = same[0] if len(same) == 1 else ''
         return {'offer': offer, 'geo': geo, 'n': n, 'persona': persona}
     except Exception:
         return {}
+
+
+# Путь на диске -> имя, под которым файл принесли в панель. Живёт в памяти:
+# заливка идёт сразу после загрузки, а переживать перезапуск тут нечему.
+UPLOAD_ORIG = {}
+
+
+def remember_upload_name(path, orig):
+    try:
+        if not path or not orig:
+            return
+        if len(UPLOAD_ORIG) > 500:              # не растём бесконечно
+            for k in list(UPLOAD_ORIG)[:200]:
+                UPLOAD_ORIG.pop(k, None)
+        UPLOAD_ORIG[os.path.abspath(path)] = orig
+    except Exception:
+        pass
 
 
 def journal_add(user, ch_id, ch_info, vid_id, fpath, title='', desc='', hint=''):
@@ -1871,6 +1970,18 @@ def journal_add(user, ch_id, ch_info, vid_id, fpath, title='', desc='', hint='')
         got = journal_script(fpath) or {}
         if not got.get('ru') and hint:
             got = journal_script(hint) or got
+        if not got.get('ru'):
+            # Ни путь заливки, ни подсказка не разбираются — значит файл
+            # принесли через браузер и он лежит под служебным именем.
+            for cand in (UPLOAD_ORIG.get(os.path.abspath(hint or '')),
+                         UPLOAD_ORIG.get(os.path.abspath(fpath or ''))):
+                if not cand:
+                    continue
+                better = journal_script(cand) or {}
+                if better:
+                    got = better
+                    rec['file_orig'] = cand
+                    break
         rec.update(got)
         with JOURNAL_LOCK:
             recs = load_journal()
@@ -1886,8 +1997,8 @@ def journal_sync(user):
     Текста у старых роликов взять неоткуда — он нигде не сохранялся, это и есть
     та самая боль. Но название, дата, просмотры и «жив ли» доступны у YouTube,
     и уже по ним видно, какие ролики крутят, а какие сняли."""
-    recs = load_journal()
-    have = {r.get('video') for r in recs if r.get('user') == user}
+    have = {r.get('video') for r in load_journal() if r.get('user') == user}
+    fresh = []                      # новое копим отдельно, журнал не держим
     channels = load_channels(user)
     added, errors = 0, []
     for ch_id, info in channels.items():
@@ -1911,7 +2022,7 @@ def journal_sync(user):
                     if vid in have:
                         continue
                     sn = it.get('snippet', {})
-                    recs.append({'video': vid, 'link': 'https://youtu.be/%s' % vid,
+                    fresh.append({'video': vid, 'link': 'https://youtu.be/%s' % vid,
                                  'user': user, 'channel': ch_id,
                                  'channel_name': info.get('name', ''),
                                  'date': (sn.get('publishedAt') or '')[:16].replace('T', ' '),
@@ -1935,8 +2046,12 @@ def journal_sync(user):
             else:
                 msg = msg[:120]
             errors.append('%s: %s' % (info.get('name') or ch_id, msg))
-    recs.sort(key=lambda r: r.get('date') or '')
-    save_journal(recs)
+    with JOURNAL_LOCK:
+        recs = load_journal()
+        seen = {r.get('video') for r in recs if r.get('user') == user}
+        recs.extend(x for x in fresh if x['video'] not in seen)
+        recs.sort(key=lambda r: r.get('date') or '')
+        save_journal(recs)
     return {'ok': True, 'added': added, 'errors': errors}
 
 
@@ -1977,25 +2092,33 @@ def journal_check(user, limit=120):
     """Пройтись по записанным роликам и спросить, жив ли каждый и сколько
     у него просмотров. Это и есть ответ на «какие проходят, а какие нет»."""
     from concurrent.futures import ThreadPoolExecutor
-    recs = load_journal()
-    mine = [r for r in recs if r.get('user') == user and r.get('video')][-limit:]
+    mine = [r for r in load_journal() if r.get('user') == user and r.get('video')][-limit:]
     if not mine:
         return {'ok': True, 'checked': 0, 'errors': []}
+    # Опрос идёт ВНЕ замка: он тянется минутами, а заливка ждать не должна.
     with ThreadPoolExecutor(max_workers=4) as ex:
         got = list(ex.map(_journal_one, [r['link'] for r in mine]))
     now = time.strftime('%d.%m %H:%M')
     bad = 0
+    upd = {}
     for r, g in zip(mine, got):
         if g.get('status') == 'не ответил':
             bad += 1
-            r['checked'] = now
+            upd[r['video']] = {'checked': now}
             continue
-        r['status'] = g.get('status', '')
+        u = {'status': g.get('status', ''), 'why': g.get('why', ''), 'checked': now}
         if 'views' in g:
-            r['views'] = g.get('views')
-        r['why'] = g.get('why', '')
-        r['checked'] = now
-    save_journal(recs)
+            u['views'] = g.get('views')
+        upd[r['video']] = u
+    # А вот запись — под замком и по свежему журналу: пока мы спрашивали
+    # YouTube, могли залиться новые ролики. Старый снимок стёр бы их молча.
+    with JOURNAL_LOCK:
+        recs = load_journal()
+        for r in recs:
+            u = upd.get(r.get('video'))
+            if u and r.get('user') == user:
+                r.update(u)
+        save_journal(recs)
     errors = ['%d роликов не ответили — проверь связь и нажми ещё раз' % bad] if bad else []
     return {'ok': True, 'checked': len(mine), 'errors': errors}
 
@@ -4663,8 +4786,8 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
         <div style="border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:14px;">
           <div style="font-weight:800;font-size:14px;margin-bottom:10px;">Таска теху на залив наших лендов</div>
           <div class="sv-row">
-            <div class="sv-fld"><label>Моя метка</label><input id="sv-mark" value="VG" style="width:80px;"></div>
-            <div class="sv-fld"><label>Домен</label><input id="sv-domain" placeholder="gvita.beauty" style="min-width:150px;"></div>
+            <div class="sv-fld"><label>Моя метка</label><input id="sv-mark2" style="width:80px;"></div>
+            <div class="sv-fld"><label>Домен</label><input id="sv-domain2" placeholder="gvita.beauty" style="min-width:150px;"></div>
             <div class="sv-fld"><label>Название ленда</label><input id="sv-land" value="MedicalArticle" style="min-width:140px;"></div>
             <div class="sv-fld"><label>Тип цены</label>
               <select id="sv-ptype"><option value="low" selected>low</option>
@@ -6458,30 +6581,44 @@ async function svInit(){
 }
 // Карточка связки: товар, форма, цена, метка, домен. Раньше эти пять полей
 // Павел вбивал заново при каждом заходе — они никуда не сохранялись.
-const SV_CARD = [['sv-product','product'], ['sv-form','form'],
-                 ['sv-price-in','price'], ['sv-mark','mark'], ['sv-domain','domain']];
+// Метка и домен нужны и на шаге 4, и на шаге 5. Раньше поля были заведены под
+// одинаковыми id — браузер видит только первое, и всё, что Павел набирал на
+// шаге 5, уходило в никуда. Теперь у каждого поля свой id, а значение общее:
+// правишь в любом месте — второе подхватывает.
+const SV_CARD = [['product', ['sv-product']], ['form', ['sv-form']],
+                 ['price', ['sv-price-in']], ['mark', ['sv-mark','sv-mark2']],
+                 ['domain', ['sv-domain','sv-domain2']]];
+let svCardKey = '';
 function svBundleBind(){
-  SV_CARD.forEach(([id]) => {
+  SV_CARD.forEach(([, ids]) => ids.forEach(id => {
     const el = document.getElementById(id);
     if(el && !el._bound){ el._bound = 1; el.addEventListener('change', svBundleSave); }
-  });
+  }));
 }
 async function svBundleLoad(){
-  const r = await svApi('card_get', svParams());
-  if(!r || !r.ok) return;
-  const c = r.card || {};
-  SV_CARD.forEach(([id, key]) => {
-    const el = document.getElementById(id);
-    // Подставляем целиком: сменил оффер — увидел его товар и цену, а не
-    // прошлые. Терять нечего, каждое изменение сохраняется сразу.
-    if(el) el.value = c[key] || '';
-  });
-}
-async function svBundleSave(){
   const p = svParams();
-  SV_CARD.forEach(([id, key]) => {
+  const key = p.offer + '|' + p.geo;
+  if(!p.offer || !p.geo) return;
+  svCardKey = '';                       // пока грузим — не сохраняем чужое
+  const r = await svApi('card_get', p);
+  const c = (r && r.ok && r.card) ? r.card : {};
+  SV_CARD.forEach(([k, ids]) => ids.forEach(id => {
     const el = document.getElementById(id);
-    if(el) p[key] = el.value;
+    if(el) el.value = c[k] || '';       // связка сменилась — поля её, а не прошлые
+  }));
+  svCardKey = key;
+}
+async function svBundleSave(e){
+  const p = svParams();
+  if(svCardKey !== p.offer + '|' + p.geo) return;   // карточка ещё не загрузилась
+  // Правку в одном из парных полей переносим во второе.
+  SV_CARD.forEach(([k, ids]) => {
+    let v = '';
+    ids.forEach(id => { const el = document.getElementById(id);
+                        if(el && el.value) v = el.value; });
+    if(e && e.target && ids.includes(e.target.id)) v = e.target.value;
+    ids.forEach(id => { const el = document.getElementById(id); if(el) el.value = v; });
+    p[k] = v;
   });
   await svApi('card_save', p);
 }
@@ -7341,6 +7478,9 @@ async function svSortInbox(){
     const sel = document.getElementById('sv-form');
     for(const opt of sel.options){ if(opt.value.startsWith(o.form)){ sel.value = opt.value; break; } }
   }
+  // То, что разбор нашёл, надо сразу положить в карточку связки: иначе оно
+  // держалось только на экране и терялось при первом же переключении.
+  await svBundleSave();
   await svInboxList();
   await svMaterials();
   svSay(4, 'Разобрал. Проверь поля и делай проклы.');
@@ -7624,19 +7764,25 @@ function crmRender(){
           const v = (x[key] || '');
           if(key === 'acc')
             return '<td style="padding:4px 6px;white-space:nowrap;"><b>' + jrEsc(v) + '</b></td>';
-          const oid = "crmSet('" + x.acc.replace(/'/g,"\\'") + "','" + key + "',this.value)";
+          // Номер аккаунта раньше склеивался прямо в onchange="crmSet('…')".
+          // Кавычка в номере ломала разметку и пускала в панель что угодно.
+          // Теперь значение едет в data-атрибуте, а обработчик вешается кодом.
+          const d = 'data-acc="' + jrEsc(x.acc) + '" data-key="' + key + '"';
           if(opts)
-            return '<td style="padding:2px 4px;"><select onchange="' + oid + '" '
+            return '<td style="padding:2px 4px;"><select ' + d + ' class="crm-in" '
               + 'style="width:100%;padding:3px 4px;border-radius:6px;background:var(--surface);'
               + 'color:var(--text);border:1px solid var(--border);font-size:12px;">'
-              + opts.map(o => '<option value="'+o+'"'+(o===v?' selected':'')+'>'
+              + opts.map(o => '<option value="'+jrEsc(o)+'"'+(o===v?' selected':'')+'>'
                               + (o || '—') + '</option>').join('') + '</select></td>';
-          return '<td style="padding:2px 4px;"><input value="' + jrEsc(v) + '" onchange="' + oid + '" '
+          return '<td style="padding:2px 4px;"><input value="' + jrEsc(v) + '" ' + d + ' class="crm-in" '
             + 'style="width:100%;padding:3px 5px;border-radius:6px;background:var(--surface);'
             + 'color:var(--text);border:1px solid var(--border);font-size:12px;"></td>';
         }).join('') + '</tr>';
   }).join('');
   document.getElementById('crm-table').innerHTML = head + body;
+  document.querySelectorAll('#crm-table .crm-in').forEach(el => {
+    el.addEventListener('change', () => crmSet(el.dataset.acc, el.dataset.key, el.value));
+  });
   crmSummary();
 }
 
@@ -7719,7 +7865,8 @@ async function jrAdd(){
   document.getElementById('jr-file').value = '';
   jrLoad();
 }
-function jrEsc(t){ return (t||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function jrEsc(t){ return (t||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+                          .replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 // Прошло ли объявление в Google Ads, знает только Павел: YouTube ролик не
 // снимает, его просто не крутят. Поэтому вердикт ставит он, а панель хранит
 // вердикт рядом с текстом — сравнивать иначе не с чем.
@@ -10958,7 +11105,12 @@ class Handler(BaseHTTPRequestHandler):
             fpath = os.path.join(UPLOAD_DIR, fname+ext)
             with open(fpath, 'wb') as f:
                 f.write(fdata if isinstance(fdata, bytes) else fdata.encode())
-            self.json({'path': fpath})
+            # Файл ложится на диск под служебным именем video_<uuid>.mp4 —
+            # так было всегда, менять нельзя. Но по такому имени журнал не мог
+            # понять, что это за ролик, и записи выходили пустыми на всех
+            # путях, кроме заливки из «Связок». Запоминаем настоящее имя рядом.
+            remember_upload_name(fpath, orig_name)
+            self.json({'path': fpath, 'orig': orig_name})
         elif path == '/gen_static':
             import base64 as _b64, io as _sio, random as _srnd
             from PIL import Image as _Img, ImageEnhance as _IE, ImageFilter as _IF, ImageOps as _IO
@@ -11541,6 +11693,16 @@ class Handler(BaseHTTPRequestHandler):
                 import traceback
                 self.json({'error': str(e), 'log': traceback.format_exc()})
         elif path == '/crm':
+            # Панель слушает 0.0.0.0 и в консоли сама печатает адрес «для друга»
+            # — то есть до неё дотягивается любой в той же сети. Маркера файла
+            # мало: он лежит на машине Павла, а запрос может прийти с чужой.
+            # Поэтому реестр отвечает только с самой машины.
+            if self.client_address[0] not in ('127.0.0.1', '::1'):
+                self.json({'error': 'Реестр аккаунтов открывается только на машине владельца'}); return
+            # Чужая страница в браузере может послать сюда простую форму. JSON
+            # она послать не может, поэтому требуем именно его.
+            if 'application/json' not in (self.headers.get('Content-Type') or ''):
+                self.json({'error': 'нужен application/json'}); return
             length = int(self.headers.get('Content-Length', 0))
             cp = json.loads(self.rfile.read(length)) if length else {}
             self.json(crm_handle(cp.get('do') or 'list', cp))
@@ -11561,8 +11723,8 @@ class Handler(BaseHTTPRequestHandler):
                 vid = m.group(1) if m else (raw if re.fullmatch(r'[A-Za-z0-9_-]{11}', raw) else '')
                 if not vid:
                     self.json({'ok': False, 'error': 'не похоже на ссылку YouTube'}); return
-                recs = load_journal()
-                if any(r.get('video') == vid and r.get('user') == user for r in recs):
+                if any(r.get('video') == vid and r.get('user') == user
+                       for r in load_journal()):
                     self.json({'ok': False, 'error': 'этот ролик уже в журнале'}); return
                 rec = {'video': vid, 'link': 'https://youtu.be/%s' % vid, 'user': user,
                        'channel': '', 'channel_name': jp.get('channel_name', ''),
@@ -11570,17 +11732,20 @@ class Handler(BaseHTTPRequestHandler):
                        'title': '', 'desc': '', 'file': jp.get('file', ''),
                        'status': '', 'views': None, 'checked': '', 'from': 'руками'}
                 rec.update(journal_script(jp.get('file', '')) or {})
-                recs.append(rec)
-                save_journal(recs)
+                with JOURNAL_LOCK:
+                    recs = load_journal()
+                    recs.append(rec)
+                    save_journal(recs)
                 self.json({'ok': True, 'video': vid}); return
             if act == 'mark':
-                recs = load_journal()
                 vid = jp.get('video')
-                for r in recs:
-                    if r.get('video') == vid and r.get('user') == user:
-                        r['mark'] = jp.get('mark', '')
-                        r['note'] = jp.get('note', r.get('note', ''))
-                save_journal(recs)
+                with JOURNAL_LOCK:
+                    recs = load_journal()
+                    for r in recs:
+                        if r.get('video') == vid and r.get('user') == user:
+                            r['mark'] = jp.get('mark', '')
+                            r['note'] = jp.get('note', r.get('note', ''))
+                    save_journal(recs)
                 self.json({'ok': True}); return
             recs = [r for r in load_journal() if r.get('user') == user]
             self.json({'ok': True, 'items': list(reversed(recs))[:400]})
