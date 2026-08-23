@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.81"
+VERSION = "5.82"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -1576,9 +1576,12 @@ CRM_LOCK = threading.Lock()
 # в строку домена в ДжиСи; записанные здесь, они становятся единственным местом,
 # где аккаунт связан с кампанией: в самом Биноме названия кампаний номера
 # аккаунта не содержат (проверено на 694 кампаниях), а домен там служебный.
+# bundle/lp/creo — та самая цепочка, ради которой всё затевалось:
+# аккаунт → связка → конкретная прокла → конкретный ролик под неё.
+# Раньше «креатив» был свободным текстом и ни с чем не сходился.
 ACC_FIELDS = ('acc', 'type', 'email', 'domain', 'farmer', 'offer', 'geo',
-              'status', 'creo', 'redir', 'cmb', 'prepay', 'prepay2', 'problem',
-              'verif', 'verif2', 'card', 'note')
+              'bundle', 'lp', 'creo', 'status', 'redir', 'cmb', 'prepay',
+              'prepay2', 'problem', 'verif', 'verif2', 'card', 'note')
 
 
 def is_owner():
@@ -1714,6 +1717,51 @@ def crm_handle(action, p):
                 added += 1
             save_accounts(rows)
         return {'ok': True, 'added': added, 'skipped': skipped}
+
+    if action == 'chain':
+        # Список того, что реально лежит на диске: связки, их проклы и ролики.
+        # Нужен, чтобы прокла и ролик в карточке аккаунта выбирались из
+        # существующего, а не набирались руками с опечатками.
+        out = {}
+        if not vf_available():
+            return {'ok': True, 'bundles': out}
+        import glob as _g
+        people = vf_personas()
+        for sdir_ in sorted(_g.glob(os.path.join(VF_DIR, 'scripts', '*'))):
+            b = os.path.basename(sdir_)
+            m_ = re.match(r'^([a-z]+)_([a-z]{2})(?:_(\d+)s)?$', b)
+            if not m_ or not os.path.isdir(sdir_):
+                continue
+            off_, geo_ = m_.group(1), m_.group(2)
+            if b in out:
+                continue
+            vids, lps = [], []
+            for f in sorted(_g.glob(os.path.join(VF_DIR, 'out', 'batch',
+                                                 '%s_%s_[0-9][0-9]_*.mp4' % (off_, geo_)))):
+                if f.endswith(('_head.mp4', '.new.mp4')):
+                    continue
+                # Промежуточные файлы монтажа (…_ready, …_ready_tail) — не
+                # ролики: в списке они выглядели тремя одинаковыми «Мареками».
+                tail = re.sub(r'^%s_%s_\d+_' % (off_, geo_), '', os.path.basename(f)[:-4])
+                if people and tail not in people:
+                    continue
+                g_ = journal_script(f) or {}
+                who = people.get(g_.get('persona', ''), g_.get('persona', ''))
+                vids.append({'file': os.path.basename(f),
+                             'label': '№%s · %s' % (g_.get('n', '?'), who or '?')})
+            for d_ in sorted(_g.glob(os.path.join(VF_DIR, 'prela',
+                                                  '%s_%s_[0-9][0-9]_*' % (off_, geo_)))):
+                if not os.path.isdir(d_) or not os.path.exists(os.path.join(d_, 'index.html')):
+                    continue
+                name = os.path.basename(d_)
+                if name.endswith('_ru'):
+                    continue          # русская копия проклы — она для чтения, не для залива
+                mm = re.match(r'^%s_%s_(\d+)_(.+)$' % (off_, geo_), name)
+                who = people.get(mm.group(2), mm.group(2)) if mm else ''
+                lps.append({'dir': name,
+                            'label': '№%s · %s' % (int(mm.group(1)) if mm else '?', who or '?')})
+            out[b] = {'videos': vids, 'prelas': lps}
+        return {'ok': True, 'bundles': out}
 
     if action == 'link':
         # Канал знает свой аккаунт. Держим связь в отдельном файле, а не в
@@ -5152,9 +5200,15 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
           <button class="btn" onclick="crmBulkBox()">Закрыть</button>
         </div>
       </div>
+      <div id="crm-offers" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;"></div>
+      <div id="crm-legend" style="font-size:12px;color:var(--text3);margin-bottom:6px;">
+        полоса слева: <b style="color:#16a34a;">зелёная</b> — льёт ·
+        <b style="color:#eab308;">жёлтая</b> — есть проблема ·
+        <b style="color:#d97706;">оранжевая</b> — ждёт верификации ·
+        <b style="color:#e11d48;">красная</b> — бан или фриз · серая — не залит</div>
       <div id="crm-sum" style="font-size:13px;color:var(--text3);margin-bottom:8px;"></div>
-      <div style="overflow-x:auto;"><table id="crm-table"
-           style="border-collapse:collapse;font-size:12px;min-width:100%;"></table></div>
+      <div style="overflow:auto;max-height:70vh;"><table id="crm-table"
+           style="border-collapse:separate;border-spacing:0;font-size:12px;min-width:100%;"></table></div>
     </div>
   </div>
   <div id="tab-journal" class="tab-pane">
@@ -7663,13 +7717,17 @@ function switchTab(tab){
 // ── Реестр аккаунтов ─────────────────────────────────────────────
 // Вкладка появляется только там, где сервер подтвердил владельца: у байеров
 // её нет, а если открыть адрес руками — сервер откажет.
-let crmRows = [], crmLinks = {};
+let crmRows = [], crmLinks = {}, crmChain = {};
+// Колонки в том порядке, в каком Павел их читает: сначала кто и что на нём
+// льётся, потом цепочка «связка → прокла → ролик», потом деньги и болячки.
 const CRM_COLS = [
   ['acc','Аккаунт',150,null],
   ['status','Статус',96,['','не залит','залит','стоп']],
   ['offer','Оффер',150,null],
   ['geo','Гео',52,null],
-  ['creo','Креатив',130,null],
+  ['bundle','Связка',150,'BUNDLES'],
+  ['lp','Прокла',170,'PRELAS'],
+  ['creo','Ролик',170,'VIDEOS'],
   ['redir','REDIR',76,null],
   ['cmb','CMB',76,null],
   ['prepay','Припей',68,null],
@@ -7685,7 +7743,14 @@ const CRM_COLS = [
   ['note','Заметка',200,null],
 ];
 const CRM_BAN = ['бан ак','фриз','обход системы','подозрительный платёж','неприемлемая практика'];
-
+// Цвет = состояние, четыре смысла и ни одного лишнего.
+function crmState(x){
+  if(CRM_BAN.includes(x.problem||''))                          return ['bad',   '#e11d48'];
+  if((x.verif||'')==='нужна' || (x.verif2||'')==='нужна')       return ['wait',  '#d97706'];
+  if((x.problem||'').trim())                                    return ['issue', '#eab308'];
+  if((x.status||'')==='залит')                                  return ['run',   '#16a34a'];
+  return ['idle', 'var(--border2)'];
+}
 async function crmApi(body){
   return await fetch('/crm', {method:'POST', headers:{'Content-Type':'application/json'},
                               body: JSON.stringify(body)}).then(x=>x.json()).catch(()=>null);
@@ -7702,8 +7767,29 @@ async function crmLoad(){
   const r = await crmApi({do:'list'});
   if(!r || !r.ok){ alert((r && r.error) || 'реестр недоступен'); return; }
   crmRows = r.rows || []; crmLinks = r.links || {};
+  const c = await crmApi({do:'chain'});
+  crmChain = (c && c.bundles) || {};
+  crmOffers();
   crmRender();
 }
+// Переключатель офферов: выбрал один — видишь только его аккаунты.
+function crmOffers(){
+  const box = document.getElementById('crm-offers');
+  if(!box) return;
+  const list = [...new Set(crmRows.map(x => (x.offer||'').trim()).filter(Boolean))].sort();
+  box.innerHTML = ['', ...list].map(o => {
+    const on = (window.crmOffer||'') === o;
+    return '<button onclick="crmPickOffer(\'' + jrEsc(o).replace(/'/g,'&#39;') + '\')" '
+      + 'style="cursor:pointer;padding:5px 12px;border-radius:9px;font-size:12px;font-family:inherit;'
+      + 'border:1.5px solid ' + (on ? 'var(--accent1)' : 'var(--border)') + ';'
+      + 'background:' + (on ? 'var(--accent1)' : 'transparent') + ';'
+      + 'color:' + (on ? '#fff' : 'var(--text2)') + ';">'
+      + (o ? jrEsc(o) : 'все офферы')
+      + ' <span style="opacity:.65;">' + (o ? crmRows.filter(x => (x.offer||'').trim() === o).length
+                                             : crmRows.length) + '</span></button>';
+  }).join(' ');
+}
+function crmPickOffer(o){ window.crmOffer = o; crmOffers(); crmRender(); }
 function crmBulkBox(){
   const b = document.getElementById('crm-bulk');
   b.style.display = b.style.display === 'none' ? '' : 'none';
@@ -7721,9 +7807,13 @@ async function crmSet(acc, field, val){
   const row = crmRows.find(x => x.acc === acc);
   if(!row) return;
   row[field] = val;
+  if(field === 'bundle'){ row.lp = ''; row.creo = ''; }   // связка сменилась — старая пара не годится
   const r = await crmApi({do:'save', row: row});
-  if(!r || !r.ok) alert((r && r.error) || 'не сохранилось');
-  crmSummary();
+  if(!r || !r.ok){ alert((r && r.error) || 'не сохранилось'); return; }
+  // Цвет строки и списки зависят от значения — перерисовываем.
+  if(['bundle','problem','verif','verif2','status','offer'].includes(field)){
+    crmOffers(); crmRender();
+  } else crmSummary();
 }
 function crmCanRun(x){
   return !CRM_BAN.includes(x.problem || '') && (x.verif || '') !== 'нужна';
@@ -7742,7 +7832,9 @@ function crmSummary(){
 function crmRender(){
   const f = document.getElementById('crm-filter').value;
   const q = (document.getElementById('crm-q').value || '').toLowerCase().trim();
+  const off = (window.crmOffer || '').trim();
   const rows = crmRows.filter(x => {
+    if(off && (x.offer||'').trim() !== off) return false;
     if(f === 'ok'    && !crmCanRun(x)) return false;
     if(f === 'free'  && (x.offer || '').trim()) return false;
     if(f === 'ban'   && !CRM_BAN.includes(x.problem || '')) return false;
@@ -7751,29 +7843,40 @@ function crmRender(){
     if(q && !CRM_COLS.map(c => x[c[0]] || '').join(' ').toLowerCase().includes(q)) return false;
     return true;
   });
+  // Первая колонка приклеена: таблица шире экрана, и вправо Павел уезжал
+  // вслепую — было не видно, на чьей строке правишь.
+  const stick = 'position:sticky;left:0;z-index:2;background:var(--surface2);';
   const head = '<tr style="color:var(--text3);text-align:left;">'
-    + CRM_COLS.map(c => '<th style="padding:5px 6px;min-width:'+c[2]+'px;font-weight:600;">'
-                        + c[1] + '</th>').join('') + '</tr>';
-  const body = rows.map(x => {
-    const bad = CRM_BAN.includes(x.problem || '');
-    const wait = (x.verif||'') === 'нужна' || (x.verif2||'') === 'нужна';
-    const bg = bad ? 'rgba(225,29,72,.10)' : (wait ? 'rgba(217,119,6,.10)' : '');
-    return '<tr style="border-top:1px solid var(--border);background:'+bg+';">'
+    + CRM_COLS.map((c,i) => '<th style="padding:5px 6px;min-width:'+c[2]+'px;font-weight:600;'
+        + 'position:sticky;top:0;z-index:' + (i===0?3:1) + ';background:var(--surface);'
+        + (i===0?'left:0;':'') + '">' + c[1] + '</th>').join('') + '</tr>';
+  const body = rows.map((x, ri) => {
+    const [, col] = crmState(x);
+    return '<tr style="border-top:1px solid var(--border);">'
       + CRM_COLS.map(c => {
           const [key,,w,opts] = c;
           const v = (x[key] || '');
           if(key === 'acc')
-            return '<td style="padding:4px 6px;white-space:nowrap;"><b>' + jrEsc(v) + '</b></td>';
-          // Номер аккаунта раньше склеивался прямо в onchange="crmSet('…')".
-          // Кавычка в номере ломала разметку и пускала в панель что угодно.
-          // Теперь значение едет в data-атрибуте, а обработчик вешается кодом.
+            return '<td style="padding:4px 6px;white-space:nowrap;' + stick
+              + 'border-left:4px solid ' + col + ';"><b>' + jrEsc(v) + '</b></td>';
           const d = 'data-acc="' + jrEsc(x.acc) + '" data-key="' + key + '"';
-          if(opts)
+          let list = opts;
+          if(opts === 'BUNDLES') list = ['', ...Object.keys(crmChain).sort()];
+          if(opts === 'PRELAS')  list = ['', ...(((crmChain[x.bundle]||{}).prelas)||[]).map(p=>p.dir)];
+          if(opts === 'VIDEOS')  list = ['', ...(((crmChain[x.bundle]||{}).videos)||[]).map(p=>p.file)];
+          if(Array.isArray(list)){
+            const labels = {};
+            (((crmChain[x.bundle]||{}).prelas)||[]).forEach(p => labels[p.dir] = p.label);
+            (((crmChain[x.bundle]||{}).videos)||[]).forEach(p => labels[p.file] = p.label);
+            const has = list.includes(v);
             return '<td style="padding:2px 4px;"><select ' + d + ' class="crm-in" '
               + 'style="width:100%;padding:3px 4px;border-radius:6px;background:var(--surface);'
               + 'color:var(--text);border:1px solid var(--border);font-size:12px;">'
-              + opts.map(o => '<option value="'+jrEsc(o)+'"'+(o===v?' selected':'')+'>'
-                              + (o || '—') + '</option>').join('') + '</select></td>';
+              + (has ? '' : '<option value="'+jrEsc(v)+'" selected>'+(v?jrEsc(v)+' (нет на диске)':'—')+'</option>')
+              + list.map(o => '<option value="'+jrEsc(o)+'"'+(o===v?' selected':'')+'>'
+                              + (o ? jrEsc(labels[o] || o) : '—') + '</option>').join('')
+              + '</select></td>';
+          }
           return '<td style="padding:2px 4px;"><input value="' + jrEsc(v) + '" ' + d + ' class="crm-in" '
             + 'style="width:100%;padding:3px 5px;border-radius:6px;background:var(--surface);'
             + 'color:var(--text);border:1px solid var(--border);font-size:12px;"></td>';
