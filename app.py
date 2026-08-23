@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.76"
+VERSION = "5.77"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -644,7 +644,24 @@ def vf_handle(action, p):
             with open(fp, 'wb') as fh:
                 fh.write(_b64.b64decode(data))
             p['product_img'] = fp
-        args = ['prela_gen.py', offer, geo, str(p.get('script')), p.get('persona', '')]
+        # Герой проклы обязан совпадать с героем уже собранного ролика этого
+        # сценария. Раньше он приходил из выпадашки браузера и мог разойтись:
+        # так и вышло на всех пяти связках — прокла на одном человеке, ролик на
+        # другом (Павел 22.08: «ролики с проклой не логичны между собой»).
+        # Теперь диск главнее выпадашки: если ролик уже собран, берём его героя.
+        persona = (p.get('persona') or '').strip()
+        try:
+            n_ = int(p.get('script') or 0)
+            done = [x for x in sorted(_glob.glob(os.path.join(
+                        VF_DIR, 'out', 'batch', '%s_%s_%02d_*.mp4' % (offer, geo, n_))))
+                    if not x.endswith(('_head.mp4', '.new.mp4'))]
+            if done:
+                from_video = (journal_script(done[0]) or {}).get('persona', '')
+                if from_video and from_video != persona:
+                    persona = from_video
+        except Exception:
+            pass
+        args = ['prela_gen.py', offer, geo, str(p.get('script')), persona]
         for key, flag in (('product', 'product'), ('price', 'price'),
                           ('form_url', 'form'), ('product_img', 'img'),
                           ('form', 'form_type')):
@@ -652,7 +669,10 @@ def vf_handle(action, p):
                 args.append('--%s=%s' % (flag, p[key]))
         if not p.get('photos', 1):
             args.append('--no-photos')
-        return vf_run_bg(args, 'Делаю проклу №%s' % p.get('script'))
+        note = 'Делаю проклу №%s' % p.get('script')
+        if persona and persona != (p.get('persona') or '').strip():
+            note += ' · герой взят с готового ролика: %s' % persona
+        return vf_run_bg(args, note)
 
     if action == 'uniq':
         return vf_run_bg(['uniq.py', os.path.join(VF_DIR, 'out', 'batch'),
@@ -1023,6 +1043,53 @@ def vf_handle(action, p):
             except Exception:
                 pass
         return {'ok': True, 'n': n, 'videos': moved}
+
+    if action == 'pairs':
+        # Сводка по всем связкам: сценарий → ролик → прокла. Нужна, потому что
+        # совпадение имён нас подвело: имена похожи, а люди в ролике и на прокле
+        # разные, и заметить это можно было только глазами по всем папкам сразу.
+        rows = []
+        people = vf_personas()
+        for sdir_ in sorted(_glob.glob(os.path.join(VF_DIR, 'scripts', '*'))):
+            if not os.path.isdir(sdir_):
+                continue
+            bundle = os.path.basename(sdir_)
+            m_ = re.match(r'^([a-z]+)_([a-z]{2})(?:_(\d+)s)?$', bundle)
+            if not m_:
+                continue
+            off_, geo_, dur_ = m_.group(1), m_.group(2), m_.group(3) or ''
+            for js in sorted(_glob.glob(os.path.join(sdir_, '[0-9][0-9].json'))):
+                n_ = int(os.path.basename(js)[:2])
+                try:
+                    sc = json.load(open(js, encoding='utf-8'))
+                except Exception:
+                    sc = {}
+                vids = [x for x in sorted(_glob.glob(os.path.join(
+                            VF_DIR, 'out', 'batch', '%s_%s_%02d_*.mp4' % (off_, geo_, n_))))
+                        if not x.endswith(('_head.mp4', '.new.mp4'))]
+                v_persona = (journal_script(vids[0]) or {}).get('persona', '') if vids else ''
+                lps = [x for x in sorted(_glob.glob(os.path.join(
+                            VF_DIR, 'prela', '%s_%s_%02d_*' % (off_, geo_, n_))))
+                       if os.path.isdir(x)]
+                lp_persona = ''
+                if lps:
+                    lp_persona = os.path.basename(lps[0]).split('_%02d_' % n_, 1)[-1]
+                    if lp_persona.endswith('_ru'):
+                        lp_persona = lp_persona[:-3]
+                bad = bool(v_persona and lp_persona and v_persona != lp_persona)
+                rows.append({
+                    'bundle': bundle, 'offer': off_, 'geo': geo_, 'dur': dur_, 'n': n_,
+                    'has_text': bool((sc.get('ru') or sc.get('text') or '').strip()),
+                    'video': os.path.basename(vids[0]) if vids else '',
+                    'video_hero': people.get(v_persona, v_persona),
+                    'video_persona': v_persona,
+                    'lp': os.path.basename(lps[0]) if lps else '',
+                    'lp_hero': people.get(lp_persona, lp_persona),
+                    'lp_persona': lp_persona,
+                    'mismatch': bad,
+                })
+        return {'ok': True, 'rows': rows,
+                'bad': sum(1 for r in rows if r['mismatch'])}
 
     if action == 'delvideo':
         # Ролики прошлых прогонов надо уметь просто выкинуть, а не разглядывать.
@@ -1432,28 +1499,101 @@ def load_journal():
         return []
 
 
+# Заливка идёт из нескольких потоков сразу, а запись журнала — это
+# «прочитал файл, дописал, положил обратно». Без замка две одновременные
+# заливки затирают запись друг друга: файл при этом целый, просто одного
+# ролика в нём нет. Проявляется ровно в момент успеха, поэтому и незаметно.
+JOURNAL_LOCK = threading.Lock()
+JOURNAL_KEEP = 3000
+
+
 def save_journal(recs):
+    # Лишнее не выбрасываем, а дописываем в архив: 3000 записей — это меньше
+    # четырёх часов работы на пятидесяти байерах, а история залива нужна
+    # именно старая (ролики снимают не сразу).
+    if len(recs) > JOURNAL_KEEP:
+        old = recs[:-JOURNAL_KEEP]
+        try:
+            with open(JOURNAL_FILE + '.archive.jsonl', 'a', encoding='utf-8') as a:
+                for r in old:
+                    a.write(json.dumps(r, ensure_ascii=False) + '\n')
+        except Exception:
+            return                      # не смогли сохранить старое — не режем
+        recs = recs[-JOURNAL_KEEP:]
     tmp = JOURNAL_FILE + '.tmp'
     with open(tmp, 'w', encoding='utf-8') as f:
-        json.dump(recs[-3000:], f, ensure_ascii=False, indent=1)
+        json.dump(recs, f, ensure_ascii=False, indent=1)
     os.replace(tmp, JOURNAL_FILE)
 
 
+_PERSONAS_CACHE = {'at': 0.0, 'names': {}}
+
+
+def vf_personas():
+    """Ключи и имена всех героев фабрики. Раз в 5 минут, а не на каждый вызов:
+    журнал зовёт это на каждой заливке, а запуск подпроцесса — треть секунды."""
+    if time.time() - _PERSONAS_CACHE['at'] < 300 and _PERSONAS_CACHE['names']:
+        return _PERSONAS_CACHE['names']
+    names = {}
+    try:
+        if vf_available():
+            r = subprocess.run([sys.executable, '-c',
+                                'import json,personas;print(json.dumps({k:v.get("name","") '
+                                'for k,v in personas.PERSONAS.items()},ensure_ascii=False))'],
+                               cwd=VF_DIR, env=vf_env(), capture_output=True, text=True, timeout=30)
+            names = json.loads(r.stdout.strip() or '{}')
+    except Exception:
+        names = {}
+    if names:
+        _PERSONAS_CACHE.update(at=time.time(), names=names)
+    return names or _PERSONAS_CACHE['names']
+
+
 def journal_script(path):
-    """Текст ролика по имени файла фабрики: neuropathy_pl_01_pl_man45.mp4 →
-    scripts/neuropathy_pl/01.json. Ролик, залитый из чужого файла, останется
-    без текста — записать его всё равно надо, ссылка и статус тоже нужны."""
+    """Понять по имени файла, из какого сценария собран ролик.
+
+    Имя приходит в трёх видах, и все три надо разобрать:
+      out/batch/neuropathy_pl_01_pl_man45.mp4      — как собрала фабрика
+      uq_ab12cd34_0_9x16.mp4                        — уникальная копия под заливку
+      Нейропатия Польша — 1. Марек (мужчина).mp4    — копия на рабочем столе
+
+    Второй вид не разбирается в принципе — для него в journal_add есть hint
+    с исходным путём. Третий разбираем по тем же словарям, по которым его и
+    составляли (ready_box.py). Персонажа проверяем по живому списку героев:
+    без этого «neuropathy_pl_01_pl_man45_ready_tail» давал несуществующего
+    героя «pl_man45_ready_tail», и запись уезжала мимо сценария.
+    """
     out = {}
     try:
         base = os.path.basename(path or '')
-        m = re.match(r'^([a-z]+)_([a-z]{2})_(\d+)_([a-z0-9_]+?)(?:_(?:\d+|916|11|169|[0-9]+x[0-9]+))?\.mp4$', base)
-        if not m:
+        if not base.lower().endswith('.mp4'):
             return out
-        offer, geo, n, persona = m.group(1), m.group(2), int(m.group(3)), m.group(4)
-        out.update({'offer': offer, 'geo': geo, 'n': n, 'persona': persona})
+        stem = base[:-4]
+        people = vf_personas()
+
+        m = re.match(r'^([a-z]+)_([a-z]{2})_(\d+)_(.+)$', stem)
+        if m:
+            offer, geo, n, tail = m.group(1), m.group(2), int(m.group(3)), m.group(4)
+            persona = tail
+            # Отрезаем хвосты монтажа и нарезки по одному сегменту, пока не
+            # получится настоящий герой. «_bare» не трогаем вслепую: герой
+            # dz_grandpa_bare существует, и он проверкой по списку и опознаётся.
+            while persona and people and persona not in people:
+                if '_' not in persona:
+                    break
+                persona = persona.rsplit('_', 1)[0]
+            if people and persona not in people:
+                persona = tail          # список есть, а героя нет — пишем как есть
+            out.update({'offer': offer, 'geo': geo, 'n': n, 'persona': persona})
+        else:
+            out.update(journal_from_ru(stem))
+            if not out:
+                return out
+
         if not vf_available():
             return out
         import glob as _g
+        offer, geo, n = out.get('offer'), out.get('geo'), out.get('n')
         dirs = [os.path.join(VF_DIR, 'scripts', '%s_%s' % (offer, geo))]
         dirs += sorted(_g.glob(os.path.join(VF_DIR, 'scripts', '%s_%s_*' % (offer, geo))))
         for d in dirs:
@@ -1463,10 +1603,55 @@ def journal_script(path):
                 out['ru'] = (sc.get('ru') or '').strip()
                 out['text'] = (sc.get('text') or '').strip()
                 out['angle'] = sc.get('angle') or ''
+                out['bundle'] = os.path.basename(d)
                 break
+        # Прокла этого сценария. Имя папки уже несёт героя — если он не тот,
+        # что в ролике, значит ролик и прокла собраны на разных людей. Павел
+        # напоролся на это вживую, поэтому расхождение пишем прямо в запись.
+        for pd in sorted(_g.glob(os.path.join(VF_DIR, 'prela',
+                                              '%s_%s_%02d_*' % (offer, geo, n)))):
+            if not os.path.isdir(pd):
+                continue
+            lp = os.path.basename(pd)
+            out['lp'] = lp
+            lp_persona = lp.split('_%02d_' % n, 1)[-1]
+            if out.get('persona') and lp_persona and lp_persona != out['persona']:
+                out['lp_mismatch'] = 'ролик на %s, прокла на %s' % (out['persona'], lp_persona)
+            break
     except Exception:
         pass
     return out
+
+
+def journal_from_ru(stem):
+    """«Нейропатия Польша — 1. Марек (мужчина)» → offer/geo/n/persona.
+
+    Файл с таким именем кладёт на рабочий стол ready_box.py, и заливка чаще
+    всего идёт именно оттуда — значит это самый ходовой путь, а не редкий."""
+    try:
+        m = re.match(r'^(.+?)\s+(.+?)\s+—\s+(\d+)\.\s+(.+?)(?:\s+\((?:мужчина|женщина)\))?$',
+                     stem)
+        if not m:
+            return {}
+        offer_ru, geo_ru, n, who = m.group(1), m.group(2), int(m.group(3)), m.group(4).strip()
+        if not vf_available():
+            return {}
+        r = subprocess.run([sys.executable, '-c',
+                            'import json,ready_box;print(json.dumps({"o":ready_box.OFFER_RU,'
+                            '"g":ready_box.GEO_RU},ensure_ascii=False))'],
+                           cwd=VF_DIR, env=vf_env(), capture_output=True, text=True, timeout=30)
+        maps = json.loads(r.stdout.strip() or '{}')
+        offer = next((k for k, v in (maps.get('o') or {}).items() if v == offer_ru), '')
+        geo = next((k for k, v in (maps.get('g') or {}).items() if v == geo_ru), '')
+        if not offer or not geo:
+            return {}
+        persona = next((k for k, v in (vf_personas() or {}).items()
+                        if v == who and k.startswith(geo + '_')), '')
+        if not persona:
+            persona = next((k for k, v in (vf_personas() or {}).items() if v == who), '')
+        return {'offer': offer, 'geo': geo, 'n': n, 'persona': persona}
+    except Exception:
+        return {}
 
 
 def journal_add(user, ch_id, ch_info, vid_id, fpath, title='', desc='', hint=''):
@@ -1484,9 +1669,10 @@ def journal_add(user, ch_id, ch_info, vid_id, fpath, title='', desc='', hint='')
         if not got.get('ru') and hint:
             got = journal_script(hint) or got
         rec.update(got)
-        recs = load_journal()
-        recs.append(rec)
-        save_journal(recs)
+        with JOURNAL_LOCK:
+            recs = load_journal()
+            recs.append(rec)
+            save_journal(recs)
     except Exception:
         pass
 
@@ -2386,7 +2572,8 @@ def upload_to_youtube(upload_job_id, files, title, description, privacy, channel
             vid_id = response['id']
             link = f"https://youtu.be/{vid_id}"
             links.append({'fmt': f['fmt'], 'link': link, 'title': ftitle})
-            journal_add(user, ch_id, ch_info, vid_id, fpath, ftitle, description)
+            journal_add(user, ch_id, ch_info, vid_id, fpath, ftitle, description,
+                        f['path'])
             log.append(f"✅ {f['fmt']} → {link}")
             # Обновляем счётчик каналов
             bump_upload_count(ch_id)
@@ -2906,7 +3093,8 @@ def ready_upload_to_youtube(job_id, ready_files, n_sets, category, privacy, user
                     vid_id = response['id']
                     link = f'https://youtu.be/{vid_id}'
                     set_links.append({'fmt': fmt, 'link': link})
-                    journal_add(user, ch_id, ch_info, vid_id, fpath, up_title, up_desc)
+                    journal_add(user, ch_id, ch_info, vid_id, fpath, up_title, up_desc,
+                                rf['path'])
                     log[-1] = f'  ✅ {fmt} → {link}'
                     bump_upload_count(ch_id)
                     proj_id = ch_info.get('project_id')
@@ -3000,7 +3188,8 @@ def mass_upload_to_youtube(job_id, files, n_sets, title, description, privacy, u
                     vid_id = response['id']
                     link = f'https://youtu.be/{vid_id}'
                     set_links.append({'fmt': f['fmt'], 'link': link})
-                    journal_add(user, ch_id, ch_info, vid_id, fpath, ftitle, fdesc)
+                    journal_add(user, ch_id, ch_info, vid_id, fpath, ftitle, fdesc,
+                                f['path'])
                     log[-1] = f'  ✅ {f["fmt"]} → {link}'
                     bump_upload_count(ch_id)
                     proj_id = ch_info.get('project_id')
@@ -4614,6 +4803,7 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:14px;">
         <button class="btn" onclick="jrCheck()" id="jr-check">Проверить статусы</button>
         <button class="btn" onclick="jrSync()" id="jr-sync">Подтянуть с YouTube</button>
+        <button class="btn" onclick="jrPairs()" id="jr-pairs">Проверить пары ролик ↔ прокла</button>
         <select id="jr-filter" onchange="jrRender()" style="padding:8px 10px;border-radius:9px;
                 background:var(--surface2);color:var(--text);border:1.5px solid var(--border);">
           <option value="">все ролики</option>
@@ -4637,6 +4827,7 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
                       background:var(--surface2);color:var(--text);border:1.5px solid var(--border);">
         <button class="btn" onclick="jrAdd()">Добавить</button>
       </div>
+      <div id="jr-pairs-box" style="display:none;margin-bottom:14px;"></div>
       <div id="jr-sum" style="font-size:13px;color:var(--text3);margin-bottom:10px;"></div>
       <div id="jr-list"></div>
     </div>
@@ -7088,6 +7279,40 @@ async function jrSync(){
   b.disabled = false; b.textContent = 'Подтянуть с YouTube';
   if(r && r.errors && r.errors.length) alert('Часть каналов не ответила:\n' + r.errors.join('\n'));
   if(r && r.ok) await jrCheck(); else jrLoad();
+}
+// Ролик и прокла назывались одинаково, и мы на этом держались. По факту они
+// разъехались: в ролике один человек, на прокле другой. Эта кнопка показывает
+// все такие пары сразу — глазами по папкам это не увидеть.
+async function jrPairs(){
+  const b = document.getElementById('jr-pairs');
+  const box = document.getElementById('jr-pairs-box');
+  b.disabled = true; b.textContent = 'Смотрю папки…';
+  const r = await fetch('/vf_pairs', {method:'POST', headers:{'Content-Type':'application/json'},
+                                      body:'{}'}).then(x=>x.json()).catch(()=>null);
+  b.disabled = false; b.textContent = 'Проверить пары ролик ↔ прокла';
+  if(!r || !r.ok){ alert((r && r.error) || 'не вышло — фабрика не найдена?'); return; }
+  const rows = (r.rows||[]).filter(x => x.video || x.lp);
+  box.style.display = '';
+  box.innerHTML =
+    '<div style="border:1.5px solid ' + (r.bad ? '#e11d48' : 'var(--border)')
+    + ';border-radius:12px;padding:12px 14px;background:var(--surface2);">'
+    + '<div style="font-size:13px;margin-bottom:8px;">'
+    + (r.bad ? '<b style="color:#e11d48;">Разошлись: ' + r.bad + '</b> — в ролике один герой, на прокле другой. '
+             + 'Пересобери проклу: она теперь берёт героя с готового ролика сама.'
+             : '<b style="color:#16a34a;">Все пары сходятся.</b>')
+    + '</div>'
+    + '<table style="width:100%;border-collapse:collapse;font-size:12px;">'
+    + '<tr style="color:var(--text3);text-align:left;">'
+    + '<th style="padding:4px 6px;">связка</th><th>№</th><th>в ролике</th><th>на прокле</th></tr>'
+    + rows.map(x =>
+        '<tr style="border-top:1px solid var(--border);'
+        + (x.mismatch ? 'background:rgba(225,29,72,.10);' : '') + '">'
+        + '<td style="padding:4px 6px;">' + jrEsc(x.bundle) + '</td>'
+        + '<td>' + x.n + '</td>'
+        + '<td>' + jrEsc(x.video_hero || '—') + '</td>'
+        + '<td>' + jrEsc(x.lp_hero || '—')
+        + (x.mismatch ? ' <b style="color:#e11d48;">не тот</b>' : '') + '</td></tr>').join('')
+    + '</table></div>';
 }
 async function jrAdd(){
   const link = document.getElementById('jr-link').value.trim();
