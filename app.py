@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.84"
+VERSION = "5.85"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -5292,22 +5292,21 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
     <div style="max-width:1100px;">
       <h2 style="margin:0 0 6px;">📓 Журнал роликов</h2>
       <div style="color:var(--text3);font-size:13px;margin-bottom:14px;">
-        Каждый залитый ролик записывается вместе со своим текстом. Кнопка ниже
-        спрашивает у YouTube, жив ли он и сколько просмотров — так видно, какие
-        тексты проходят, а какие снимают.</div>
+        Здесь лежит текст каждого залитого ролика и твоя отметка, прошло
+        объявление или нет. Смысл один: открыть рядом текст прошедшего и текст
+        непрошедшего и увидеть, чем они отличаются. Прошло или нет — знаешь
+        только ты, в Google Ads: панель туда не видит и гадать не будет.
+        «Жив ли ролик» — единственное, что можно спросить у самого YouTube:
+        не снят ли он и есть ли просмотры.</div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:14px;">
-        <button class="btn" onclick="jrCheck()" id="jr-check">Проверить статусы</button>
-        <button class="btn" onclick="jrSync()" id="jr-sync">Подтянуть с YouTube</button>
-        <button class="btn" onclick="jrPairs()" id="jr-pairs">Проверить пары ролик ↔ прокла</button>
+        <button class="btn" onclick="jrCheck()" id="jr-check">Жив ли ролик</button>
         <select id="jr-filter" onchange="jrRender()" style="padding:8px 10px;border-radius:9px;
                 background:var(--surface2);color:var(--text);border:1.5px solid var(--border);">
           <option value="">все ролики</option>
-          <option value="m:прошёл">мои отметки: прошёл</option>
-          <option value="m:не прошёл">мои отметки: не прошёл</option>
-          <option value="m:">без отметки</option>
-          <option value="крутит">есть просмотры</option>
-          <option value="живой">жив, но без просмотров</option>
-          <option value="снят">снятые с YouTube</option>
+          <option value="m:прошёл">прошло объявление</option>
+          <option value="m:не прошёл">не прошло</option>
+          <option value="m:">ещё не отмечены</option>
+          <option value="снят">снят с YouTube</option>
         </select>
         <input id="jr-q" oninput="jrRender()" placeholder="оффер, гео, герой или слово из текста"
                style="flex:1;min-width:220px;padding:8px 11px;border-radius:9px;
@@ -5322,7 +5321,6 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
                       background:var(--surface2);color:var(--text);border:1.5px solid var(--border);">
         <button class="btn" onclick="jrAdd()">Добавить</button>
       </div>
-      <div id="jr-pairs-box" style="display:none;margin-bottom:14px;"></div>
       <div id="jr-sum" style="font-size:13px;color:var(--text3);margin-bottom:10px;"></div>
       <div id="jr-list"></div>
     </div>
@@ -8028,49 +8026,9 @@ async function jrCheck(){
 }
 // Ролики, залитые до появления журнала. Текста у них нет и взять его негде,
 // но название, дата и «жив ли» у YouTube есть — с этого и начинаем.
-async function jrSync(){
-  const b = document.getElementById('jr-sync');
-  b.disabled = true; b.textContent = 'Собираю с каналов…';
-  const r = await fetch('/journal', {method:'POST', headers:{'Content-Type':'application/json'},
-                                     body: JSON.stringify({do:'sync'})}).then(x=>x.json()).catch(()=>null);
-  b.disabled = false; b.textContent = 'Подтянуть с YouTube';
-  if(r && r.errors && r.errors.length) alert('Часть каналов не ответила:\n' + r.errors.join('\n'));
-  if(r && r.ok) await jrCheck(); else jrLoad();
-}
 // Ролик и прокла назывались одинаково, и мы на этом держались. По факту они
 // разъехались: в ролике один человек, на прокле другой. Эта кнопка показывает
 // все такие пары сразу — глазами по папкам это не увидеть.
-async function jrPairs(){
-  const b = document.getElementById('jr-pairs');
-  const box = document.getElementById('jr-pairs-box');
-  b.disabled = true; b.textContent = 'Смотрю папки…';
-  const r = await fetch('/vf_pairs', {method:'POST', headers:{'Content-Type':'application/json'},
-                                      body:'{}'}).then(x=>x.json()).catch(()=>null);
-  b.disabled = false; b.textContent = 'Проверить пары ролик ↔ прокла';
-  if(!r || !r.ok){ alert((r && r.error) || 'не вышло — фабрика не найдена?'); return; }
-  const rows = (r.rows||[]).filter(x => x.video || x.lp);
-  box.style.display = '';
-  box.innerHTML =
-    '<div style="border:1.5px solid ' + (r.bad ? '#e11d48' : 'var(--border)')
-    + ';border-radius:12px;padding:12px 14px;background:var(--surface2);">'
-    + '<div style="font-size:13px;margin-bottom:8px;">'
-    + (r.bad ? '<b style="color:#e11d48;">Разошлись: ' + r.bad + '</b> — в ролике один герой, на прокле другой. '
-             + 'Пересобери проклу: она теперь берёт героя с готового ролика сама.'
-             : '<b style="color:#16a34a;">Все пары сходятся.</b>')
-    + '</div>'
-    + '<table style="width:100%;border-collapse:collapse;font-size:12px;">'
-    + '<tr style="color:var(--text3);text-align:left;">'
-    + '<th style="padding:4px 6px;">связка</th><th>№</th><th>в ролике</th><th>на прокле</th></tr>'
-    + rows.map(x =>
-        '<tr style="border-top:1px solid var(--border);'
-        + (x.mismatch ? 'background:rgba(225,29,72,.10);' : '') + '">'
-        + '<td style="padding:4px 6px;">' + jrEsc(x.bundle) + '</td>'
-        + '<td>' + x.n + '</td>'
-        + '<td>' + jrEsc(x.video_hero || '—') + '</td>'
-        + '<td>' + jrEsc(x.lp_hero || '—')
-        + (x.mismatch ? ' <b style="color:#e11d48;">не тот</b>' : '') + '</td></tr>').join('')
-    + '</table></div>';
-}
 async function jrAdd(){
   const link = document.getElementById('jr-link').value.trim();
   if(!link) return;
@@ -8129,11 +8087,12 @@ function jrRender(){
       + '<b style="color:'+col+';">'+st+'</b>'
       + (r.views !== null && r.views !== undefined ? '<span style="color:var(--text3);">'+r.views+' просмотров</span>' : '')
       + (r.why ? '<span style="color:#e11d48;">'+jrEsc(r.why)+'</span>' : '')
+      + (r.mark ? '' : '')
       + '<span style="color:var(--text3);">'+jrEsc(r.date||'')+'</span>'
       + '<span style="color:var(--text3);">'+jrEsc(r.channel_name||'')+'</span>'
       + (who ? '<span style="color:var(--text3);">'+jrEsc(who)+'</span>' : '')
       + '<a href="'+r.link+'" target="_blank" style="color:var(--accent1);">открыть</a>'
-      + (r.ru ? '<a onclick="jrText('+i+')" style="cursor:pointer;color:var(--accent1);">текст</a>' : '')
+      + (r.ru ? '<a onclick="jrText('+i+')" style="cursor:pointer;color:var(--accent1);">свернуть текст</a>' : '')
       + '</div>'
       + '<div style="display:flex;gap:6px;align-items:center;margin-top:8px;font-size:12px;">'
       + '<span style="color:var(--text3);">объявление:</span>'
@@ -8141,9 +8100,11 @@ function jrRender(){
       + (r.mark ? '<span style="color:var(--text3);">' + jrEsc(r.mark) + '</span>' : '')
       + '</div>'
       + '<div style="font-size:13px;margin-top:6px;">'+jrEsc(r.title||'')+'</div>'
-      + (r.ru ? '<div id="jr-t'+i+'" style="display:none;white-space:pre-wrap;font-size:13px;'
+      + (r.ru ? '<div id="jr-t'+i+'" style="white-space:pre-wrap;font-size:13px;'
         + 'color:var(--text2);margin-top:8px;border-top:1px solid var(--border);padding-top:8px;">'
-        + jrEsc(r.ru)+'</div>' : '')
+        + jrEsc(r.ru)+'</div>'
+        : '<div style="font-size:12px;color:var(--text3);margin-top:6px;">'
+          + 'текста нет — ролик собран до того, как панель стала его сохранять</div>')
       + '</div>';
   }).join('') || '<div style="color:var(--text3);">Ничего не подошло под фильтр.</div>';
 }
