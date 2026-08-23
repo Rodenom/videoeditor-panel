@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.78"
+VERSION = "5.79"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -1500,9 +1500,13 @@ OWNER_FILE = os.path.join(BASE_DIR, 'owner')
 CRM_LOCK = threading.Lock()
 
 # Поля, которые панель хранит про аккаунт. Порядок — как Павел их читает.
+# redir/cmb — id кампаний Бинома (основная и сундук). Павел и так вбивает их
+# в строку домена в ДжиСи; записанные здесь, они становятся единственным местом,
+# где аккаунт связан с кампанией: в самом Биноме названия кампаний номера
+# аккаунта не содержат (проверено на 694 кампаниях), а домен там служебный.
 ACC_FIELDS = ('acc', 'type', 'email', 'domain', 'farmer', 'offer', 'geo',
-              'status', 'creo', 'prepay', 'prepay2', 'problem', 'verif',
-              'verif2', 'card', 'note')
+              'status', 'creo', 'redir', 'cmb', 'prepay', 'prepay2', 'problem',
+              'verif', 'verif2', 'card', 'note')
 
 
 def is_owner():
@@ -7464,6 +7468,8 @@ const CRM_COLS = [
   ['offer','Оффер',150,null],
   ['geo','Гео',52,null],
   ['creo','Креатив',130,null],
+  ['redir','REDIR',76,null],
+  ['cmb','CMB',76,null],
   ['prepay','Припей',68,null],
   ['prepay2','Доп.',62,null],
   ['problem','Проблема',150,['','номер тел','фриз','бан ак','обход системы','подозрительный платёж','неприемлемая практика']],
