@@ -4983,7 +4983,7 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
         <input id="crm-q" oninput="crmRender()" placeholder="аккаунт, домен, оффер, заметка"
                style="flex:1;min-width:220px;padding:8px 11px;border-radius:9px;
                       background:var(--surface2);color:var(--text);border:1.5px solid var(--border);">
-        <button class="btn" onclick="crmBulkBox()">Добавить пачкой</button>
+        <button class="btn" onclick="crmBulkBox()" style="flex:0 0 auto;width:auto;">Добавить пачкой</button>
       </div>
       <div id="crm-bulk" style="display:none;margin-bottom:12px;">
         <textarea id="crm-bulk-text" rows="6" placeholder="Вставь строки как выдали: номер аккаунта, почта, домен — в любом порядке, по строке на аккаунт. Пароли и 2FA не вставляй, они не сохранятся."
