@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.83"
+VERSION = "5.84"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -1758,12 +1758,22 @@ def crm_handle(action, p):
             return {'ok': True, 'bundles': out}
         import glob as _g
         people = vf_personas()
+        ru_offer, ru_geo = {}, {}
+        try:
+            r = subprocess.run([sys.executable, '-c',
+                                'import json,ready_box;print(json.dumps({"o":ready_box.OFFER_RU,'
+                                '"g":ready_box.GEO_RU},ensure_ascii=False))'],
+                               cwd=VF_DIR, env=vf_env(), capture_output=True, text=True, timeout=30)
+            mp = json.loads(r.stdout.strip() or '{}')
+            ru_offer, ru_geo = mp.get('o') or {}, mp.get('g') or {}
+        except Exception:
+            pass
         for sdir_ in sorted(_g.glob(os.path.join(VF_DIR, 'scripts', '*'))):
             b = os.path.basename(sdir_)
             m_ = re.match(r'^([a-z]+)_([a-z]{2})(?:_(\d+)s)?$', b)
             if not m_ or not os.path.isdir(sdir_):
                 continue
-            off_, geo_ = m_.group(1), m_.group(2)
+            off_, geo_, dur_ = m_.group(1), m_.group(2), m_.group(3) or ''
             if b in out:
                 continue
             vids, lps = [], []
@@ -1791,7 +1801,21 @@ def crm_handle(action, p):
                 who = people.get(mm.group(2), mm.group(2)) if mm else ''
                 lps.append({'dir': name,
                             'label': '№%s · %s' % (int(mm.group(1)) if mm else '?', who or '?')})
-            out[b] = {'videos': vids, 'prelas': lps}
+            # Человеческое имя: «Простатит Алжир · ProtexMen». Ниша и страна —
+            # из тех же словарей, по которым названы готовые ролики, товар —
+            # из карточки связки, если она заполнена.
+            label = '%s %s' % (ru_offer.get(off_, off_), ru_geo.get(geo_, geo_.upper()))
+            if dur_:
+                label += ' · %s сек' % dur_
+            try:
+                with open(os.path.join(VF_DIR, 'bundles', '%s_%s.json' % (off_, geo_)),
+                          encoding='utf-8') as fh:
+                    prod = (json.load(fh).get('product') or '').strip()
+                if prod:
+                    label += ' · ' + prod
+            except Exception:
+                pass
+            out[b] = {'videos': vids, 'prelas': lps, 'label': label}
         return {'ok': True, 'bundles': out}
 
     if action == 'link':
@@ -7799,9 +7823,7 @@ let crmRows = [], crmLinks = {}, crmChain = {};
 const CRM_COLS = [
   ['acc','Аккаунт',150,null],
   ['status','Статус',96,['','не залит','залит','стоп']],
-  ['offer','Оффер',150,null],
-  ['geo','Гео',52,null],
-  ['bundle','Связка',150,'BUNDLES'],
+  ['bundle','Оффер',190,'BUNDLES'],
   ['lp','Прокла',170,'PRELAS'],
   ['creo','Ролик',170,'VIDEOS'],
   ['redir','REDIR',76,null],
@@ -7813,11 +7835,11 @@ const CRM_COLS = [
   ['verif2','Повт.',96,['','нужна','пройдена']],
   ['card','Карта',110,['','привязана','отвязана']],
   ['domain','Домен',180,null],
-  ['email','Почта',180,null],
   ['type','Тип',96,['','планшет','обычный']],
-  ['farmer','Фармер',110,null],
   ['note','Заметка',200,null],
 ];
+// Почта и фармер из таблицы убраны — Павел ими тут не пользуется. В файле
+// они остались, ничего не потеряно.
 const CRM_BAN = ['бан ак','фриз','обход системы','подозрительный платёж','неприемлемая практика'];
 // Цвет = состояние, четыре смысла и ни одного лишнего.
 function crmState(x){
@@ -7852,7 +7874,7 @@ async function crmLoad(){
 function crmOffers(){
   const box = document.getElementById('crm-offers');
   if(!box) return;
-  const list = [...new Set(crmRows.map(x => (x.offer||'').trim()).filter(Boolean))].sort();
+  const list = [...new Set(crmRows.map(crmOfferOf).filter(Boolean))].sort();
   box.innerHTML = ['', ...list].map(o => {
     const on = (window.crmOffer||'') === o;
     return '<button onclick="crmPickOffer(\'' + jrEsc(o).replace(/'/g,'&#39;') + '\')" '
@@ -7861,11 +7883,18 @@ function crmOffers(){
       + 'background:' + (on ? 'var(--accent1)' : 'transparent') + ';'
       + 'color:' + (on ? '#fff' : 'var(--text2)') + ';">'
       + (o ? jrEsc(o) : 'все офферы')
-      + ' <span style="opacity:.65;">' + (o ? crmRows.filter(x => (x.offer||'').trim() === o).length
+      + ' <span style="opacity:.65;">' + (o ? crmRows.filter(x => crmOfferOf(x) === o).length
                                              : crmRows.length) + '</span></button>';
   }).join(' ');
 }
 function crmPickOffer(o){ window.crmOffer = o; crmOffers(); crmRender(); }
+// Как называется оффер этой строки: имя связки, если она выбрана, иначе то,
+// что перенеслось из таблицы.
+function crmOfferOf(x){
+  const b = (x.bundle || '').trim();
+  if(b) return ((crmChain[b] || {}).label) || b;
+  return (x.offer || '').trim();
+}
 function crmBulkBox(){
   const b = document.getElementById('crm-bulk');
   b.style.display = b.style.display === 'none' ? '' : 'none';
@@ -7910,7 +7939,7 @@ function crmRender(){
   const q = (document.getElementById('crm-q').value || '').toLowerCase().trim();
   const off = (window.crmOffer || '').trim();
   const rows = crmRows.filter(x => {
-    if(off && (x.offer||'').trim() !== off) return false;
+    if(off && crmOfferOf(x) !== off) return false;
     if(f === 'ok'    && !crmCanRun(x)) return false;
     if(f === 'free'  && (x.offer || '').trim()) return false;
     if(f === 'ban'   && !CRM_BAN.includes(x.problem || '')) return false;
@@ -7937,20 +7966,30 @@ function crmRender(){
               + 'border-left:4px solid ' + col + ';"><b>' + jrEsc(v) + '</b></td>';
           const d = 'data-acc="' + jrEsc(x.acc) + '" data-key="' + key + '"';
           let list = opts;
-          if(opts === 'BUNDLES') list = ['', ...Object.keys(crmChain).sort()];
+          const labels = {};
+          if(opts === 'BUNDLES'){
+            list = ['', ...Object.keys(crmChain).sort((a,b) =>
+                     ((crmChain[a].label||a) > (crmChain[b].label||b) ? 1 : -1))];
+            Object.keys(crmChain).forEach(k => labels[k] = crmChain[k].label || k);
+          }
           if(opts === 'PRELAS')  list = ['', ...(((crmChain[x.bundle]||{}).prelas)||[]).map(p=>p.dir)];
           if(opts === 'VIDEOS')  list = ['', ...(((crmChain[x.bundle]||{}).videos)||[]).map(p=>p.file)];
           if(Array.isArray(list)){
-            const labels = {};
             (((crmChain[x.bundle]||{}).prelas)||[]).forEach(p => labels[p.dir] = p.label);
             (((crmChain[x.bundle]||{}).videos)||[]).forEach(p => labels[p.file] = p.label);
             const has = list.includes(v);
+            // Пока оффер не выбран, показываем то, что перенеслось из таблицы,
+            // чтобы строка не выглядела пустой.
+            let ph = '—';
+            if(key === 'bundle' && (x.offer||'').trim()) ph = jrEsc(x.offer) + ' — выбери оффер';
+            else if(key !== 'bundle' && !x.bundle) ph = 'сначала оффер';
             return '<td style="padding:2px 4px;"><select ' + d + ' class="crm-in" '
               + 'style="width:100%;padding:3px 4px;border-radius:6px;background:var(--surface);'
               + 'color:var(--text);border:1px solid var(--border);font-size:12px;">'
-              + (has ? '' : '<option value="'+jrEsc(v)+'" selected>'+(v?jrEsc(v)+' (нет на диске)':'—')+'</option>')
+              + (has ? '' : '<option value="'+jrEsc(v)+'" selected>'
+                            + (v ? jrEsc(labels[v] || v) + ' (нет на диске)' : ph) + '</option>')
               + list.map(o => '<option value="'+jrEsc(o)+'"'+(o===v?' selected':'')+'>'
-                              + (o ? jrEsc(labels[o] || o) : '—') + '</option>').join('')
+                              + (o ? jrEsc(labels[o] || o) : ph) + '</option>').join('')
               + '</select></td>';
           }
           return '<td style="padding:2px 4px;"><input value="' + jrEsc(v) + '" ' + d + ' class="crm-in" '
