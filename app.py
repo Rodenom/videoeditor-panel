@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.79"
+VERSION = "5.80"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -1043,6 +1043,37 @@ def vf_handle(action, p):
             except Exception:
                 pass
         return {'ok': True, 'n': n, 'videos': moved}
+
+    if action == 'card_get':
+        # Товар, форма, цена, метка и домен вводились заново при каждом заходе:
+        # файла-описателя связки не существовало, всё уезжало флагами в скрипты
+        # и там растворялось. Теперь помним — по офферу и гео, длительность на
+        # товар не влияет.
+        f = os.path.join(VF_DIR, 'bundles', '%s_%s.json' % (offer, geo))
+        try:
+            with open(f, encoding='utf-8') as fh:
+                return {'ok': True, 'card': json.load(fh)}
+        except Exception:
+            return {'ok': True, 'card': {}}
+
+    if action == 'card_save':
+        keep = ('product', 'form', 'price', 'mark', 'domain')
+        card = {k: str(p.get(k) or '').strip() for k in keep}
+        d = os.path.join(VF_DIR, 'bundles')
+        os.makedirs(d, exist_ok=True)
+        f = os.path.join(d, '%s_%s.json' % (offer, geo))
+        try:
+            with open(f, encoding='utf-8') as fh:
+                old = json.load(fh)
+        except Exception:
+            old = {}
+        old.update({k: v for k, v in card.items() if v != ''})
+        old['updated'] = time.strftime('%Y-%m-%d %H:%M')
+        tmp = f + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as fh:
+            json.dump(old, fh, ensure_ascii=False, indent=1)
+        os.replace(tmp, f)
+        return {'ok': True}
 
     if action == 'pairs':
         # Сводка по всем связкам: сценарий → ролик → прокла. Нужна, потому что
@@ -6421,10 +6452,41 @@ async function svInit(){
     (s.geos||[]).forEach(x=>g.add(new Option(x.ru||x.key, x.key)));
   }
   svCardBind();
+  svBundleBind();
   svStep1();
   svLoad();
 }
+// Карточка связки: товар, форма, цена, метка, домен. Раньше эти пять полей
+// Павел вбивал заново при каждом заходе — они никуда не сохранялись.
+const SV_CARD = [['sv-product','product'], ['sv-form','form'],
+                 ['sv-price-in','price'], ['sv-mark','mark'], ['sv-domain','domain']];
+function svBundleBind(){
+  SV_CARD.forEach(([id]) => {
+    const el = document.getElementById(id);
+    if(el && !el._bound){ el._bound = 1; el.addEventListener('change', svBundleSave); }
+  });
+}
+async function svBundleLoad(){
+  const r = await svApi('card_get', svParams());
+  if(!r || !r.ok) return;
+  const c = r.card || {};
+  SV_CARD.forEach(([id, key]) => {
+    const el = document.getElementById(id);
+    // Подставляем целиком: сменил оффер — увидел его товар и цену, а не
+    // прошлые. Терять нечего, каждое изменение сохраняется сразу.
+    if(el) el.value = c[key] || '';
+  });
+}
+async function svBundleSave(){
+  const p = svParams();
+  SV_CARD.forEach(([id, key]) => {
+    const el = document.getElementById(id);
+    if(el) p[key] = el.value;
+  });
+  await svApi('card_save', p);
+}
 function svStep1(){
+  svBundleLoad();
   const p = svParams();
   const n = parseInt(document.getElementById('sv-n').value)||1;
   const perSec = 0.029, price = (p.dur * perSec);
