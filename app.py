@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.77"
+VERSION = "5.78"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -1479,6 +1479,174 @@ def load_projects(user):
 
 def save_projects(user, projects):
     write_json(get_projects_file(user), projects, indent=2, ensure_ascii=False)
+
+# ── Реестр аккаунтов (CRM) ───────────────────────────────────────
+# Павел 22.08: аккаунты приходят сухими — аккаунт, почта, домен, — а всё
+# остальное (оффер, гео, припей, бан, верификация, карта) он проставляет сам,
+# и сегодня это живёт только в гугл-таблице. Панель про аккаунт не знает
+# ничего и потому не может ответить «куда сегодня можно лить».
+#
+# ВИДИТ ЭТО ТОЛЬКО ПАВЕЛ. Панель раздаётся байерам из одного GitHub, и всё,
+# что мы добавляем, приезжает и им. Признак владельца — файл-маркер в папке
+# данных: имя пользователя можно подставить, а маркера у байера нет. Проверка
+# стоит на сервере в каждом вызове, а не только на спрятанной кнопке —
+# спрятанная кнопка не защита, адрес открывается руками.
+#
+# Паролей и двухфакторки здесь нет намеренно: им место в менеджере паролей,
+# а не в открытом json на рабочем ноутбуке.
+CRM_DIR = os.path.join(BASE_DIR, 'crm')
+ACCOUNTS_FILE = os.path.join(CRM_DIR, 'accounts.json')
+OWNER_FILE = os.path.join(BASE_DIR, 'owner')
+CRM_LOCK = threading.Lock()
+
+# Поля, которые панель хранит про аккаунт. Порядок — как Павел их читает.
+ACC_FIELDS = ('acc', 'type', 'email', 'domain', 'farmer', 'offer', 'geo',
+              'status', 'creo', 'prepay', 'prepay2', 'problem', 'verif',
+              'verif2', 'card', 'note')
+
+
+def is_owner():
+    return os.path.exists(OWNER_FILE)
+
+
+def load_accounts():
+    try:
+        with open(ACCOUNTS_FILE, encoding='utf-8') as f:
+            d = json.load(f)
+        return d if isinstance(d, list) else []
+    except Exception:
+        return []
+
+
+def save_accounts(rows):
+    os.makedirs(CRM_DIR, exist_ok=True)
+    tmp = ACCOUNTS_FILE + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(rows, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, ACCOUNTS_FILE)
+
+
+def acc_clean(row):
+    """Оставить только известные поля и обрезать пробелы. Заодно отсекает
+    пароль и двухфакторку, если их случайно вставят пачкой."""
+    out = {}
+    for k in ACC_FIELDS:
+        v = row.get(k)
+        out[k] = v.strip() if isinstance(v, str) else (v or '')
+    return out
+
+
+def acc_parse_bulk(text):
+    """Разобрать вставленную пачку. Аккаунты выдают строками вида
+    «ACC6215_VLAD_FARM  почта@gmail.com  pottkind.com.de», разделитель —
+    таб, точка с запятой, запятая или просто пробелы. Порядок колонок может
+    гулять, поэтому опознаём по виду: ACC… — это аккаунт, со «@» — почта,
+    с точкой и без «@» — домен. Всё непонятное уходит в заметку, а не теряется."""
+    rows = []
+    for line in (text or '').splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = [x.strip() for x in re.split(r'[\t;,]+|\s{2,}| +', line) if x.strip()]
+        rec = {k: '' for k in ACC_FIELDS}
+        rest = []
+        for x in parts:
+            if not rec['acc'] and re.match(r'^ACC\d+', x, re.I):
+                rec['acc'] = x
+            elif '@' in x and not rec['email']:
+                rec['email'] = x
+            elif '.' in x and '@' not in x and not rec['domain'] and not x.isdigit():
+                rec['domain'] = x
+            else:
+                rest.append(x)
+        if not rec['acc']:
+            continue                       # строка без аккаунта — не аккаунт
+        if rest:
+            rec['note'] = ' '.join(rest)
+        rows.append(rec)
+    return rows
+
+
+def crm_handle(action, p):
+    """Эндпоинты реестра. Все под замком владельца."""
+    if not is_owner():
+        return {'error': 'Реестр аккаунтов доступен только владельцу панели'}
+    if action == 'list':
+        rows = load_accounts()
+        links = {}
+        try:
+            with open(os.path.join(CRM_DIR, 'channel_acc.json'), encoding='utf-8') as f:
+                links = json.load(f)
+        except Exception:
+            links = {}
+        return {'ok': True, 'rows': rows, 'links': links, 'fields': list(ACC_FIELDS)}
+
+    if action == 'save':
+        row = acc_clean(p.get('row') or {})
+        if not row['acc']:
+            return {'error': 'Без номера аккаунта запись не сохранить'}
+        with CRM_LOCK:
+            rows = load_accounts()
+            now = time.strftime('%Y-%m-%d %H:%M')
+            for i, r in enumerate(rows):
+                if r.get('acc') == row['acc']:
+                    r.update(row)
+                    r['updated'] = now
+                    save_accounts(rows)
+                    return {'ok': True, 'updated': 1}
+            row['created'] = row['updated'] = now
+            rows.append(row)
+            save_accounts(rows)
+        return {'ok': True, 'added': 1}
+
+    if action == 'bulk':
+        parsed = acc_parse_bulk(p.get('text') or '')
+        if not parsed:
+            return {'error': 'Ни одной строки с номером аккаунта не нашлось'}
+        with CRM_LOCK:
+            rows = load_accounts()
+            have = {r.get('acc') for r in rows}
+            now = time.strftime('%Y-%m-%d %H:%M')
+            added, skipped = 0, 0
+            for r in parsed:
+                if r['acc'] in have:
+                    skipped += 1
+                    continue
+                r = acc_clean(r)
+                r['created'] = r['updated'] = now
+                rows.append(r)
+                have.add(r['acc'])
+                added += 1
+            save_accounts(rows)
+        return {'ok': True, 'added': added, 'skipped': skipped}
+
+    if action == 'link':
+        # Канал знает свой аккаунт. Держим связь в отдельном файле, а не в
+        # channels_{user}.json: чужой формат не трогаем, чтобы у байеров ничего
+        # не поехало, а у нас была возможность откатить одним удалением файла.
+        ch, acc = (p.get('channel') or '').strip(), (p.get('acc') or '').strip()
+        if not ch:
+            return {'error': 'не указан канал'}
+        path = os.path.join(CRM_DIR, 'channel_acc.json')
+        with CRM_LOCK:
+            try:
+                with open(path, encoding='utf-8') as f:
+                    links = json.load(f)
+            except Exception:
+                links = {}
+            if acc:
+                links[ch] = acc
+            else:
+                links.pop(ch, None)
+            os.makedirs(CRM_DIR, exist_ok=True)
+            tmp = path + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(links, f, ensure_ascii=False, indent=1)
+            os.replace(tmp, path)
+        return {'ok': True}
+
+    return {'error': 'неизвестное действие: %s' % action}
+
 
 # ── Журнал роликов ───────────────────────────────────────────────
 # Павел 21.08: «какие-то видосы проходят и крутят, какие-то нет, а сравнить
@@ -3402,6 +3570,8 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
     <button class="tab-btn" onclick="switchTab('upload')">📤 Загрузить на YouTube</button>
     <button class="tab-btn" onclick="switchTab('tasks')">📋 Таски</button>
     <button class="tab-btn" onclick="switchTab('journal')">📓 Журнал</button>
+    <button class="tab-btn" id="tab-btn-crm" onclick="switchTab('crm')"
+            style="display:none;">🗂 Аккаунты</button>
     <button class="tab-btn" onclick="switchTab('binom')" style="display:none;">📊 Binom</button>
     <button class="tab-btn" onclick="switchTab('static')">🖼️ Статика</button>
     <button class="tab-btn" id="tab-btn-svyazki" onclick="switchTab('svyazki')" style="display:none;">🔗 Связки</button>
@@ -4793,6 +4963,42 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
   </div>
 
   <!-- TASKS TAB -->
+  <div id="tab-crm" class="tab-pane">
+    <div style="max-width:1400px;">
+      <h2 style="margin:0 0 6px;">🗂 Аккаунты</h2>
+      <div style="color:var(--text3);font-size:13px;margin-bottom:14px;">
+        Реестр аккаунтов: что на нём льётся, что с ним не так и можно ли на него лить.
+        Виден только на твоей панели. Паролей и двухфакторки тут нет и не будет —
+        им место в менеджере паролей.</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px;">
+        <select id="crm-filter" onchange="crmRender()" style="padding:8px 10px;border-radius:9px;
+                background:var(--surface2);color:var(--text);border:1.5px solid var(--border);">
+          <option value="">все аккаунты</option>
+          <option value="ok">можно лить</option>
+          <option value="free">свободные (без оффера)</option>
+          <option value="ban">в бане или фризе</option>
+          <option value="verif">нужна верификация</option>
+          <option value="card">карта привязана</option>
+        </select>
+        <input id="crm-q" oninput="crmRender()" placeholder="аккаунт, домен, оффер, заметка"
+               style="flex:1;min-width:220px;padding:8px 11px;border-radius:9px;
+                      background:var(--surface2);color:var(--text);border:1.5px solid var(--border);">
+        <button class="btn" onclick="crmBulkBox()">Добавить пачкой</button>
+      </div>
+      <div id="crm-bulk" style="display:none;margin-bottom:12px;">
+        <textarea id="crm-bulk-text" rows="6" placeholder="Вставь строки как выдали: номер аккаунта, почта, домен — в любом порядке, по строке на аккаунт. Пароли и 2FA не вставляй, они не сохранятся."
+                  style="width:100%;padding:10px;border-radius:10px;background:var(--surface2);
+                         color:var(--text);border:1.5px solid var(--border);font-family:inherit;"></textarea>
+        <div style="margin-top:6px;display:flex;gap:8px;">
+          <button class="btn" onclick="crmBulkAdd()">Добавить</button>
+          <button class="btn" onclick="crmBulkBox()">Закрыть</button>
+        </div>
+      </div>
+      <div id="crm-sum" style="font-size:13px;color:var(--text3);margin-bottom:8px;"></div>
+      <div style="overflow-x:auto;"><table id="crm-table"
+           style="border-collapse:collapse;font-size:12px;min-width:100%;"></table></div>
+    </div>
+  </div>
   <div id="tab-journal" class="tab-pane">
     <div style="max-width:1100px;">
       <h2 style="margin:0 0 6px;">📓 Журнал роликов</h2>
@@ -7245,6 +7451,125 @@ function switchTab(tab){
   if(tab==='upload'){ loadChannels(); loadProjects(); }
   if(tab==='binom'){ loadBinomTargets().then(loadBinom); }
   if(tab==='journal') jrLoad();
+  if(tab==='crm') crmLoad();
+}
+
+// ── Реестр аккаунтов ─────────────────────────────────────────────
+// Вкладка появляется только там, где сервер подтвердил владельца: у байеров
+// её нет, а если открыть адрес руками — сервер откажет.
+let crmRows = [], crmLinks = {};
+const CRM_COLS = [
+  ['acc','Аккаунт',150,null],
+  ['status','Статус',96,['','не залит','залит','стоп']],
+  ['offer','Оффер',150,null],
+  ['geo','Гео',52,null],
+  ['creo','Креатив',130,null],
+  ['prepay','Припей',68,null],
+  ['prepay2','Доп.',62,null],
+  ['problem','Проблема',150,['','номер тел','фриз','бан ак','обход системы','подозрительный платёж','неприемлемая практика']],
+  ['verif','Вериф.',96,['','нужна','пройдена']],
+  ['verif2','Повт.',96,['','нужна','пройдена']],
+  ['card','Карта',110,['','привязана','отвязана']],
+  ['domain','Домен',180,null],
+  ['email','Почта',180,null],
+  ['type','Тип',96,['','планшет','обычный']],
+  ['farmer','Фармер',110,null],
+  ['note','Заметка',200,null],
+];
+const CRM_BAN = ['бан ак','фриз','обход системы','подозрительный платёж','неприемлемая практика'];
+
+async function crmApi(body){
+  return await fetch('/crm', {method:'POST', headers:{'Content-Type':'application/json'},
+                              body: JSON.stringify(body)}).then(x=>x.json()).catch(()=>null);
+}
+async function crmProbe(){        // есть ли у этой панели маркер владельца
+  const r = await crmApi({do:'list'});
+  if(r && r.ok){
+    const b = document.getElementById('tab-btn-crm');
+    if(b) b.style.display = '';
+    crmRows = r.rows || []; crmLinks = r.links || {};
+  }
+}
+async function crmLoad(){
+  const r = await crmApi({do:'list'});
+  if(!r || !r.ok){ alert((r && r.error) || 'реестр недоступен'); return; }
+  crmRows = r.rows || []; crmLinks = r.links || {};
+  crmRender();
+}
+function crmBulkBox(){
+  const b = document.getElementById('crm-bulk');
+  b.style.display = b.style.display === 'none' ? '' : 'none';
+}
+async function crmBulkAdd(){
+  const t = document.getElementById('crm-bulk-text').value;
+  const r = await crmApi({do:'bulk', text:t});
+  if(!r || !r.ok){ alert((r && r.error) || 'не вышло'); return; }
+  document.getElementById('crm-bulk-text').value = '';
+  crmBulkBox();
+  await crmLoad();
+  alert('Добавлено: ' + r.added + (r.skipped ? (', пропущено как уже заведённые: ' + r.skipped) : ''));
+}
+async function crmSet(acc, field, val){
+  const row = crmRows.find(x => x.acc === acc);
+  if(!row) return;
+  row[field] = val;
+  const r = await crmApi({do:'save', row: row});
+  if(!r || !r.ok) alert((r && r.error) || 'не сохранилось');
+  crmSummary();
+}
+function crmCanRun(x){
+  return !CRM_BAN.includes(x.problem || '') && (x.verif || '') !== 'нужна';
+}
+function crmSummary(){
+  const all = crmRows.length;
+  const ok = crmRows.filter(crmCanRun).length;
+  const ban = crmRows.filter(x => CRM_BAN.includes(x.problem || '')).length;
+  const vf = crmRows.filter(x => (x.verif||'') === 'нужна' || (x.verif2||'') === 'нужна').length;
+  const free = crmRows.filter(x => !(x.offer || '').trim()).length;
+  document.getElementById('crm-sum').textContent = all
+    ? ('всего ' + all + ' · можно лить ' + ok + ' · в бане или фризе ' + ban
+       + ' · ждут верификации ' + vf + ' · без оффера ' + free)
+    : 'Пусто. Вставь выданные аккаунты кнопкой «Добавить пачкой».';
+}
+function crmRender(){
+  const f = document.getElementById('crm-filter').value;
+  const q = (document.getElementById('crm-q').value || '').toLowerCase().trim();
+  const rows = crmRows.filter(x => {
+    if(f === 'ok'    && !crmCanRun(x)) return false;
+    if(f === 'free'  && (x.offer || '').trim()) return false;
+    if(f === 'ban'   && !CRM_BAN.includes(x.problem || '')) return false;
+    if(f === 'verif' && (x.verif||'') !== 'нужна' && (x.verif2||'') !== 'нужна') return false;
+    if(f === 'card'  && (x.card||'') !== 'привязана') return false;
+    if(q && !CRM_COLS.map(c => x[c[0]] || '').join(' ').toLowerCase().includes(q)) return false;
+    return true;
+  });
+  const head = '<tr style="color:var(--text3);text-align:left;">'
+    + CRM_COLS.map(c => '<th style="padding:5px 6px;min-width:'+c[2]+'px;font-weight:600;">'
+                        + c[1] + '</th>').join('') + '</tr>';
+  const body = rows.map(x => {
+    const bad = CRM_BAN.includes(x.problem || '');
+    const wait = (x.verif||'') === 'нужна' || (x.verif2||'') === 'нужна';
+    const bg = bad ? 'rgba(225,29,72,.10)' : (wait ? 'rgba(217,119,6,.10)' : '');
+    return '<tr style="border-top:1px solid var(--border);background:'+bg+';">'
+      + CRM_COLS.map(c => {
+          const [key,,w,opts] = c;
+          const v = (x[key] || '');
+          if(key === 'acc')
+            return '<td style="padding:4px 6px;white-space:nowrap;"><b>' + jrEsc(v) + '</b></td>';
+          const oid = "crmSet('" + x.acc.replace(/'/g,"\\'") + "','" + key + "',this.value)";
+          if(opts)
+            return '<td style="padding:2px 4px;"><select onchange="' + oid + '" '
+              + 'style="width:100%;padding:3px 4px;border-radius:6px;background:var(--surface);'
+              + 'color:var(--text);border:1px solid var(--border);font-size:12px;">'
+              + opts.map(o => '<option value="'+o+'"'+(o===v?' selected':'')+'>'
+                              + (o || '—') + '</option>').join('') + '</select></td>';
+          return '<td style="padding:2px 4px;"><input value="' + jrEsc(v) + '" onchange="' + oid + '" '
+            + 'style="width:100%;padding:3px 5px;border-radius:6px;background:var(--surface);'
+            + 'color:var(--text);border:1px solid var(--border);font-size:12px;"></td>';
+        }).join('') + '</tr>';
+  }).join('');
+  document.getElementById('crm-table').innerHTML = head + body;
+  crmSummary();
 }
 
 // ── Журнал роликов ───────────────────────────────────────────────
@@ -7576,6 +7901,7 @@ function aiDropBind(){
   });
 }
 document.addEventListener('DOMContentLoaded', aiDropBind);
+document.addEventListener('DOMContentLoaded', crmProbe);
 function aiOfferSetImage(dataUrl){
   aiOfferImage = dataUrl;
   const img = document.getElementById('ai-offer-preview');
@@ -11146,6 +11472,10 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 import traceback
                 self.json({'error': str(e), 'log': traceback.format_exc()})
+        elif path == '/crm':
+            length = int(self.headers.get('Content-Length', 0))
+            cp = json.loads(self.rfile.read(length)) if length else {}
+            self.json(crm_handle(cp.get('do') or 'list', cp))
         elif path == '/journal':
             length = int(self.headers.get('Content-Length', 0))
             jp = json.loads(self.rfile.read(length)) if length else {}
