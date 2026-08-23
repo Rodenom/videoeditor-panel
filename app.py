@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.82"
+VERSION = "5.83"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -173,7 +173,7 @@ def vf_run(args, timeout=3600):
 
 CLIP_DIR = os.path.expanduser('~/Desktop/ClipFarm/tools')
 
-def vf_run_bg(args, title, timeout=7200, cwd=None):
+def vf_run_bg(args, title, timeout=7200, cwd=None, env_extra=None):
     """Долгие команды (тексты, ролик, прокла) — в фоне, с живым логом.
 
     Раньше это шло синхронно: браузер полторы минуты ждал ответа, панель выглядела
@@ -187,7 +187,10 @@ def vf_run_bg(args, title, timeout=7200, cwd=None):
     def work():
         job = VF_JOBS[job_id]
         try:
-            p = subprocess.Popen([sys.executable, '-u'] + args, cwd=(cwd or VF_DIR), env=vf_env(),
+            _env = vf_env()
+            if env_extra:
+                _env.update({k: str(v) for k, v in env_extra.items()})
+            p = subprocess.Popen([sys.executable, '-u'] + args, cwd=(cwd or VF_DIR), env=_env,
                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                  text=True, bufsize=1)
             for line in p.stdout:
@@ -628,7 +631,15 @@ def vf_handle(action, p):
             args.append(str(p['script']))
         if p.get('persona'):
             args.append('--persona=%s' % p['persona'])   # герой, выбранный для этого ролика
-        return vf_run_bg(args, 'Собираю ролик %s' % (p.get('script') or 'все'))
+        # Под какую проклу делается ролик. Уезжает в паспорт рядом с mp4 —
+        # раньше связь держалась на совпадении имён и уже разошлась.
+        env_lp = (p.get('lp') or '').strip()
+        if env_lp and not vf_inside(os.path.join('prela', env_lp), 'prela'):
+            env_lp = ''
+        note = 'Собираю ролик %s' % (p.get('script') or 'все')
+        if env_lp:
+            note += ' · под проклу %s' % env_lp
+        return vf_run_bg(args, note, env_extra={'BUILD_LP': env_lp} if env_lp else None)
 
     if action == 'prela':
         # Фото товара приходит из панели картинкой (перетащили/вставили) — кладём
@@ -1104,6 +1115,26 @@ def vf_handle(action, p):
             json.dump(old, fh, ensure_ascii=False, indent=1)
         os.replace(tmp, f)
         return {'ok': True}
+
+    if action == 'prela_list':
+        # Проклы этой связки — чтобы ролик собирался сразу под выбранную.
+        out = []
+        import glob as _g
+        people = vf_personas()
+        for d_ in sorted(_g.glob(os.path.join(VF_DIR, 'prela',
+                                              '%s_%s_[0-9][0-9]_*' % (offer, geo)))):
+            name = os.path.basename(d_)
+            if not os.path.isdir(d_) or name.endswith('_ru'):
+                continue
+            if not os.path.exists(os.path.join(d_, 'index.html')):
+                continue
+            mm = re.match(r'^%s_%s_(\d+)_(.+)$' % (offer, geo), name)
+            if not mm:
+                continue
+            who = people.get(mm.group(2), mm.group(2))
+            out.append({'dir': name, 'n': int(mm.group(1)),
+                        'label': '№%d · %s' % (int(mm.group(1)), who)})
+        return {'ok': True, 'prelas': out}
 
     if action == 'pairs':
         # Сводка по всем связкам: сценарий → ролик → прокла. Нужна, потому что
@@ -1883,6 +1914,26 @@ def journal_script(path):
         base = os.path.basename(path or '')
         if not base.lower().endswith('.mp4'):
             return out
+        # Паспорт рядом с роликом — первоисточник. Он написан в момент сборки:
+        # там настоящий текст и прокла, под которую ролик делался. Разбор имени
+        # ниже — запасной путь для роликов, собранных до паспортов.
+        pj = os.path.splitext(path)[0] + '.json'
+        if os.path.exists(pj):
+            try:
+                d = json.load(open(pj, encoding='utf-8'))
+                for k in ('offer', 'geo', 'n', 'persona', 'ru', 'text', 'angle',
+                          'bundle', 'lp'):
+                    if d.get(k) not in (None, ''):
+                        out[k] = d[k]
+                if out.get('lp') and out.get('persona'):
+                    lpp = str(out['lp']).split('_%02d_' % int(out.get('n') or 0), 1)[-1]
+                    if lpp and lpp != out['persona']:
+                        out['lp_mismatch'] = ('ролик на %s, прокла на %s'
+                                              % (out['persona'], lpp))
+                out['from_passport'] = True
+                return out
+            except Exception:
+                out = {}
         stem = base[:-4]
         people = vf_personas()
 
@@ -4550,6 +4601,8 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
           <button class="sv-btn ghost" style="padding:5px 12px;font-size:12px;"
                   onclick="svNewHeroBox()">+ Свой герой</button>
           <span id="sv-face-note" style="font-size:12px;color:var(--text3);"></span>
+          <div class="sv-fld" style="margin-left:auto;"><label>Под проклу</label>
+            <select id="sv-lp" onchange="svPickLp()" style="min-width:200px;"></select></div>
         </div>
         <!-- Свой герой: описание словами по-русски. Раньше добавить героя можно
              было только правкой personas.py руками. -->
@@ -6967,11 +7020,34 @@ async function svHeroCards(){
     + '<span>'+(h.ru||'')+'</span>'
     + (h.rec ? '<i class="sv-rec">под оффер</i>' : '')
     + '</div>').join('');
+  await svLpList();
   const note = document.getElementById('sv-face-note');
   if(note) note.textContent = r.noface
     ? ('без лица: ' + r.noface + ' из ' + svHeroes.length + ' · одно лицо ≈ $0.04')
     : ('лица есть у всех ' + svHeroes.length);
   svTabs();
+}
+// Ролик делается ПОД проклу: Павел 23.08 переделывает ролики под уже готовые
+// проклы, и связь должна записываться сразу, а не выводиться из имён файлов.
+// Выбранная прокла уезжает в паспорт рядом с mp4 в момент сборки.
+async function svLpList(){
+  const sel = document.getElementById('sv-lp');
+  if(!sel) return;
+  const s = svScripts[svCur];
+  const r = await svApi('prela_list', svParams());
+  const list = (r && r.prelas) || [];
+  sel.innerHTML = '<option value="">— не привязывать —</option>'
+    + list.map(x => '<option value="' + x.dir + '"' + ((s && s._lp === x.dir) ? ' selected' : '')
+                    + '>' + (x.label || x.dir) + '</option>').join('');
+  // Если у сценария есть своя прокла с тем же номером — предлагаем её.
+  if(s && !s._lp){
+    const own = list.find(x => x.n === s.n);
+    if(own){ s._lp = own.dir; sel.value = own.dir; }
+  }
+}
+function svPickLp(){
+  const s = svScripts[svCur];
+  if(s) s._lp = document.getElementById('sv-lp').value;
 }
 // Лицо конкретному герою — по клику на пустой карточке.
 async function svFaceGen(key){
@@ -7041,7 +7117,7 @@ async function svBuildAll(){
   for(let i=0;i<list.length;i++){
     const s = list[i];
     svCur = svScripts.indexOf(s); svShow();
-    const p = svParams(); p.script = s.n; p.persona = s._hero;
+    const p = svParams(); p.script = s.n; p.persona = s._hero; p.lp = s._lp || '';
     const r = await svJob('build', p, 3, 'Ролик ' + s.n + ' из ' + list.length
       + ' · герой ' + ((svHeroes.find(h=>h.key===s._hero)||{}).name || s._hero)
       + ' · ~' + (s.price||0).toFixed(2) + ' $'
