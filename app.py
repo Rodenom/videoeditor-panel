@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.89"
+VERSION = "5.90"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -471,8 +471,8 @@ def vf_handle(action, p):
             job_id, src, int(p.get('n_sets', 1)), cat,
             p.get('privacy', 'unlisted'), p.get('_user') or 'pavel',
             p.get('custom_title', ''), p.get('custom_desc', ''),
-            bool(p.get('uniq')),      # свой ролик уникален сам, копии не нужны
-            not bool(p.get('convert'))  # и резать его на три формата незачем
+            bool(p.get('uniq')),      # уникализация — по просьбе, не по умолчанию
+            bool(p.get('as_is'))        # три формата, если не сказано иначе
         ), daemon=True).start()
         return {'ok': True, 'upload_job': job_id}
 
@@ -4295,9 +4295,9 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
         <input id="custom-up-title" placeholder="Свой заголовок (напр. I Tried Waking Up at 5AM for a Week)" maxlength="90" style="width:100%;padding:9px 11px;border-radius:8px;border:1.5px solid var(--border);background:var(--surface);color:var(--text);font-size:13px;outline:none;margin-bottom:8px;box-sizing:border-box;" oninput="localStorage.setItem('custom_up_title',this.value); if(typeof updateAutoRunBtn==='function') updateAutoRunBtn();">
         <textarea id="custom-up-desc" placeholder="Своё описание (2-3 предложения)" rows="2" style="width:100%;padding:9px 11px;border-radius:8px;border:1.5px solid var(--border);background:var(--surface);color:var(--text);font-size:13px;outline:none;box-sizing:border-box;resize:vertical;" oninput="localStorage.setItem('custom_up_desc',this.value)"></textarea>
         <label style="display:flex;align-items:center;gap:7px;margin-top:10px;font-size:12px;color:var(--text2);cursor:pointer;">
-          <input type="checkbox" id="as-is" checked style="accent-color:var(--accent1);" onchange="localStorage.setItem('as_is', this.checked?'1':'0')">
-          ⏩ Заливать как есть — один файл, без нарезки на три формата
-          <span style="color:var(--text3);">— втрое меньше работы и втрое меньше ссылок</span>
+          <input type="checkbox" id="as-is" style="accent-color:var(--accent1);" onchange="localStorage.setItem('as_is', this.checked?'1':'0')">
+          ⏩ Залить как есть, одним файлом
+          <span style="color:var(--text3);">— без нарезки на три формата: одна ссылка вместо трёх</span>
         </label>
         <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-top:6px;">
           <input type="checkbox" id="uq-copies" style="accent-color:var(--accent1);" onchange="localStorage.setItem('uq_copies', this.checked?'1':'0')">
@@ -12248,7 +12248,7 @@ class Handler(BaseHTTPRequestHandler):
                 params.get('category','Видео'), params.get('privacy','unlisted'), user,
                 params.get('custom_title',''), params.get('custom_desc',''),
                 bool(params.get('uniqueize')),
-                params.get('as_is', True) is not False   # по умолчанию — как есть
+                bool(params.get('as_is'))   # по умолчанию — три формата, как и было
             ), daemon=True)
             t.start()
             self.json({'job_id': job_id})
