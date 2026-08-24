@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.87"
+VERSION = "5.88"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -172,6 +172,19 @@ def vf_run(args, timeout=3600):
             'err': (r.stderr or '')[-2000:]}
 
 CLIP_DIR = os.path.expanduser('~/Desktop/ClipFarm/tools')
+
+def jobs_running():
+    """Что сейчас работает: заливки, нарезка, сборка. Пустой список — можно
+    перезапускать. Заданий в памяти процесса не переживает ни один рестарт,
+    поэтому гасить панель во время работы значит терять её молча."""
+    live = []
+    for name, box in (('заливка', UPLOAD_JOBS), ('заливка', MASS_UPLOAD_JOBS),
+                      ('нарезка', JOBS), ('фабрика', VF_JOBS)):
+        for jid, j in list(box.items()):
+            if (j or {}).get('status') in ('running', 'pending'):
+                live.append('%s %s' % (name, jid))
+    return live
+
 
 def vf_run_bg(args, title, timeout=7200, cwd=None, env_extra=None):
     """Долгие команды (тексты, ролик, прокла) — в фоне, с живым логом.
@@ -10868,6 +10881,15 @@ class Handler(BaseHTTPRequestHandler):
                     try: return [int(x) for x in v.split('.')]
                     except Exception: return [0]
                 if _vparts(new_ver) > _vparts(VERSION):
+                    # Обновление перезапускает процесс, а задания живут в его
+                    # памяти. Гасить панель во время заливки значит терять её
+                    # молча — Павел уже дважды на этом сгорел. Ждём окончания.
+                    live = jobs_running()
+                    if live:
+                        self.json({'ok': False, 'status': 'busy',
+                                   'error': 'Сейчас идёт %s. Обновлю, когда закончится — '
+                                            'иначе загрузка оборвётся.' % ', '.join(live[:3])})
+                        return
                     with open(current_file, 'wb') as f:
                         f.write(new_code)
                     self.json({'ok': True, 'status': 'updated', 'old': VERSION, 'new': new_ver})
@@ -10875,7 +10897,7 @@ class Handler(BaseHTTPRequestHandler):
                     # в памяти — без этого выхода панель продолжала показывать
                     # прежнюю версию, и байер думал, что обновление не сработало.
                     # Код 42 — сигнал лаунчеру (install_mac.command) перезапустить.
-                    threading.Timer(1.0, lambda: os._exit(42)).start()
+                    threading.Timer(1.0, lambda: os._exit(42)).start()   # см. проверку выше
                 else:
                     self.json({'ok': True, 'status': 'latest', 'version': VERSION})
             except Exception as e:
