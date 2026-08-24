@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.96"
+VERSION = "5.97"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -3447,17 +3447,31 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user,
                 if fpath == _uq:  # чистим временную уникальную копию
                     try: os.remove(_uq)
                     except Exception: pass
-            if ch_error:
-                channels = load_channels(user); channels[ch_id]['last_error'] = ch_error; save_channels(user, channels)
-                log.append(f'  ⚠ Канал {ch_info["name"]} — ошибка, переходим к следующему каналу')
-                failed_channels.add(ch_id)
-                continue  # don't count as completed set
-            else:
+            # Одна неудачная копия больше не отменяет весь канал. Раньше при
+            # ошибке хоть в одном формате набор целиком выбрасывался: уже
+            # залитые ссылки не попадали в результаты, а канал отправлялся в
+            # чёрный список до конца прогона. Павел видел «залил один из трёх,
+            # ссылок нет» — они были, их просто выкидывали.
+            if set_links:
+                job['sets'].append({'set_idx': sets_done + 1,
+                                    'channel': ch_info['name'], 'links': set_links})
+                sets_done += 1
+                if ch_error:
+                    log.append('  ⚠ Канал %s — залито %d из %d, остальное с ошибкой'
+                               % (ch_info['name'], len(set_links), len(converted)))
                 channels = load_channels(user)
                 if channels.get(ch_id, {}).get('last_error'):
-                    channels[ch_id].pop('last_error', None); save_channels(user, channels)
-            job['sets'].append({'set_idx': sets_done+1, 'channel': ch_info['name'], 'links': set_links})
-            sets_done += 1
+                    channels[ch_id].pop('last_error', None)
+                    save_channels(user, channels)
+                continue
+            # Не залилось вообще ничего — вот тогда канал пропускаем.
+            if ch_error:
+                channels = load_channels(user)
+                channels[ch_id]['last_error'] = ch_error
+                save_channels(user, channels)
+                log.append(f'  ⚠ Канал {ch_info["name"]} — ничего не залилось, беру следующий')
+                failed_channels.add(ch_id)
+                continue
 
         job['status'] = 'done'
         # Считаем то, что реально залилось, а не число попыток: раньше при нуле
