@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.94"
+VERSION = "5.96"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -2588,39 +2588,36 @@ def process_video(job_id, params):
 def normalize_proxy(p):
     """Принять любой ходовой формат прокси и вернуть рабочий socks5-URL.
     Продавцы выдают прокси по-разному — не заставляем байера переформатировать:
-      host:port:user:pass   -> socks5h://user:pass@host:port  (самый частый)
-      user:pass:host:port   -> socks5h://user:pass@host:port
-      user:pass@host:port   -> socks5h://user:pass@host:port
-      host:port             -> socks5h://host:port
-      socks5://...          -> socks5h://...   (см. ниже)
-      http://... / socks5h://...                -> как есть
+      host:port:user:pass   -> socks5://user:pass@host:port  (самый частый)
+      user:pass:host:port   -> socks5://user:pass@host:port
+      user:pass@host:port   -> socks5://user:pass@host:port
+      host:port             -> socks5://host:port
+      socks5://... / http://... / socks5h://...  -> как есть
 
-    Почему socks5h, а не socks5. Разница в том, кто резолвит имя: socks5 —
-    мы у себя и шлём прокси готовый IP, socks5h — сам прокси. Замер 24.08 на
-    прокси Павла, 8 попыток на адрес: socks5 — 0 из 8 на КАЖДОМ, socks5h —
-    8 из 8 и 1.2 секунды. Это и была «связь через прокси сорвалась»: половина
-    каналов не авторизовалась вовсе, а те, что проходили, тянули загрузку
-    через постоянные повторы.
+    НЕ переводить это на socks5h. Пробовал 24.08: авторизация каналов от него
+    выигрывает, но заливка ломается наглухо — PySocks в режиме socks5h читает
+    адрес из ответа прокси как строку и падает с UnicodeDecodeError посреди
+    отправки файла. Легло у Павла и сразу же у байера, у которого панель
+    обновилась. Ошибка выглядит как «'utf-8' codec can't decode byte 0xb0 in
+    position 5» и к самому видео отношения не имеет.
     """
     p = (p or '').strip()
     if not p:
         return ''
     if '://' in p:
-        if p.startswith('socks5://'):
-            return 'socks5h://' + p[len('socks5://'):]
         return p
     if '@' in p:
-        return 'socks5h://' + p
+        return 'socks5://' + p
     parts = p.split(':')
     if len(parts) == 4:
         a, b, c, d = parts
         if b.isdigit():            # host:port:user:pass
-            return f'socks5h://{c}:{d}@{a}:{b}'
+            return f'socks5://{c}:{d}@{a}:{b}'
         if d.isdigit():            # user:pass:host:port
-            return f'socks5h://{a}:{b}@{c}:{d}'
-        return 'socks5h://' + p
+            return f'socks5://{a}:{b}@{c}:{d}'
+        return 'socks5://' + p
     if len(parts) == 2:            # host:port (без авторизации)
-        return 'socks5h://' + p
+        return 'socks5://' + p
     return p
 
 
@@ -3423,6 +3420,19 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user,
                     # decode byte 0xb0» ничего не говорит о том, где это случилось.
                     # Дописываем последний кадр стека — файл, строку и функцию.
                     import traceback as _tb2
+                    # Полный стек — в файл рядом с данными: по одному кадру
+                    # причину не видно, а тащить десять строк в интерфейс незачем.
+                    try:
+                        with open(os.path.join(BASE_DIR, 'upload_errors.log'), 'a',
+                                  encoding='utf-8') as _lf:
+                            _lf.write('\n=== %s · %s · %s\n%s' % (
+                                time.strftime('%Y-%m-%d %H:%M:%S'),
+                                ch_info.get('name', ''), fmt_name,
+                                ''.join(_tb2.format_exception(type(_upload_err),
+                                                              _upload_err,
+                                                              _upload_err.__traceback__))))
+                    except Exception:
+                        pass
                     _frames = _tb2.extract_tb(_upload_err.__traceback__)
                     _where = ''
                     if _frames:
