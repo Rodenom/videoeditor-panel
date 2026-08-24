@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.85"
+VERSION = "5.86"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -458,7 +458,8 @@ def vf_handle(action, p):
             job_id, src, int(p.get('n_sets', 1)), cat,
             p.get('privacy', 'unlisted'), p.get('_user') or 'pavel',
             p.get('custom_title', ''), p.get('custom_desc', ''),
-            True                      # уникализация каждой копии — то, что он гонял руками
+            bool(p.get('uniq')),      # свой ролик уникален сам, копии не нужны
+            not bool(p.get('convert'))  # и резать его на три формата незачем
         ), daemon=True).start()
         return {'ok': True, 'upload_job': job_id}
 
@@ -496,6 +497,10 @@ def vf_handle(action, p):
             args.append('--sounds=%s' % '|'.join(p['sounds']))
         if p.get('tailfile'):
             args.append('--tailfile=%s' % p['tailfile'])
+        if p.get('skin'):
+            # Финальный «отпечаток»: формат эталонного ролика + реальный энкодер
+            # мака (VideoToolbox). Отпечаток настоящий, чужие теги не подставляются.
+            args.append('--skin=%s' % p['skin'])
         if p.get('preview'):
             args.append('--preview')
         return vf_run_bg(args, 'Монтирую звук и хвост')
@@ -3131,7 +3136,8 @@ def _has_videotoolbox():
     return _VT_CACHE
 
 
-def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user, custom_title='', custom_desc='', uniqueize=False):
+def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user,
+                            custom_title='', custom_desc='', uniqueize=False, as_is=False):
     from googleapiclient.http import MediaFileUpload
     job = MASS_UPLOAD_JOBS[job_id]
     job['status'] = 'running'
@@ -3142,9 +3148,18 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user, 
         formats = [('9:16', 9/16, 'Shorts'), ('1:1', 1.0, 'Feed'), ('16:9', 16/9, 'YouTube')]
         converted = {}
 
-        log.append('⏳ Конвертируем в 3 формата...')
+        if as_is:
+            # Свой ролик из «Связок» уже готов: он собран в нужном формате и
+            # уникален сам по себе — второй такой не существует. Резать его на
+            # три формата и потом уникализировать каждую копию значит шесть
+            # перекодировок десятиминутного видео на ровном месте: Павел ждал
+            # по пять минут за один ролик и справедливо назвал это бредом.
+            converted['как есть'] = src_video
+            log.append('⏩ Заливаю как есть, без перекодировки')
+        else:
+            log.append('⏳ Конвертируем в 3 формата...')
         def even(n): return n if n % 2 == 0 else n + 1
-        for fmt_name, ratio, label in formats:
+        for fmt_name, ratio, label in (formats if not as_is else []):
             if ratio < 1:
                 cw, ch = even(int(640 * ratio)), 640
             elif ratio == 1:
@@ -3167,7 +3182,7 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user, 
         all_channels = load_channels(user)
         ordered = list(all_channels.items())  # use ALL channels each run
         n_sets = int(n_sets) if n_sets else len(ordered)
-        total = n_sets * 3
+        total = n_sets * len(converted)
         job['total'] = total
         job['done'] = 0
 
@@ -4691,6 +4706,8 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
                 <option value="90" selected>1.5 минуты</option>
                 <option value="120">2 минуты</option>
                 <option value="180">3 минуты</option>
+                <option value="300">5 минут</option>
+                <option value="480">8 минут</option>
               </select></div>
             <div class="sv-fld"><label>Какой хвост</label>
               <select id="sv-mix-tf"><option value="">свой на каждый ролик</option></select></div>
@@ -4706,6 +4723,19 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
               <label>Дождь и гроза тише прочих: <b id="sv-mix-rl">на 12 dB</b></label>
               <input id="sv-mix-r" type="range" min="0" max="20" value="12" oninput="svMixLbl()"
                      style="width:100%;"></div>
+          </div>
+          <div class="sv-fld" style="margin-top:10px;">
+            <label>Отпечаток (формат + энкодер мака):</label>
+            <select id="sv-mix-skin" style="width:100%;">
+              <option value="keep" selected>Родной формат ролика — живой отпечаток</option>
+              <option value="">Ничего не менять (энкодер как есть)</option>
+              <option value="square540">Квадрат 540×540 — как эталон</option>
+              <option value="square720">Квадрат 720×720</option>
+            </select>
+            <div style="font-size:12px;color:#888;margin-top:4px;">
+              «Родной формат» кодирует видео железом мака (Apple VideoToolbox) —
+              живой отпечаток, не x264-фабрика. Формат ролика не меняется, YouTube
+              сам сделает квадрат при заливке.</div>
           </div>
           <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;">
             <button class="sv-btn ghost" onclick="svMixPreview()">Смонтировать один — послушать</button>
@@ -7364,6 +7394,7 @@ function svMixParams(){
   p.quiet  = parseInt(document.getElementById('sv-mix-q').value);
   p.loud   = parseInt(document.getElementById('sv-mix-l').value);
   p.rain   = parseInt(document.getElementById('sv-mix-r').value);
+  p.skin   = document.getElementById('sv-mix-skin').value;
   return p;
 }
 async function svMixPreview(){
