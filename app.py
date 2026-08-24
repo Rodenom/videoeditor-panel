@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.93"
+VERSION = "5.94"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -3419,7 +3419,18 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user,
                         increment_project_upload(user, proj_id)
                     job['done'] += 1
                 except Exception as _upload_err:
-                    err_msg = str(_upload_err)[:80]
+                    # Сообщение без места ошибки бесполезно: «'utf-8' codec can't
+                    # decode byte 0xb0» ничего не говорит о том, где это случилось.
+                    # Дописываем последний кадр стека — файл, строку и функцию.
+                    import traceback as _tb2
+                    _frames = _tb2.extract_tb(_upload_err.__traceback__)
+                    _where = ''
+                    if _frames:
+                        _f = _frames[-1]
+                        _where = ' [%s:%d %s]' % (os.path.basename(_f.filename),
+                                                  _f.lineno, _f.name)
+                    err_msg = '%s: %s%s' % (type(_upload_err).__name__,
+                                            str(_upload_err)[:90], _where)
                     log[-1] = f'  ❌ {fmt_name} ошибка: {err_msg}'
                     ch_error = err_msg
                     job['done'] += 1
@@ -3439,9 +3450,14 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user,
             sets_done += 1
 
         job['status'] = 'done'
-        log.append('🎉 Готово! %d аккаунтов × %d %s = %d видео загружено!'
-                   % (n_sets, len(converted),
-                      'формата' if len(converted) > 1 else 'файл', total))
+        # Считаем то, что реально залилось, а не число попыток: раньше при нуле
+        # успешных заливок панель бодро писала «3 видео загружено».
+        done_links = sum(len(x.get('links') or []) for x in job['sets'])
+        if done_links:
+            log.append('🎉 Готово! залито %d видео на %d аккаунтов'
+                       % (done_links, len(job['sets'])))
+        else:
+            log.append('❌ Не залито ни одного видео — смотри ошибки выше')
     except Exception as e:
         job['status'] = 'error'
         log.append(f'❌ Ошибка: {str(e)}')
