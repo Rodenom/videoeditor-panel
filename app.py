@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.90"
+VERSION = "5.91"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -3429,7 +3429,9 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user,
             sets_done += 1
 
         job['status'] = 'done'
-        log.append(f'🎉 Готово! {n_sets} аккаунтов × 3 формата = {total} видео загружено!')
+        log.append('🎉 Готово! %d аккаунтов × %d %s = %d видео загружено!'
+                   % (n_sets, len(converted),
+                      'формата' if len(converted) > 1 else 'файл', total))
     except Exception as e:
         job['status'] = 'error'
         log.append(f'❌ Ошибка: {str(e)}')
@@ -9902,11 +9904,18 @@ function renderMassSets(sets, bodyId){
            <button onclick="navigator.clipboard.writeText('${byFmt[fmt]}');this.textContent='✓';setTimeout(()=>this.textContent='📋',1200);" style="border:none;background:#f0f0f0;border-radius:4px;padding:2px 6px;cursor:pointer;font-size:11px;flex-shrink:0;">📋</button>
          </div>`
       : '—';
+    // Колонки жёстко назывались 9:16 / 1:1 / 16:9, поэтому ссылка с любым
+    // другим именем формата («как есть») в таблицу не попадала вовсе: заливка
+    // прошла, а Павел видел три прочерка и ноль ссылок.
+    const known = ['9:16','1:1','16:9'];
+    const extra = Object.keys(byFmt).filter(f => !known.includes(f));
     tr.innerHTML = `<td style="font-weight:800;color:var(--text2);">${s.set_idx}</td>
-      <td style="font-size:11px;color:var(--text3);">${s.channel}</td>
-      <td>${mk('9:16','fmt-tag-916')}</td>
-      <td>${mk('1:1','fmt-tag-11')}</td>
-      <td>${mk('16:9','fmt-tag-169')}</td>`;
+      <td style="font-size:11px;color:var(--text3);">${s.channel}</td>`
+      + (extra.length
+          ? `<td colspan="3">${extra.map(f =>
+               `<div style="font-size:11px;color:var(--text3);margin-bottom:2px;">${f}</div>`
+               + mk(f)).join('')}</td>`
+          : `<td>${mk('9:16')}</td><td>${mk('1:1')}</td><td>${mk('16:9')}</td>`);
     tbody.appendChild(tr);
   });
 }
@@ -10198,7 +10207,7 @@ async function startAutoUpload(){
   const res = await fetch('/auto_upload',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({src_video:autoVideoPath, n_sets:n, category:autoCat, privacy:autoPrivacy, custom_title:_ctitle, custom_desc:_cdesc,
       uniqueize:(document.getElementById('uq-copies')||{}).checked||false,
-      as_is:(document.getElementById('as-is')||{}).checked!==false})});
+      as_is:(document.getElementById('as-is')||{}).checked===true})});
   const data = await res.json();
   autoJobId = data.job_id;
 
