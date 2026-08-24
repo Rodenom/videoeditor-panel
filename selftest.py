@@ -58,10 +58,10 @@ def main():
 
     print('\n2. Прокси: принимаем любой формат')
     cases = {
-        '1.2.3.4:1080:user:pass': 'socks5://user:pass@1.2.3.4:1080',
-        'user:pass@1.2.3.4:1080': 'socks5://user:pass@1.2.3.4:1080',
-        'socks5://user:pass@1.2.3.4:1080': 'socks5://user:pass@1.2.3.4:1080',
-        '1.2.3.4:1080': 'socks5://1.2.3.4:1080',
+        '1.2.3.4:1080:user:pass': 'socks5h://user:pass@1.2.3.4:1080',
+        'user:pass@1.2.3.4:1080': 'socks5h://user:pass@1.2.3.4:1080',
+        'socks5://user:pass@1.2.3.4:1080': 'socks5h://user:pass@1.2.3.4:1080',
+        '1.2.3.4:1080': 'socks5h://1.2.3.4:1080',
         '': '',
     }
     for raw, want in cases.items():
@@ -167,7 +167,7 @@ def main():
     app.journal_add = lambda *a, **k: None
     try:
         vid = mk_video(os.path.join(tmp, 'p.mp4'), '320x180', 1)
-        PROXY = 'socks5://user:pass@1.2.3.4:1080'
+        PROXY = 'socks5h://user:pass@1.2.3.4:1080'
         seen = []
         class FR2:
             def __init__(s, *a): seen.append(os.environ.get('HTTPS_PROXY')); s._i = 'v%d' % len(seen)
