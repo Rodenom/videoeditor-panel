@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.88"
+VERSION = "5.89"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -3365,8 +3365,10 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user,
                     log_ref.append(f'  ⚠ AI: {_e}')
                 return _t, _d
 
-            for fmt_name, _, label in formats:
-                base_fpath = converted[fmt_name]
+            # Идём по тому, что реально приготовлено: в режиме «как есть» это
+            # один исходный файл, а не три формата. Раньше цикл шёл по списку
+            # форматов и падал с «Ошибка: '9:16'» — Павел напоролся сразу.
+            for fmt_name, base_fpath in converted.items():
                 _uq = os.path.join(tmp_dir, 'uq_%d_%d_%s.mp4' % (sets_done, vid_idx, fmt_name.replace(':', 'x')))
                 if uniqueize:
                     log.append(f'  🎨 {fmt_name}: делаем уникальную копию...')
