@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.97"
+VERSION = "5.98"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -3439,11 +3439,25 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user,
                         _f = _frames[-1]
                         _where = ' [%s:%d %s]' % (os.path.basename(_f.filename),
                                                   _f.lineno, _f.name)
-                    err_msg = '%s: %s%s' % (type(_upload_err).__name__,
-                                            str(_upload_err)[:90], _where)
+                    _raw = str(_upload_err)
+                    # YouTube упёрся в свой лимит на аккаунт — сколько ни
+                    # пробуй, остальные форматы получат тот же отказ. Раньше
+                    # панель после отказа продолжала долбить тот же канал и
+                    # тратила минуты впустую (Вика напоролась 24.08).
+                    _limit = ('exceeded the number of videos' in _raw
+                              or 'uploadLimitExceeded' in _raw)
+                    err_msg = (friendly_upload_error(_upload_err) if _limit
+                               else '%s: %s%s' % (type(_upload_err).__name__,
+                                                  _raw[:90], _where))
                     log[-1] = f'  ❌ {fmt_name} ошибка: {err_msg}'
                     ch_error = err_msg
                     job['done'] += 1
+                    if _limit:
+                        log.append('  ⏸ Канал %s больше не принимает — остальные '
+                                   'форматы туда не шлю, беру следующий канал'
+                                   % ch_info['name'])
+                        failed_channels.add(ch_id)
+                        break
                 if fpath == _uq:  # чистим временную уникальную копию
                     try: os.remove(_uq)
                     except Exception: pass
