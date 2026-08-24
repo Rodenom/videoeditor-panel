@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.91"
+VERSION = "5.92"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -4297,11 +4297,6 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
         <input id="custom-up-title" placeholder="Свой заголовок (напр. I Tried Waking Up at 5AM for a Week)" maxlength="90" style="width:100%;padding:9px 11px;border-radius:8px;border:1.5px solid var(--border);background:var(--surface);color:var(--text);font-size:13px;outline:none;margin-bottom:8px;box-sizing:border-box;" oninput="localStorage.setItem('custom_up_title',this.value); if(typeof updateAutoRunBtn==='function') updateAutoRunBtn();">
         <textarea id="custom-up-desc" placeholder="Своё описание (2-3 предложения)" rows="2" style="width:100%;padding:9px 11px;border-radius:8px;border:1.5px solid var(--border);background:var(--surface);color:var(--text);font-size:13px;outline:none;box-sizing:border-box;resize:vertical;" oninput="localStorage.setItem('custom_up_desc',this.value)"></textarea>
         <label style="display:flex;align-items:center;gap:7px;margin-top:10px;font-size:12px;color:var(--text2);cursor:pointer;">
-          <input type="checkbox" id="as-is" style="accent-color:var(--accent1);" onchange="localStorage.setItem('as_is', this.checked?'1':'0')">
-          ⏩ Залить как есть, одним файлом
-          <span style="color:var(--text3);">— без нарезки на три формата: одна ссылка вместо трёх</span>
-        </label>
-        <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-top:6px;">
           <input type="checkbox" id="uq-copies" style="accent-color:var(--accent1);" onchange="localStorage.setItem('uq_copies', this.checked?'1':'0')">
           🎨 Уникализировать каждую копию видео
           <span style="color:var(--text3);">— защита от дублей, но заметно дольше на длинных роликах</span>
@@ -10206,8 +10201,7 @@ async function startAutoUpload(){
   const _cdesc = (document.getElementById('custom-up-desc').value||'').trim() || (document.getElementById('auto-ai-desc').textContent||'').trim();
   const res = await fetch('/auto_upload',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({src_video:autoVideoPath, n_sets:n, category:autoCat, privacy:autoPrivacy, custom_title:_ctitle, custom_desc:_cdesc,
-      uniqueize:(document.getElementById('uq-copies')||{}).checked||false,
-      as_is:(document.getElementById('as-is')||{}).checked===true})});
+      uniqueize:(document.getElementById('uq-copies')||{}).checked||false})});
   const data = await res.json();
   autoJobId = data.job_id;
 
