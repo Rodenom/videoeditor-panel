@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "6.0"
+VERSION = "6.1"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -2584,6 +2584,33 @@ def process_video(job_id, params):
     except Exception as e:
         JOBS[job_id]['status'] = 'error'
         JOBS[job_id]['log'].append(f'❌ Ошибка: {str(e)}')
+
+# ── IPv4 вперёд ──────────────────────────────────────────────────
+# Локальный DNS отдаёт для серверов Google сначала IPv6 (2a00:1450:...),
+# а SOCKS-прокси байеров по IPv6 не ходят: PySocks берёт ПЕРВЫЙ адрес из
+# ответа, шлёт прокси IPv6 — и соединение не встаёт. Снаружи это выглядит
+# как «связи нет» на всех каналах сразу, при живых прокси и живых токенах.
+# Замер 25.08: через socks5 по умолчанию 0 из 5 попыток на каждом адресе,
+# с принудительным IPv4 — ответ приходит сразу.
+#
+# Мы не выключаем IPv6, а лишь ставим IPv4 первым в списке: если у хоста
+# IPv4 нет, IPv6 по-прежнему используется.
+def _ipv4_first():
+    import socket as _s
+    if getattr(_s, '_ve_ipv4_first', False):
+        return
+    _orig_gai = _s.getaddrinfo
+
+    def gai(host, port, family=0, *a, **kw):
+        res = _orig_gai(host, port, family, *a, **kw)
+        return sorted(res, key=lambda r: 0 if r[0] == _s.AF_INET else 1)
+
+    _s.getaddrinfo = gai
+    _s._ve_ipv4_first = True
+
+
+_ipv4_first()
+
 
 def normalize_proxy(p):
     """Принять любой ходовой формат прокси и вернуть рабочий socks5-URL.
