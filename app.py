@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.99"
+VERSION = "6.0"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -3220,6 +3220,9 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user,
         # Свой заголовок задан — обращаться к AI за выдуманным не надо: это
         # лишний вызов на каждый канал, и заголовок выходил про другое видео.
         skip_ai = use_custom
+        # Что из набора ещё не залито. Живёт МЕЖДУ каналами: упёрлись в лимит
+        # на середине — остаток догружаем на следующем канале, а не теряем.
+        pending = None
         while sets_done < n_sets:
             # cycle through channels, skip failed ones
             if len(failed_channels) >= len(ordered):
@@ -3231,8 +3234,10 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user,
             ch_index += 1
             if ch_id in failed_channels:
                 continue
+            if pending is None:
+                pending = dict(converted)
             _used_td = load_uploads_today().get('counts', {}).get(ch_id, 0)
-            if _used_td + 3 > MAX_CH_PER_DAY:
+            if _used_td + len(pending) > MAX_CH_PER_DAY:
                 log.append(f'  ⏸ Канал {ch_info["name"]} — дневной лимит {MAX_CH_PER_DAY} видео ({_used_td} уже загружено) — пропускаем')
                 failed_channels.add(ch_id)
                 continue
@@ -3375,7 +3380,7 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user,
             # Идём по тому, что реально приготовлено: в режиме «как есть» это
             # один исходный файл, а не три формата. Раньше цикл шёл по списку
             # форматов и падал с «Ошибка: '9:16'» — Павел напоролся сразу.
-            for fmt_name, base_fpath in converted.items():
+            for fmt_name, base_fpath in list(pending.items()):
                 _uq = os.path.join(tmp_dir, 'uq_%d_%d_%s.mp4' % (sets_done, vid_idx, fmt_name.replace(':', 'x')))
                 if uniqueize:
                     log.append(f'  🎨 {fmt_name}: делаем уникальную копию...')
@@ -3428,6 +3433,7 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user,
                     journal_add(user, ch_id, ch_info, vid_id, fpath, fmt_title,
                                 fmt_desc, src_video)
                     log[-1] = f'  ✅ {fmt_name} → {link}'
+                    pending.pop(fmt_name, None)      # этот формат закрыт
                     bump_upload_count(ch_id)
                     proj_id = ch_info.get('project_id')
                     if proj_id:
@@ -3487,23 +3493,27 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user,
             if set_links:
                 job['sets'].append({'set_idx': sets_done + 1,
                                     'channel': ch_info['name'], 'links': set_links})
-                sets_done += 1
-                if ch_error:
-                    log.append('  ⚠ Канал %s — залито %d из %d, остальное с ошибкой'
-                               % (ch_info['name'], len(set_links), len(converted)))
                 channels = load_channels(user)
                 if channels.get(ch_id, {}).get('last_error'):
                     channels[ch_id].pop('last_error', None)
                     save_channels(user, channels)
+            if not pending:
+                sets_done += 1          # набор собран целиком
+                pending = None
                 continue
-            # Не залилось вообще ничего — вот тогда канал пропускаем.
+            # Остаток есть — значит канал отвалился на середине. Он уже помечен
+            # (лимит или ошибка), берём следующий и догружаем на нём.
             if ch_error:
                 channels = load_channels(user)
                 channels[ch_id]['last_error'] = ch_error
                 save_channels(user, channels)
-                log.append(f'  ⚠ Канал {ch_info["name"]} — ничего не залилось, беру следующий')
+                if set_links:
+                    log.append('  ⚠ Канал %s — залито %d, остальное догружу на следующем'
+                               % (ch_info['name'], len(set_links)))
+                else:
+                    log.append(f'  ⚠ Канал {ch_info["name"]} — ничего не залилось, беру следующий')
                 failed_channels.add(ch_id)
-                continue
+            continue
 
         job['status'] = 'done'
         # Считаем то, что реально залилось, а не число попыток: раньше при нуле
