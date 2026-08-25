@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "5.98"
+VERSION = "5.99"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -3396,14 +3396,32 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user,
                         'snippet': {'title': fmt_title, 'description': fmt_desc, 'tags': [], 'categoryId': '22'},
                         'status': {'privacyStatus': privacy}
                     }
-                    media = MediaFileUpload(fpath, mimetype='video/mp4', resumable=True, chunksize=1024*1024*5)
-                    req = yt.videos().insert(part='snippet,status', body=body, media_body=media)
-                    response = None
-                    while response is None:
-                        status_obj, response = req.next_chunk(num_retries=5)
-                        if status_obj:
-                            pct = int(status_obj.progress() * 100)
-                            log[-1] = f'  ⏳ {fmt_name} — {pct}%...'
+                    # Сорванная связь на одном формате раньше оставляла набор
+                    # неполным: две ссылки из трёх, и третью взять негде.
+                    # Пробуем ещё раз — но только если это связь, а не отказ
+                    # YouTube: на «лимит исчерпан» повтор бессмысленен.
+                    _try = 0
+                    while True:
+                        _try += 1
+                        try:
+                            media = MediaFileUpload(fpath, mimetype='video/mp4',
+                                                    resumable=True, chunksize=1024*1024*5)
+                            req = yt.videos().insert(part='snippet,status', body=body,
+                                                     media_body=media)
+                            response = None
+                            while response is None:
+                                status_obj, response = req.next_chunk(num_retries=5)
+                                if status_obj:
+                                    pct = int(status_obj.progress() * 100)
+                                    log[-1] = f'  ⏳ {fmt_name} — {pct}%...'
+                            break
+                        except Exception as _e_try:
+                            _t = str(_e_try)
+                            if (_try >= 2 or 'exceeded the number of videos' in _t
+                                    or 'uploadLimitExceeded' in _t or 'quotaExceeded' in _t):
+                                raise
+                            log[-1] = f'  ↻ {fmt_name} сорвался, пробую ещё раз'
+                            time.sleep(3)
                     vid_id = response['id']
                     link = f'https://youtu.be/{vid_id}'
                     set_links.append({'fmt': fmt_name, 'link': link})
