@@ -15,3 +15,14 @@ VideoEditor_output/
 __pycache__/
 *.pyc
 .DS_Store
+
+# Рабочие материалы, которым не место в публичном репозитории панели
+.preview/
+.claude/skills/
+.ve_diff.txt
+.tk_check.js
+print_*
+ПРИНТ_*
+olx_parser.py
+fix.py
+jg.html
