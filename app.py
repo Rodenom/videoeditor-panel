@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "6.4"
+VERSION = "6.5"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -3496,7 +3496,7 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user,
                             _t = str(_e_try)
                             _gr = google_refusal(_e_try)
                             if (_try >= 2 or 'exceeded the number of videos' in _t
-                                    or 'uploadLimitExceeded' in _t or 'quotaExceeded' in _t
+                                    or 'uploadLimitExceeded' in _t or is_project_quota(_t)
                                     or (_gr and 400 <= int(_gr[0] or 0) < 500)):
                                 # отказ YouTube повтором не лечится
                                 raise
@@ -3545,7 +3545,7 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user,
                     # тратила минуты впустую (Вика напоролась 24.08).
                     _limit = ('exceeded the number of videos' in _raw
                               or 'uploadLimitExceeded' in _raw)
-                    _quota = 'quotaExceeded' in _raw
+                    _quota = is_project_quota(_raw)
                     err_msg = (friendly_upload_error(_upload_err)
                                if (_limit or google_refusal(_upload_err))
                                else '%s: %s%s' % (type(_upload_err).__name__,
@@ -3617,6 +3617,17 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user,
         log.append(f'❌ Ошибка: {str(e)}')
 
 
+def is_project_quota(text):
+    """Отказ по квоте ПРОЕКТА Google Cloud, а не по лимиту канала.
+
+    Приходит в двух видах: старый 403 quotaExceeded и новый 429 «Quota exceeded
+    for quota metric 'Video Uploads' and limit 'Video Uploads per day'» (Вика,
+    19.11: два свежих канала, 0 из 15 за день — и отказ на первом же ролике).
+    """
+    t = str(text)
+    return 'quotaExceeded' in t or 'Quota exceeded for quota metric' in t
+
+
 def google_refusal(err):
     """Отказ Google по частям: (код, причина, текст). None, если это не ответ Google.
 
@@ -3670,9 +3681,10 @@ def friendly_upload_error(err):
         return 'дневной лимит загрузок YouTube исчерпан (сбросится через ~24ч)'
     if 'invalid_grant' in s:
         return 'токен отозван — удали канал и добавь заново'
-    if 'quotaExceeded' in s:
-        return ('квота API проекта Google Cloud исчерпана — на этом проекте сегодня больше '
-                'не залить. Сбросится около 10:00 по Киеву; нужен ещё один проект')
+    if is_project_quota(s):
+        return ('дневная квота загрузок проекта Google Cloud исчерпана — на этом проекте '
+                'сегодня больше не залить, каналы тут ни при чём. Сбросится около 10:00 '
+                'по Киеву; чтобы лить сейчас, нужен ещё один проект и каналы на нём')
     if 'Failed to parse' in s or 'InvalidURL' in s or 'Invalid URL' in s:
         return 'прокси в неправильном формате — вставь host:port:user:pass или socks5://user:pass@host:port'
     if ('ProxyError' in s or 'Cannot connect to proxy' in s or 'Tunnel connection failed' in s

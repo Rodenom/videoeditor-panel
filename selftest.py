@@ -222,6 +222,13 @@ def main():
                      'exceeded your <a href="/youtube/v3/getting-started#quota">quota</a>.')
         _txt = app.friendly_upload_error(_q)
         check('квота проекта названа квотой', 'квота' in _txt and '<' not in _txt, _txt)
+        _q429 = _refuse(429, 'rateLimitExceeded', "Quota exceeded for quota metric 'Video Uploads' and "
+                        "limit 'Video Uploads per day' of service 'youtube.googleapis.com' for consumer "
+                        "'project_number:1'.")
+        _txt = app.friendly_upload_error(_q429)
+        check('квота «Video Uploads per day» (429) названа квотой проекта, а не «частыми запросами»',
+              'квота' in _txt and 'проект' in _txt and 'подожди несколько минут' not in _txt, _txt)
+        check('429 по квоте распознаётся по тексту ошибки', app.is_project_quota(str(_q429)))
         _txt = app.friendly_upload_error(_refuse(403, 'forbidden', 'Forbidden <b>x</b>'))
         check('незнакомый отказ: код, причина и текст без разметки',
               '403' in _txt and 'forbidden' in _txt and '<' not in _txt, _txt)
@@ -238,7 +245,7 @@ def main():
             def next_chunk(s, num_retries=0):
                 _tried.append(s.tok)
                 if s.tok in ('tA', 'tB'):
-                    raise _q
+                    raise _q429
                 return (None, {'id': 'vid_' + s.tok})
         app.get_youtube_service = lambda token_file=None, proxy='': type('Y', (), {
             'videos': lambda s: type('V', (), {'insert': lambda s2, **kw: FRQ(token_file)})()})()
