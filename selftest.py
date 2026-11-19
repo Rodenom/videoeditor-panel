@@ -178,6 +178,19 @@ def main():
             if proxy:
                 os.environ['HTTPS_PROXY'] = app.normalize_proxy(proxy)
             return type('Y', (), {'videos': lambda s: type('V', (), {'insert': lambda s2, **kw: FR2()})()})()
+        # Мёртвый прокси называется сразу и не повторяется (v6.2): раньше панель
+        # висела на «Подключаемся к каналу» минутами на каждом канале.
+        _t0 = time.time()
+        try:
+            app.get_youtube_service_stubborn('x', 'socks5://u:p@127.0.0.1:9', [])
+            _pd = None
+        except Exception as _e:
+            _pd = _e
+        check('мёртвый прокси называется сразу, без минут ожидания',
+              isinstance(_pd, app.ProxyDead) and time.time() - _t0 < 10
+              and not app.is_network_error(_pd)
+              and 'прокси 127.0.0.1:9' in app.friendly_upload_error(_pd), repr(_pd))
+        app.proxy_preflight = lambda *a, **k: None    # адрес ниже выдуманный
         app.get_youtube_service = _svc
         app.load_channels = lambda user='pavel': {'A': {'name': 'A', 'token_file': 'x', 'proxy': PROXY, 'project_id': None}}
         app.save_channels = lambda *a, **k: None

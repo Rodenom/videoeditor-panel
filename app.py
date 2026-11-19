@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "6.1"
+VERSION = "6.2"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -2787,6 +2787,38 @@ def is_network_error(err):
         'RemoteDisconnected', 'ConnectionError'))
 
 
+class ProxyDead(Exception):
+    """Прокси канала не принимает соединение. Повторять подключение незачем."""
+
+
+def proxy_preflight(proxy, timeout=8, tries=2):
+    """Быстро проверить, что прокси принимает соединение; иначе ProxyDead."""
+    url = normalize_proxy(proxy)
+    if not url:
+        return
+    try:
+        from urllib.parse import urlparse as _up
+        pu = _up(url)
+        host, port = pu.hostname, pu.port
+    except Exception:
+        return                      # кривой формат назовёт friendly_upload_error
+    if not host or not port:
+        return
+    import socket as _sk
+    why = ''
+    for i in range(tries):
+        try:
+            _sk.create_connection((host, port), timeout=timeout).close()
+            return
+        except Exception as e:
+            why = 'молчит' if 'timed out' in str(e).lower() else 'отказывает в соединении'
+            if i + 1 < tries:
+                time.sleep(1)
+    raise ProxyDead('прокси %s:%s %s — он мёртвый, кончился или сменились доступы. '
+                    'Токен и канал тут ни при чём: поставь каналу рабочий прокси'
+                    % (host, port, why))
+
+
 def get_youtube_service_stubborn(token_file, proxy='', log=None, tries=3):
     """То же подключение к каналу, но не сдающееся с первой попытки.
 
@@ -2799,6 +2831,12 @@ def get_youtube_service_stubborn(token_file, proxy='', log=None, tries=3):
     Повторяем ТОЛЬКО сетевые сбои. Отозванный токен повторять бессмысленно —
     отдаём ошибку сразу, чтобы байер шёл переавторизовывать, а не ждал.
     """
+    # Сначала за секунды убеждаемся, что прокси вообще отвечает. Без этого
+    # на молчащем прокси (не отказ, а тишина) панель висела на «Подключаемся
+    # к каналу» по 4 минуты на канал — замер 19.11: три попытки по 75 сек —
+    # и только потом пропускала. Десять таких каналов = час тишины без единой
+    # понятной строки. Вика напоролась 19.11.
+    proxy_preflight(proxy)
     last = None
     for i in range(1, tries + 1):
         try:
@@ -2839,7 +2877,14 @@ def get_youtube_service(token_file=None, proxy=''):
         creds = Credentials.from_authorized_user_file(token_file, SCOPES)
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
+            # У Request() по умолчанию таймаут 120 сек: прокси, который принял
+            # соединение и замолчал, держал заливку по две минуты на попытку.
+            class _FastRequest(Request):
+                def __call__(self, *a, **kw):
+                    if len(a) < 5:
+                        kw['timeout'] = 25
+                    return super().__call__(*a, **kw)
+            creds.refresh(_FastRequest())
         else:
             flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
             creds = flow.run_local_server(port=0)
@@ -3277,7 +3322,7 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user,
                 log[-1] = '  🔐 Канал подключён (%.0f сек)' % (time.time() - _ta)
             except Exception as _auth_err:
                 _auth_msg = friendly_upload_error(_auth_err)
-                log.append(f'  ❌ Ошибка авторизации: {_auth_msg} — пропускаем канал')
+                log.append(f'  ❌ Канал не подключился: {_auth_msg} — пропускаем канал')
                 channels = load_channels(user); channels[ch_id]['last_error'] = _auth_msg; save_channels(user, channels)
                 failed_channels.add(ch_id)
                 continue
@@ -3558,6 +3603,8 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user,
 
 def friendly_upload_error(err):
     s = str(err)
+    if isinstance(err, ProxyDead):
+        return s
     if 'exceeded the number of videos' in s or 'uploadLimitExceeded' in s:
         return 'дневной лимит загрузок YouTube исчерпан (сбросится через ~24ч)'
     if 'invalid_grant' in s:
@@ -3568,7 +3615,8 @@ def friendly_upload_error(err):
         return 'прокси в неправильном формате — вставь host:port:user:pass или socks5://user:pass@host:port'
     if ('ProxyError' in s or 'Cannot connect to proxy' in s or 'Tunnel connection failed' in s
             or 'SOCKS' in s or 'Max retries exceeded' in s or 'NewConnectionError' in s
-            or 'Connection refused' in s or 'Failed to establish' in s):
+            or 'Connection refused' in s or 'Failed to establish' in s
+            or 'timed out' in s or 'Timeout' in s):
         # Раньше здесь стояло «(токен живой)» — утверждение, которого никто не
         # проверял: в эту же ветку падает любая сетевая ошибка. Байер видел
         # «прокси не отвечает» на живом прокси и чинил не то. Точный виновник
