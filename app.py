@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "6.2"
+VERSION = "6.3"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -3580,10 +3580,10 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user,
                 channels[ch_id]['last_error'] = ch_error
                 save_channels(user, channels)
                 if set_links:
-                    log.append('  ⚠ Канал %s — залито %d, остальное догружу на следующем'
-                               % (ch_info['name'], len(set_links)))
+                    log.append('  ⚠ Канал %s — залито %d, остальное догружу на следующем (%s)'
+                               % (ch_info['name'], len(set_links), ch_error))
                 else:
-                    log.append(f'  ⚠ Канал {ch_info["name"]} — ничего не залилось, беру следующий')
+                    log.append(f'  ⚠ Канал {ch_info["name"]} — ничего не залилось ({ch_error}), беру следующий')
                 failed_channels.add(ch_id)
             continue
 
@@ -6578,7 +6578,7 @@ function pollUpload(){
   fetch('/yt_status/'+uploadJobId).then(r=>r.json()).then(d=>{
     const newLogs=d.log.slice(uploadLogLen);uploadLogLen=d.log.length;
     const log=document.getElementById('upload-yt-log');
-    newLogs.forEach(l=>{log.textContent+=l+'\n';});
+    log.textContent=d.log.join('\n')+'\n';
     log.scrollTop=log.scrollHeight;
     if(d.status==='done'||d.status==='error'){
       clearInterval(uploadPollTimer);
@@ -10121,7 +10121,7 @@ async function startMassUpload(){
       if(jobLost(d, massPollTimer, 'mass-log', 'mass-run-btn')) return;
       const newLogs=d.log.slice(massLogLen); massLogLen=d.log.length;
       const lb=document.getElementById('mass-log');
-      newLogs.forEach(l=>{lb.textContent+=l+'\n';}); lb.scrollTop=lb.scrollHeight;
+      lb.textContent=d.log.join('\n')+'\n'; lb.scrollTop=lb.scrollHeight;
       const pct = d.total>0 ? Math.round(d.done/d.total*100) : 0;
       document.getElementById('mass-progress-fill').style.width=pct+'%';
       document.getElementById('mass-progress-text').textContent=`${d.done} / ${d.total}`;
@@ -10378,7 +10378,7 @@ async function startAutoUpload(){
       if(jobLost(d, autoPollTimer, 'auto-log', 'auto-run-btn')) return;
       const newLogs=d.log.slice(logLen); logLen=d.log.length;
       const lb=document.getElementById('auto-log');
-      newLogs.forEach(l=>{lb.textContent+=l+'\n';}); lb.scrollTop=lb.scrollHeight;
+      lb.textContent=d.log.join('\n')+'\n'; lb.scrollTop=lb.scrollHeight;
       const pct = d.total>0 ? Math.round(d.done/d.total*100) : 0;
       document.getElementById('auto-progress-fill').style.width=pct+'%';
       document.getElementById('auto-progress-text').textContent=`${d.done} / ${d.total}`;
@@ -10423,7 +10423,7 @@ function startBuildMassUpload(){
         if(jobLost(d, buildMassPollTimer, 'build-mass-log', 'build-mass-btn')) return;
         const newLogs=d.log.slice(logLen); logLen=d.log.length;
         const lb=document.getElementById('build-mass-log');
-        newLogs.forEach(l=>{lb.textContent+=l+'\n';}); lb.scrollTop=lb.scrollHeight;
+        lb.textContent=d.log.join('\n')+'\n'; lb.scrollTop=lb.scrollHeight;
         const pct=d.total>0?Math.round(d.done/d.total*100):0;
         document.getElementById('build-mass-progress-fill').style.width=pct+'%';
         document.getElementById('build-mass-progress-text').textContent=`${d.done} / ${d.total}`;
@@ -10490,7 +10490,7 @@ function pollYt(){
   fetch('/yt_status/'+ytJobId).then(r=>r.json()).then(d=>{
     const newLogs=d.log.slice(ytLogLen); ytLogLen=d.log.length;
     const lb=document.getElementById('yt-log');
-    newLogs.forEach(l=>{lb.textContent+=l+'\n';}); lb.scrollTop=lb.scrollHeight;
+    lb.textContent=d.log.join('\n')+'\n'; lb.scrollTop=lb.scrollHeight;
     if(d.status==='done'){
       clearInterval(ytPollTimer);
       document.getElementById('yt-btn').disabled=false;
