@@ -158,7 +158,7 @@ def main():
     tmp = tempfile.mkdtemp(prefix='vepx_')
     _PSTUB = ('load_uploads_today', 'save_uploads_today', 'increment_project_upload',
               'load_channels', 'save_channels', 'get_youtube_service', 'get_anthropic_key',
-              'journal_add')
+              'journal_add', 'proxy_preflight', 'bump_upload_count', 'BASE_DIR', 'OUTPUT_DIR')
     _psaved = {n: getattr(app, n) for n in _PSTUB}
     _pc = {'date': time.strftime('%Y-%m-%d'), 'counts': {}}
     app.load_uploads_today = lambda: _pc
@@ -208,6 +208,58 @@ def main():
         finally:
             _rq2.post = _orig_post
             os.environ.pop('HTTPS_PROXY', None)
+
+        print('\n6б. Отказ YouTube: причина по-русски, квота снимает весь проект')
+        # Вика, 19.11: на карточке канала стояло «ResumableUploadError:» и пусто —
+        # ответ Google начинается с «<HttpError», браузер принимал его за тег.
+        import json as _jq, copy as _cp, httplib2 as _h2
+        from googleapiclient.errors import ResumableUploadError as _RUE
+        def _refuse(code, reason, msg):
+            return _RUE(_h2.Response({'status': str(code)}), _jq.dumps({'error': {
+                'code': code, 'message': msg,
+                'errors': [{'message': msg, 'domain': 'youtube', 'reason': reason}]}}).encode())
+        _q = _refuse(403, 'quotaExceeded', 'The request cannot be completed because you have '
+                     'exceeded your <a href="/youtube/v3/getting-started#quota">quota</a>.')
+        _txt = app.friendly_upload_error(_q)
+        check('квота проекта названа квотой', 'квота' in _txt and '<' not in _txt, _txt)
+        _txt = app.friendly_upload_error(_refuse(403, 'forbidden', 'Forbidden <b>x</b>'))
+        check('незнакомый отказ: код, причина и текст без разметки',
+              '403' in _txt and 'forbidden' in _txt and '<' not in _txt, _txt)
+        check('нет канала на аккаунте — так и сказано',
+              'нет YouTube-канала' in app.friendly_upload_error(_refuse(401, 'youtubeSignupRequired', 'Unauthorized')))
+        check('карточка канала выводит ошибку текстом, а не разметкой',
+              "String(ch.last_error).replace(/&/g,'&amp;').replace(/</g,'&lt;')" in open(os.path.join(HERE, 'app.py'), encoding='utf-8').read())
+
+        app.BASE_DIR = tmp; app.OUTPUT_DIR = tmp
+        app.bump_upload_count = lambda *a, **k: None
+        _tried, _savedq = [], {}
+        class FRQ:
+            def __init__(s, tok): s.tok = tok
+            def next_chunk(s, num_retries=0):
+                _tried.append(s.tok)
+                if s.tok in ('tA', 'tB'):
+                    raise _q
+                return (None, {'id': 'vid_' + s.tok})
+        app.get_youtube_service = lambda token_file=None, proxy='': type('Y', (), {
+            'videos': lambda s: type('V', (), {'insert': lambda s2, **kw: FRQ(token_file)})()})()
+        _chq = {'A': {'name': 'A', 'token_file': 'tA', 'proxy': '', 'project_id': 'p1'},
+                'B': {'name': 'B', 'token_file': 'tB', 'proxy': '', 'project_id': 'p1'},
+                'C': {'name': 'C', 'token_file': 'tC', 'proxy': '', 'project_id': 'p2'}}
+        app.load_channels = lambda user='pavel': _cp.deepcopy(_chq)
+        app.save_channels = lambda u, d: _savedq.update(d)
+        jq = 'st_quota'
+        app.MASS_UPLOAD_JOBS[jq] = {'status': 'pending', 'log': [], 'sets': [], 'total': 0, 'done': 0}
+        app.auto_convert_and_upload(jq, vid, 1, 'C', 'unlisted', 'pavel',
+                                    custom_title='T', custom_desc='D', as_is=True)
+        _jl = app.MASS_UPLOAD_JOBS[jq]
+        check('квота: канал не долбим повтором, соседа по проекту не трогаем',
+              _tried == ['tA', 'tC'], 'обращались к: %s' % _tried)
+        check('квота: ролик ушёл на канал другого проекта',
+              [x['channel'] for x in _jl['sets']] == ['C'], str(_jl['log'][-6:]))
+        _le = _savedq.get('A', {}).get('last_error', '')
+        check('квота: на карточке причина словами', 'квота' in _le and '<' not in _le, _le)
+        check('квота: причина видна в журнале отдельной строкой',
+              any('ничего не залилось' in l and 'квота' in l for l in _jl['log']), str(_jl['log']))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
         for _n, _f in _psaved.items():

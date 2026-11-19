@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "6.3"
+VERSION = "6.4"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -3494,8 +3494,11 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user,
                             break
                         except Exception as _e_try:
                             _t = str(_e_try)
+                            _gr = google_refusal(_e_try)
                             if (_try >= 2 or 'exceeded the number of videos' in _t
-                                    or 'uploadLimitExceeded' in _t or 'quotaExceeded' in _t):
+                                    or 'uploadLimitExceeded' in _t or 'quotaExceeded' in _t
+                                    or (_gr and 400 <= int(_gr[0] or 0) < 500)):
+                                # отказ YouTube повтором не лечится
                                 raise
                             log[-1] = f'  ↻ {fmt_name} сорвался, пробую ещё раз'
                             time.sleep(3)
@@ -3542,7 +3545,9 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user,
                     # тратила минуты впустую (Вика напоролась 24.08).
                     _limit = ('exceeded the number of videos' in _raw
                               or 'uploadLimitExceeded' in _raw)
-                    err_msg = (friendly_upload_error(_upload_err) if _limit
+                    _quota = 'quotaExceeded' in _raw
+                    err_msg = (friendly_upload_error(_upload_err)
+                               if (_limit or google_refusal(_upload_err))
                                else '%s: %s%s' % (type(_upload_err).__name__,
                                                   _raw[:90], _where))
                     log[-1] = f'  ❌ {fmt_name} ошибка: {err_msg}'
@@ -3553,6 +3558,17 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user,
                                    'форматы туда не шлю, беру следующий канал'
                                    % ch_info['name'])
                         failed_channels.add(ch_id)
+                        break
+                    if _quota:
+                        # Квота общая на проект Google Cloud: остальные каналы
+                        # этого же проекта получат тот же отказ — не тратим на
+                        # них время, а говорим прямо.
+                        _pid = ch_info.get('project_id')
+                        _same = ([c for c, i in ordered if i.get('project_id') == _pid]
+                                 if _pid else [ch_id])
+                        failed_channels.update(_same)
+                        log.append('  ⏸ Квота проекта исчерпана — все его каналы (%d) '
+                                   'сегодня пропускаю' % len(_same))
                         break
                 if fpath == _uq:  # чистим временную уникальную копию
                     try: os.remove(_uq)
@@ -3601,6 +3617,51 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user,
         log.append(f'❌ Ошибка: {str(e)}')
 
 
+def google_refusal(err):
+    """Отказ Google по частям: (код, причина, текст). None, если это не ответ Google.
+
+    str() такой ошибки начинается с «<HttpError 403 when requesting None
+    returned …»: полезное идёт после сорока знаков обёртки, а на карточке
+    канала эта строка не была видна вовсе — браузер принимал «<HttpError» за
+    тег. Вика 19.11 видела «ResumableUploadError:» и пустоту после двоеточия.
+    """
+    try:
+        from googleapiclient.errors import HttpError
+    except Exception:
+        return None
+    if not isinstance(err, HttpError):
+        return None
+    code = getattr(getattr(err, 'resp', None), 'status', 0)
+    reason, msg = '', ''
+    try:
+        raw = err.content
+        if isinstance(raw, bytes):
+            raw = raw.decode('utf-8', 'replace')
+        e = (json.loads(raw) or {}).get('error') or {}
+        if isinstance(e, dict):
+            msg = str(e.get('message') or '')
+            errs = e.get('errors') or []
+            if errs and isinstance(errs[0], dict):
+                reason = str(errs[0].get('reason') or '')
+            reason = reason or str(e.get('status') or '')
+        else:
+            msg = str(e)
+    except Exception:
+        msg = str(getattr(err, 'reason', '') or '')
+    msg = re.sub(r'<[^>]+>', '', msg).strip()
+    return code, reason, msg
+
+
+GOOGLE_REFUSALS = {
+    'youtubeSignupRequired': 'на этом Google-аккаунте нет YouTube-канала — создай канал и переавторизуй',
+    'accessNotConfigured': 'в проекте Google Cloud не включён YouTube Data API v3 — включи его в консоли',
+    'authError': 'Google не принял токен — переавторизуй канал',
+    'insufficientPermissions': 'токену не хватает прав на загрузку — переавторизуй канал и поставь все галочки',
+    'rateLimitExceeded': 'слишком частые запросы к YouTube — подожди несколько минут',
+    'userRateLimitExceeded': 'слишком частые запросы к YouTube — подожди несколько минут',
+}
+
+
 def friendly_upload_error(err):
     s = str(err)
     if isinstance(err, ProxyDead):
@@ -3610,7 +3671,8 @@ def friendly_upload_error(err):
     if 'invalid_grant' in s:
         return 'токен отозван — удали канал и добавь заново'
     if 'quotaExceeded' in s:
-        return 'квота API проекта исчерпана (сбросится в 10:00 МСК)'
+        return ('квота API проекта Google Cloud исчерпана — на этом проекте сегодня больше '
+                'не залить. Сбросится около 10:00 по Киеву; нужен ещё один проект')
     if 'Failed to parse' in s or 'InvalidURL' in s or 'Invalid URL' in s:
         return 'прокси в неправильном формате — вставь host:port:user:pass или socks5://user:pass@host:port'
     if ('ProxyError' in s or 'Cannot connect to proxy' in s or 'Tunnel connection failed' in s
@@ -3623,6 +3685,11 @@ def friendly_upload_error(err):
         # определяется в diagnose_proxy(), кнопкой «Проверить каналы».
         return ('связи нет — жми «Проверить каналы», панель скажет, прокси это или токен'
                 ' [%s]' % s[:70])
+    g = google_refusal(err)
+    if g:
+        code, reason, msg = g
+        return GOOGLE_REFUSALS.get(reason) or ('YouTube отказал (код %s%s): %s'
+                                               % (code, ', ' + reason if reason else '', msg[:160]))
     return 'ошибка: ' + s[:120]
 
 
@@ -6163,7 +6230,7 @@ async function loadChannels(){
   data.channels.forEach(ch => {
     window.__chCache[ch.id] = ch;
     const color = ch.available ? '#16a34a' : '#dc2626';
-    const errLabel = ch.last_error ? `<span style="font-size:10px;background:#fee2e2;color:#dc2626;border-radius:4px;padding:1px 6px;margin-left:6px;">❌ ${ch.last_error}</span>` : '';
+    const errLabel = ch.last_error ? `<span style="font-size:10px;background:#fee2e2;color:#dc2626;border-radius:4px;padding:1px 6px;margin-left:6px;">❌ ${String(ch.last_error).replace(/&/g,'&amp;').replace(/</g,'&lt;')}</span>` : '';
     const nameWarnLabel = ch.name_lookup_error ? `<span title="${ch.name_lookup_error.replace(/"/g,'&quot;')}" style="font-size:10px;background:#fef3c7;color:#92400e;border-radius:4px;padding:1px 6px;margin-left:6px;">⚠️ имя/канал не определён</span>` : '';
     const status = ch.available ? `${ch.uploads_today}/15 сегодня` : '❌ Лимит исчерпан';
     const proxyLabel = ch.proxy ? `<span style="font-size:10px;background:#d1fae5;color:#065f46;border-radius:4px;padding:1px 6px;margin-left:6px;">🔒 прокси</span>` : '';
