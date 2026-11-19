@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "6.5"
+VERSION = "6.6"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -6445,9 +6445,11 @@ async function addChannel(prefill){
     </div>`;
 
   // подтягиваем список проектов
+  let projLoaded = false;
   try {
     const pr = await fetch('/projects').then(r=>r.json());
     const sel = document.getElementById('ch-project-sel');
+    projLoaded = true;
     (pr.projects||[]).forEach(p=>{
       const o=document.createElement('option');
       o.value=p.id; o.textContent=`${p.name} · ≈${p.seen_count||0}/100 юзеров`;
@@ -6456,18 +6458,24 @@ async function addChannel(prefill){
     });
   } catch(e){}
 
-  const {proxyStr, loginHint, useOcto} = await new Promise(resolve => {
+  const {proxyStr, loginHint, useOcto, projectId} = await new Promise(resolve => {
     document.getElementById('ch-start-btn').onclick = () => {
       const email = document.getElementById('ch-email-inp').value.trim();
       const proxy = document.getElementById('ch-proxy-inp').value.trim();
       if(!email){ document.getElementById('ch-email-inp').style.borderColor='#ff6b6b'; document.getElementById('ch-email-inp').focus(); return; }
       if(!proxy){ document.getElementById('ch-proxy-inp').style.borderColor='#ff6b6b'; document.getElementById('ch-proxy-inp').focus(); return; }
+      // Выбранный проект читаем ЗДЕСЬ, пока форма жива: строка ниже стирает
+      // её вместе со списком. Раньше список читался уже после — его не было,
+      // и при переавторизации молча подставлялся старый проект канала. Павел
+      // 20.11 выбрал «Проект 2», а ссылка в Octo вела в «Проект 1».
+      const selEl = document.getElementById('ch-project-sel');
+      const projectId = (selEl && projLoaded) ? selEl.value : (prefill.project_id || '');
       log.textContent = '⏳ Запускаем...';
-      resolve({proxyStr: proxy, loginHint: email, useOcto: true});
+      resolve({proxyStr: proxy, loginHint: email, useOcto: true, projectId});
     };
   });
 
-  const resp = await fetch('/add_channel', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({proxy: proxyStr, force_manual: useOcto, login_hint: loginHint, project_id: (document.getElementById('ch-project-sel')||{}).value || prefill.project_id || ''})});
+  const resp = await fetch('/add_channel', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({proxy: proxyStr, force_manual: useOcto, login_hint: loginHint, project_id: projectId})});
   const data = await resp.json();
   const jobId = data.job_id;
   let logLen = 0;

@@ -234,6 +234,11 @@ def main():
               '403' in _txt and 'forbidden' in _txt and '<' not in _txt, _txt)
         check('нет канала на аккаунте — так и сказано',
               'нет YouTube-канала' in app.friendly_upload_error(_refuse(401, 'youtubeSignupRequired', 'Unauthorized')))
+        _src = open(os.path.join(HERE, 'app.py'), encoding='utf-8').read()
+        check('проект канала читается из формы до того, как она стёрта',
+              "resolve({proxyStr: proxy, loginHint: email, useOcto: true, projectId})" in _src
+              and "project_id: projectId})" in _src
+              and "getElementById('ch-project-sel')||{}).value" not in _src)
         check('карточка канала выводит ошибку текстом, а не разметкой',
               "String(ch.last_error).replace(/&/g,'&amp;').replace(/</g,'&lt;')" in open(os.path.join(HERE, 'app.py'), encoding='utf-8').read())
 
