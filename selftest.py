@@ -56,6 +56,19 @@ def main():
     except Exception as e:
         check('app.py импортируется', False, str(e)[:160]); return 1
 
+    # Учёт окна YouTube пишет в свой файл при каждой заливке. Уводим его во
+    # временную папку: самотест не должен трогать боевые записи панели.
+    import atexit
+    _yt_dir = tempfile.mkdtemp(prefix='veyt_')
+    atexit.register(shutil.rmtree, _yt_dir, True)
+    app.YT_STATE_FILE = os.path.join(_yt_dir, 'yt_state.json')
+
+    def yt_reset(**kw):
+        st = app._yt_blank(time.time())
+        st.update(kw)
+        app._yt_save(st)
+    yt_reset()
+
     print('\n2. Прокси: принимаем любой формат')
     cases = {
         '1.2.3.4:1080:user:pass': 'socks5://user:pass@1.2.3.4:1080',
@@ -158,7 +171,8 @@ def main():
     tmp = tempfile.mkdtemp(prefix='vepx_')
     _PSTUB = ('load_uploads_today', 'save_uploads_today', 'increment_project_upload',
               'load_channels', 'save_channels', 'get_youtube_service', 'get_anthropic_key',
-              'journal_add', 'proxy_preflight', 'bump_upload_count', 'BASE_DIR', 'OUTPUT_DIR')
+              'journal_add', 'proxy_preflight', 'bump_upload_count', 'BASE_DIR', 'OUTPUT_DIR',
+              'UPLOADS_TODAY_FILE', 'JOURNAL_FILE')
     _psaved = {n: getattr(app, n) for n in _PSTUB}
     _pc = {'date': time.strftime('%Y-%m-%d'), 'counts': {}}
     app.load_uploads_today = lambda: _pc
@@ -244,6 +258,7 @@ def main():
 
         app.BASE_DIR = tmp; app.OUTPUT_DIR = tmp
         app.bump_upload_count = lambda *a, **k: None
+        yt_reset()
         _tried, _savedq = [], {}
         class FRQ:
             def __init__(s, tok): s.tok = tok
@@ -268,10 +283,252 @@ def main():
               _tried == ['tA', 'tC'], 'обращались к: %s' % _tried)
         check('квота: ролик ушёл на канал другого проекта',
               [x['channel'] for x in _jl['sets']] == ['C'], str(_jl['log'][-6:]))
-        _le = _savedq.get('A', {}).get('last_error', '')
-        check('квота: на карточке причина словами', 'квота' in _le and '<' not in _le, _le)
-        check('квота: причина видна в журнале отдельной строкой',
-              any('ничего не залилось' in l and 'квота' in l for l in _jl['log']), str(_jl['log']))
+        check('квота: каналу не пишется «ошибка» — это не его поломка',
+              not _savedq.get('A', {}).get('last_error'), str(_savedq.get('A')))
+        check('квота: причина видна в журнале',
+              any('❌' in l and 'квота' in l and '<' not in l for l in _jl['log']), str(_jl['log']))
+        check('квота: проект закрыт до сброса суток Google, чужой проект открыт',
+              (not app.yt_project_gate('p1')['ok']) and app.yt_project_gate('p2')['ok'])
+
+        print('\n6в. Канал считается за 24 часа, отказы YouTube запоминаются')
+        # Вика, 25.11: «залито 0/15, а він каже, що ліміт вичерпано». Счётчик панели
+        # обнулялся в полночь, а YouTube считает за последние 24 часа; десять каналов
+        # подряд ответили отказом, и каждый отказ стоил проекту запроса из квоты.
+        H = 3600.0
+        _now = time.time()
+        yt_reset(times={'W15': [_now - 23 * H + i * H for i in range(15)],
+                        'W13': [_now - 20 * H + i * H for i in range(13)],
+                        'OLD': [_now - 25 * H, _now - 30 * H]})
+        g = app.yt_channel_gate('W15', 1)
+        check('15 заливок за 24 часа — канал закрыт без запроса к YouTube, названо время',
+              (not g['ok']) and g['why'] == 'window' and g['count'] == 15
+              and abs(g['until'] - (_now + 1 * H)) < 5, str(g))
+        g1, g3 = app.yt_channel_gate('W13', 1), app.yt_channel_gate('W13', 3)
+        check('13 из 15: один ролик влезает, набор из трёх — нет, и названо, когда влезет',
+              g1['ok'] and (not g3['ok']) and abs(g3['until'] - (_now + 4 * H)) < 5, '%s | %s' % (g1, g3))
+        check('заливки старше 24 часов в окно не идут',
+              app.yt_channel_gate('OLD', 1)['count'] == 0 and app.yt_channel_gate('OLD', 3)['ok'])
+
+        yt_reset(times={'R': [_now - 5 * H, _now - 4 * H]})
+        rec = app.yt_note_refusal('R')
+        g = app.yt_channel_gate('R', 1)
+        check('первый отказ выдаёт лимит канала: залито 2 — значит, YouTube принимает 2 за сутки',
+              rec.get('n') == 2 and rec.get('cap') == 2 and (not g['ok']) and g['why'] == 'cap'
+              and g['cap'] == 2 and abs(g['until'] - (_now + 19 * H)) < 5, '%s | %s' % (rec, g))
+        _why = app.yt_skip_reason('R', {'name': 'R'}, 1)
+        check('закрытый канал пропускается с объяснением',
+              'залито 2 из 2' in _why and 'столько YouTube принимает' in _why and 'без запроса' in _why, _why)
+        app.yt_note_upload('R')
+        g = app.yt_channel_gate('R', 1)
+        check('YouTube принял больше выученного — лимит забыт, канал открыт',
+              g['ok'] and not g['learned'], str(g))
+        # Счёт говорил «место есть», а YouTube отказал: наш счёт к нему не подходит — ждём всё окно.
+        yt_reset(times={'V': [_now - 9 * H, _now - 8 * H, _now - 7 * H, _now - 6 * H]},
+                 caps={'V': {'n': 10, 'at': _now - 20 * H}})
+        check('с выученным лимитом 10 и четырьмя заливками канал открыт',
+              app.yt_channel_gate('V', 3)['ok'] and app.yt_channel_gate('V', 3)['cap'] == 10)
+        rec = app.yt_note_refusal('V')
+        g = app.yt_channel_gate('V', 1)
+        check('отказ при свободном месте: жёсткая пауза до суток от последней заливки, лимит не трогаем',
+              rec.get('cap') == 10 and (not g['ok']) and g['why'] == 'refused'
+              and abs(g['until'] - (_now + 18 * H)) < 5, '%s | %s' % (rec, g))
+        yt_reset(times={'K': [_now - 3 * H]}, caps={'K': {'n': 2, 'at': _now - 80 * H}})
+        check('выученный лимит старше трёх суток забывается', app.yt_channel_gate('K', 3)['cap'] == 15
+              and app.yt_channel_gate('K', 3)['ok'])
+        yt_reset(caps={'N': {'n': 2, 'at': _now - H}})
+        check('набор крупнее лимита канала: пустой канал берём, занятый — нет',
+              app.yt_channel_gate('N', 3)['ok'])
+        yt_reset()
+        r1 = app.yt_note_refusal('Z'); r2 = app.yt_note_refusal('Z')
+        check('отказ при пустом окне: проба через 3 часа, при повторе — через 6',
+              r1.get('n') == 0 and abs(r1['until'] - time.time() - 3 * H) < 10
+              and abs(r2['until'] - time.time() - 6 * H) < 10, '%s | %s' % (r1, r2))
+        check('пауза снимается руками', app.yt_unlock(ch_id='Z') and app.yt_channel_gate('Z', 1)['ok'])
+
+        yt_reset()
+        for _ in range(3):
+            app.yt_note_call('pX')
+        app.yt_note_quota('pX')
+        pg = app.yt_project_gate('pX')
+        check('квота проекта: запросы считаются, отказ закрывает проект до конца суток Google',
+              pg['calls'] == 3 and (not pg['ok']) and pg['until'] == app._pt_day()[1], str(pg))
+        check('канал закрытого проекта пропускается без запроса',
+              'квота' in app.yt_skip_reason('any', {'name': 'x', 'project_id': 'pX'}, 1))
+        app.yt_note_project_ok('pX')
+        pg = app.yt_project_gate('pX')
+        check('проект снова принял ролик — пауза снята, залитое посчитано',
+              pg['ok'] and pg['done'] == 1, str(pg))
+        import calendar as _cal
+        _d, _e = app._pt_day(_cal.timegm((2026, 11, 25, 12, 0, 0)))
+        check('сутки Google кончаются в полночь по Тихоокеанскому (зимой это 08:00 UTC)',
+              _d == '2026-11-25' and _e == _cal.timegm((2026, 11, 26, 8, 0, 0)), '%s %s' % (_d, _e))
+        _d, _e = app._pt_day(_cal.timegm((2026, 7, 1, 5, 0, 0)))
+        check('летом сутки Google сдвинуты на час (07:00 UTC)',
+              _d == '2026-06-30' and _e == _cal.timegm((2026, 7, 1, 7, 0, 0)), '%s %s' % (_d, _e))
+        check('лимит YouTube и квота проекта не считаются поломкой канала',
+              app.is_soft_refusal_text('дневной лимит загрузок YouTube исчерпан (сбросится через ~24ч)')
+              and app.is_soft_refusal_text(app.friendly_upload_error(Exception('uploadLimitExceeded')))
+              and app.is_soft_refusal_text(app.friendly_upload_error(_q429))
+              and not app.is_soft_refusal_text('токен отозван — удали канал и добавь заново'))
+
+        _jf = os.path.join(tmp, 'journal_boot.json')
+        _jq.dump([{'channel': 'J1', 'user': 'pavel', 'ts': _now - 1 * H},
+                  {'channel': 'J1', 'user': 'pavel', 'ts': str(_now - 30 * H)},
+                  {'channel': 'J2', 'user': 'pavel', 'ts': _now - 50 * H},
+                  {'channel': 'J3', 'user': 'pavel', 'ts': 0}], open(_jf, 'w'))
+        app.JOURNAL_FILE = _jf
+        os.remove(app.YT_STATE_FILE)
+        st = app.yt_state_load()
+        check('после обновления окно каналов поднимается из журнала заливок',
+              len(st['times'].get('J1', [])) == 2 and 'J2' not in st['times'] and 'J3' not in st['times']
+              and app.yt_channel_gate('J1', 1)['count'] == 1 and os.path.exists(app.YT_STATE_FILE),
+              str(st['times']))
+
+        # Сценарий целиком, на настоящих счётчиках: канал A забит за сутки,
+        # каналу B YouTube откажет, канал C свободен.
+        app.UPLOADS_TODAY_FILE = os.path.join(tmp, 'uploads_today.json')
+        for _n in ('bump_upload_count', 'increment_project_upload',
+                   'load_uploads_today', 'save_uploads_today'):
+            setattr(app, _n, _psaved[_n])
+        _lim = _refuse(400, 'uploadLimitExceeded',
+                       'The user has exceeded the number of videos they may upload.')
+        _tried2, _saved2 = [], {}
+        class FRL:
+            def __init__(s, tok): s.tok = tok
+            def next_chunk(s, num_retries=0):
+                _tried2.append(s.tok)
+                if s.tok == 'tB':
+                    raise _lim
+                return (None, {'id': 'vid_%s_%d' % (s.tok, len(_tried2))})
+        app.get_youtube_service = lambda token_file=None, proxy='': type('Y', (), {
+            'videos': lambda s: type('V', (), {'insert': lambda s2, **kw: FRL(token_file)})()})()
+        app.save_channels = lambda u, d: _saved2.update(d)
+        yt_reset(times={'A': [time.time() - 20 * H + i * 60 for i in range(15)],
+                        'B': [time.time() - 6 * H + i * 60 for i in range(10)]})
+
+        def _run(jid):
+            app.MASS_UPLOAD_JOBS[jid] = {'status': 'pending', 'log': [], 'sets': [], 'total': 0, 'done': 0}
+            app.auto_convert_and_upload(jid, vid, 1, 'C', 'unlisted', 'pavel',
+                                        custom_title='T', custom_desc='D', as_is=True)
+            return app.MASS_UPLOAD_JOBS[jid]
+        j1 = _run('st_win1')
+        check('забитый за сутки канал пропущен без запроса, отказ получил только B',
+              _tried2 == ['tB', 'tC'], 'обращались к: %s | %s' % (_tried2, j1['log']))
+        check('в журнале сказано, почему пропущен A и когда YouTube откроет B',
+              any('Канал A' in l and 'за последние 24 часа залито 15 из 15' in l for l in j1['log'])
+              and any('YouTube закрыл канал B' in l and 'принимает 10 за 24 часа' in l
+                      and 'место освободится' in l for l in j1['log']), str(j1['log']))
+        check('лимит YouTube не записан каналу как ошибка',
+              not _saved2.get('B', {}).get('last_error'), str(_saved2.get('B')))
+        del _tried2[:]
+        j2 = _run('st_win2')
+        check('второй запуск: в закрытые каналы панель больше не стучится',
+              _tried2 == ['tC'] and [x['channel'] for x in j2['sets']] == ['C'],
+              'обращались к: %s | %s' % (_tried2, j2['log']))
+        p1, p2 = app.yt_project_gate('p1'), app.yt_project_gate('p2')
+        check('запросы посчитаны по проектам, отказанный тоже в счёте',
+              p1['calls'] == 1 and p1['done'] == 0 and p2['calls'] == 2 and p2['done'] == 2,
+              '%s | %s' % (p1, p2))
+        check('окно канала C выросло на залитое', app.yt_channel_gate('C', 1)['count'] == 2)
+
+        # Политика на дистанции: три дня байер каждые 20 минут с 10 до 20 пробует
+        # залить набор из трёх на один канал. Считаем принятые и отказанные запросы
+        # при трёх устройствах YouTube: лимита не видно; лимит 10 в скользящем окне;
+        # лимит 10 с блокировкой на сутки от последней заливки.
+        _rt = app.time
+        _clock = [time.time()]
+
+        class _FakeTime:
+            def __getattr__(s, k): return getattr(_rt, k)
+            def time(s): return _clock[0]
+
+        def _simulate(limit, lockout, days=3):
+            yt_reset()
+            accepted, locked = [], [0.0]
+            ok = bad = 0
+            start = _clock[0]
+            for step in range(days * 72):
+                _clock[0] = start + step * 1200
+                if not (10 <= (step * 20 // 60) % 24 < 20):
+                    continue
+                if app.yt_skip_reason('S', {'name': 'S'}, 3):
+                    continue
+                for _f in range(3):
+                    live = [t for t in accepted if _clock[0] - t < 86400]
+                    if len(live) >= limit or _clock[0] < locked[0]:
+                        if lockout and len(live) >= limit:
+                            locked[0] = max(live) + 86400
+                        app.yt_note_refusal('S'); bad += 1
+                        break
+                    accepted.append(_clock[0]); app.yt_note_upload('S'); ok += 1
+                    _clock[0] += 5
+            return ok, bad
+        app.time = _FakeTime()
+        try:
+            _full, _roll, _lock = _simulate(100, False), _simulate(10, False), _simulate(10, True)
+        finally:
+            app.time = _rt
+        check('три дня, YouTube не отказывает: 15 в сутки и ни одного отказанного запроса',
+              _full[1] == 0 and _full[0] >= 39, 'принято %d, отказано %d' % _full)
+        check('три дня, лимит канала 10: один отказ на всё время, канал работает на свои 10 в сутки',
+              _roll[1] <= 1 and _roll[0] >= 25, 'принято %d, отказано %d' % _roll)
+        check('три дня, лимит 10 с суточной блокировкой: отказов не больше двух в день',
+              _lock[1] <= 6 and _lock[0] >= 25, 'принято %d, отказано %d' % _lock)
+        print('     (дистанция: без отказов %s · лимит 10 %s · лимит 10 с блокировкой %s — принято/отказано)'
+              % ('%d/%d' % _full, '%d/%d' % _roll, '%d/%d' % _lock))
+
+        # Массовая дорога: отказ ловится общим except — память должна работать и там.
+        yt_reset()
+        _chq.pop('A')
+        _files = [{'path': vid, 'fmt': '9:16'}]
+
+        def _runm(jid):
+            app.MASS_UPLOAD_JOBS[jid] = {'status': 'pending', 'log': [], 'sets': [], 'total': 0, 'done': 0}
+            app.mass_upload_to_youtube(jid, _files, 1, 'T', 'D', 'unlisted', 'pavel')
+            return app.MASS_UPLOAD_JOBS[jid]
+        del _tried2[:]
+        _runm('st_m1'); _t1 = list(_tried2); del _tried2[:]
+        m2 = _runm('st_m2')
+        check('массовая заливка: отказ запомнен, второй запуск идёт мимо закрытого канала',
+              _t1 == ['tB', 'tC'] and _tried2 == ['tC'], '%s | %s | %s' % (_t1, _tried2, m2['log']))
+
+        # «Готовые ролики» — третья дорога, тот же общий except.
+        yt_reset()
+
+        def _runr(jid):
+            app.MASS_UPLOAD_JOBS[jid] = {'status': 'pending', 'log': [], 'sets': [], 'total': 0, 'done': 0}
+            app.ready_upload_to_youtube(jid, [{'path': vid, 'fmt': '9:16'}], 1, 'C', 'unlisted',
+                                        'pavel', custom_title='T', custom_desc='D')
+            return app.MASS_UPLOAD_JOBS[jid]
+        del _tried2[:]
+        _runr('st_r1'); _t1 = list(_tried2); del _tried2[:]
+        r2 = _runr('st_r2')
+        check('готовые ролики: отказ запомнен, второй запуск идёт мимо закрытого канала',
+              _t1 == ['tB', 'tC'] and _tried2 == ['tC'], '%s | %s | %s' % (_t1, _tried2, r2['log']))
+
+        # Проект с закрытой квотой снимается одной строкой, а не строкой на канал.
+        yt_reset()
+        app.yt_note_quota('p1')
+        del _tried2[:]
+        j3 = _run('st_q1')
+        check('закрытый проект: одна строка в журнале и ни одного запроса к его каналам',
+              _tried2 == ['tC']
+              and sum('Проект «' in l and 'квота Google исчерпана' in l for l in j3['log']) == 1,
+              '%s | %s' % (_tried2, j3['log']))
+
+        yt_reset(times={'B': [time.time() - H] * 15})
+        check('«Авто» одиночной заливки берёт канал, который YouTube примет',
+              app.get_best_channel('pavel')[0] == 'C')
+        yt_reset(times={'B': [time.time() - H] * 15, 'C': [time.time() - 2 * H] * 15})
+        del _tried2[:]
+        app.UPLOAD_JOBS['st_single'] = {'status': 'pending', 'log': [], 'links': []}
+        app.upload_to_youtube('st_single', [{'path': vid, 'fmt': '9:16', 'size': 1}],
+                              'T', 'D', 'unlisted', 'auto', 'pavel')
+        _sl = app.UPLOAD_JOBS['st_single']
+        check('одиночная заливка: все каналы закрыты — честный отказ со временем, без запросов',
+              _sl['status'] == 'error' and not _tried2
+              and any('не принимает ни на один канал' in l and 'откроется' in l for l in _sl['log']),
+              str(_sl['log']))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
         for _n, _f in _psaved.items():

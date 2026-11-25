@@ -3,7 +3,7 @@
 Video Editor — Нутра
 Запуск: python3 app.py
 """
-VERSION = "6.6"
+VERSION = "6.7"
 import io, hashlib, re
 import subprocess, sys, os, shutil, json, threading, uuid, time, webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -1568,7 +1568,483 @@ def bump_upload_count(ch_id):
         data.setdefault('counts', {})
         data['counts'][ch_id] = data['counts'].get(ch_id, 0) + 1
         save_uploads_today(data)
-        return data['counts'][ch_id]
+        n = data['counts'][ch_id]
+    # Календарный счётчик оставлен для совместимости. Решает панель теперь по
+    # окну в 24 часа — туда и пишем время этой заливки.
+    yt_note_upload(ch_id)
+    return n
+
+# ── Окно YouTube на канал и сутки Google на проект ────────────────
+# Панель считала загрузки канала по КАЛЕНДАРНОМУ дню: в полночь счётчик
+# обнулялся, и карточка показывала «0/15 сегодня». YouTube считает иначе — за
+# последние 24 часа («we limit how many videos a channel can upload in a
+# 24-hour period across desktop, mobile, and YouTube API» — справка YouTube),
+# и размер лимита у каждого канала свой. Канал, забитый вчера в 16:00, утром
+# по панели свободен, а по YouTube закрыт.
+#
+# Вика, 25.11: «залито 0/15, а він каже, що ліміт вичерпано». Десять каналов
+# подряд ответили отказом, и каждый отказ стоил проекту одного запроса из ста
+# в сутки: Google списывает запрос на заливку, чем бы он ни кончился. Панель
+# при этом ничего не запоминала и на следующем запуске шла в те же каналы
+# снова — так квота проекта и сгорала на «пропусках».
+#
+# Здесь три вещи, которых не хватало:
+#   • времена заливок по каналам — считать за 24 часа, а не с полуночи;
+#   • память отказов YouTube — в закрытый канал второй раз не стучимся;
+#   • сутки Google по проекту (сброс в полночь по Тихоокеанскому времени,
+#     около 10:00 по Киеву) и счёт запросов, а не только залитого.
+YT_STATE_FILE = os.path.join(BASE_DIR, 'yt_state.json')
+YT_WINDOW = 24 * 3600            # окно YouTube на канал
+YT_KEEP = 48 * 3600              # сколько помним времена заливок
+# YouTube отказал, хотя панель за сутки на канал не лила: окно нам неизвестно
+# (лили не из этой панели или YouTube сам урезал лимит). Пробуем всё реже,
+# чтобы закрытый канал не съедал квоту проекта.
+YT_BACKOFF = (3 * 3600, 6 * 3600, 12 * 3600, 24 * 3600)
+# Сколько верим лимиту канала, выученному по отказу. YouTube пишет, что лимит
+# зависит от истории канала, то есть у молодых каналов он растёт — раз в трое
+# суток перепроверяем одной пробой.
+YT_CAP_KEEP = 72 * 3600
+PROJECT_CALLS_PER_DAY = 100      # запросов на заливку в сутки на проект (документация Google)
+_YT_LOCK = threading.RLock()
+
+
+def _pt_day(now=None):
+    """Сутки Google: (дата этих суток, момент их конца).
+
+    Квота проекта сбрасывается в полночь по Тихоокеанскому времени, а не по
+    местному: в Киеве это около 10:00 (летом и зимой по-разному, поэтому
+    считаем по часовому поясу, а не прибавляем часы)."""
+    import datetime as _dt
+    now = time.time() if now is None else now
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo('America/Los_Angeles')
+    except Exception:
+        # Нет базы поясов (бывает на Windows) — берём зимнее тихоокеанское.
+        # Летом ошибка составит час, для «когда вернётся квота» это терпимо.
+        tz = _dt.timezone(_dt.timedelta(hours=-8))
+    d = _dt.datetime.fromtimestamp(now, tz)
+    nxt = (d + _dt.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return d.strftime('%Y-%m-%d'), nxt.timestamp()
+
+
+def _when(ts, now=None):
+    """Момент словами: «в 16:10», «завтра в 09:40», «вчера в 23:15», «27.11 в 09:40»."""
+    now = time.time() if now is None else now
+    lt = time.localtime(ts)
+    hm = time.strftime('%H:%M', lt)
+    for shift, word in ((0, ''), (86400, 'завтра '), (-86400, 'вчера ')):
+        ln = time.localtime(now + shift)
+        if (lt.tm_year, lt.tm_yday) == (ln.tm_year, ln.tm_yday):
+            return word + 'в ' + hm
+    return time.strftime('%d.%m в ', lt) + hm
+
+
+def _yt_blank(now):
+    return {'boot': now, 'times': {}, 'closed': {}, 'caps': {}, 'quota': {}, 'calls': {}}
+
+
+def _yt_boot(now):
+    """Первый запуск после обновления: окно каналов поднимаем из журнала.
+
+    Без этого панель сутки считала бы все каналы пустыми — то есть ровно в
+    день обновления снова прошлась бы запросами по закрытым каналам."""
+    st = _yt_blank(now)
+    try:
+        day, end = _pt_day(now)
+        day_start = end - 86400
+        chans = {}
+        for r in load_journal():
+            try:
+                ts = float(r.get('ts') or 0)
+            except Exception:
+                continue
+            ch = r.get('channel')
+            if not ch or not (now - YT_KEEP < ts <= now):
+                continue
+            st['times'].setdefault(ch, []).append(ts)
+            if ts >= day_start:
+                u = r.get('user') or ''
+                if u not in chans:
+                    try:
+                        chans[u] = load_channels(u) or {}
+                    except Exception:
+                        chans[u] = {}
+                pid = (chans[u].get(ch) or {}).get('project_id')
+                if pid:
+                    c = st['calls'].setdefault(pid, {'day': day, 'n': 0, 'ok': 0})
+                    c['n'] += 1
+                    c['ok'] += 1
+    except Exception:
+        pass
+    return st
+
+
+def _yt_read():
+    if not os.path.exists(YT_STATE_FILE):
+        return None
+    try:
+        with open(YT_STATE_FILE, encoding='utf-8') as f:
+            st = json.load(f)
+    except Exception:
+        return None
+    if not isinstance(st, dict):
+        return None
+    for k in ('times', 'closed', 'caps', 'quota', 'calls'):
+        if not isinstance(st.get(k), dict):
+            st[k] = {}
+    return st
+
+
+def _yt_save(st):
+    # Имя временного файла своё у каждого потока — как у журнала: общий .tmp
+    # два писателя затирают друг у друга на полуслове.
+    tmp = '%s.tmp.%d.%d' % (YT_STATE_FILE, os.getpid(), threading.get_ident())
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(st, f)
+    os.replace(tmp, YT_STATE_FILE)
+
+
+def yt_state_load():
+    """Что панель помнит о заливках и отказах. Никогда не падает."""
+    st = _yt_read()
+    if st is None:
+        with _YT_LOCK:
+            st = _yt_read()
+            if st is None:
+                st = _yt_boot(time.time())
+                try:
+                    _yt_save(st)
+                except Exception:
+                    pass
+    return st
+
+
+def _yt_update(fn):
+    """Прочитать, поправить и записать под замком.
+
+    Учёт не имеет права сорвать заливку: любая ошибка здесь проглатывается,
+    ролик важнее счётчика."""
+    with _YT_LOCK:
+        try:
+            st = yt_state_load()
+            now = time.time()
+            for ch in list(st['times']):
+                keep = [t for t in st['times'][ch]
+                        if isinstance(t, (int, float)) and now - t < YT_KEEP]
+                if keep:
+                    st['times'][ch] = keep
+                else:
+                    del st['times'][ch]
+            res = fn(st, now)
+            _yt_save(st)
+            return res
+        except Exception:
+            return None
+
+
+def _yt_calls_rec(st, proj_id, now):
+    day, _ = _pt_day(now)
+    c = st['calls'].get(proj_id)
+    if not isinstance(c, dict) or c.get('day') != day:
+        c = {'day': day, 'n': 0, 'ok': 0}
+        st['calls'][proj_id] = c
+    return c
+
+
+def yt_note_call(proj_id):
+    """Сейчас уйдёт запрос на заливку: Google спишет его с проекта при любом исходе."""
+    if not proj_id:
+        return
+
+    def fn(st, now):
+        _yt_calls_rec(st, proj_id, now)['n'] += 1
+    _yt_update(fn)
+
+
+def _yt_cap(st, ch_id, now):
+    """Лимит канала, выученный по отказу YouTube: (сколько, когда) или (None, None).
+
+    Свой лимит YouTube не сообщает, но отказ его выдаёт: если канал принял n
+    роликов за 24 часа и на следующем отказал — его лимит и есть n."""
+    c = st['caps'].get(ch_id)
+    try:
+        if isinstance(c, dict) and now - float(c.get('at') or 0) < YT_CAP_KEEP:
+            n = int(c.get('n') or 0)
+            if 1 <= n < MAX_CH_PER_DAY:
+                return n, float(c.get('at') or 0)
+    except Exception:
+        pass
+    return None, None
+
+
+def yt_note_upload(ch_id):
+    """YouTube принял ролик: время идёт в окно канала, пауза с канала снимается."""
+    def fn(st, now):
+        st['times'].setdefault(ch_id, []).append(now)
+        st['closed'].pop(ch_id, None)
+        # Принял больше, чем мы считали его лимитом, — значит, лимит выше.
+        cap, _ = _yt_cap(st, ch_id, now)
+        if cap and sum(1 for t in st['times'][ch_id] if now - t < YT_WINDOW) > cap:
+            st['caps'].pop(ch_id, None)
+    _yt_update(fn)
+
+
+def yt_note_project_ok(proj_id):
+    """Ролик залит через этот проект: квота у него есть, пауза снимается."""
+    if not proj_id:
+        return
+
+    def fn(st, now):
+        st['quota'].pop(proj_id, None)
+        _yt_calls_rec(st, proj_id, now)['ok'] += 1
+    _yt_update(fn)
+
+
+def yt_note_refusal(ch_id):
+    """YouTube отказал каналу по своему лимиту — запоминаем, чтобы не стучаться снова.
+
+    Правило YouTube — «столько-то роликов за 24 часа», число он не называет.
+    Три случая:
+
+      • канал принял n роликов за сутки и на следующем отказал — его лимит n.
+        Запоминаем число; дальше канал открывает и закрывает сам счёт «залито
+        из n», и по мере того как вчерашние заливки выходят из окна, место
+        освобождается. Жёсткой паузы нет: иначе канал, принявший сегодня один
+        ролик, стоял бы закрытым до завтра, хотя вчерашние уже вышли из окна;
+      • счёт говорил «место есть», а YouTube отказал — значит, наш счёт к нему
+        не подходит (он держит канал закрытым дольше или урезал лимит). Тогда
+        осторожно: ждём, пока окно очистится целиком, — сутки от последней
+        заливки. Одна лишняя проба, а не проба на каждый освободившийся слот;
+      • за сутки панель на канал не лила вовсе, а YouTube отказал — окно нам
+        неизвестно. Пробуем по нарастающей: через 3, 6, 12, 24 часа.
+    """
+    def fn(st, now):
+        win = sorted(t for t in st['times'].get(ch_id, []) if now - t < YT_WINDOW)
+        n = len(win)
+        streak = int((st['closed'].get(ch_id) or {}).get('streak') or 0) + 1
+        cap, _ = _yt_cap(st, ch_id, now)
+        if not win:
+            until = now + YT_BACKOFF[min(streak, len(YT_BACKOFF)) - 1]
+        elif cap is None or n >= cap:
+            if cap is None:
+                st['caps'][ch_id] = {'n': n, 'at': now}
+            until = 0
+        else:
+            until = win[-1] + YT_WINDOW
+        rec = {'at': now, 'n': n, 'until': until, 'streak': streak}
+        st['closed'][ch_id] = rec
+        return dict(rec, cap=_yt_cap(st, ch_id, now)[0])
+    return _yt_update(fn) or {}
+
+
+def yt_note_quota(proj_id):
+    """Google отказал проекту по суточной квоте — до её сброса проект не трогаем."""
+    if not proj_id:
+        return {}
+
+    def fn(st, now):
+        rec = {'at': now, 'until': _pt_day(now)[1]}
+        st['quota'][proj_id] = rec
+        return dict(rec)
+    return _yt_update(fn) or {}
+
+
+def yt_note_error(ch_id, ch_info, err):
+    """Если это отказ по лимиту канала или квоте проекта — запомнить.
+    Возвращает 'limit', 'quota' или ''."""
+    s = str(err)
+    if 'exceeded the number of videos' in s or 'uploadLimitExceeded' in s:
+        yt_note_refusal(ch_id)
+        return 'limit'
+    if is_project_quota(s):
+        yt_note_quota((ch_info or {}).get('project_id'))
+        return 'quota'
+    return ''
+
+
+def yt_unlock(ch_id=None, proj_id=None):
+    """Снять паузу руками: при следующей заливке панель попробует снова."""
+    def fn(st, now):
+        if ch_id:
+            st['closed'].pop(ch_id, None)
+            st['caps'].pop(ch_id, None)
+        if proj_id:
+            st['quota'].pop(proj_id, None)
+        return True
+    return bool(_yt_update(fn))
+
+
+def yt_channel_gate(ch_id, need=1, st=None, now=None):
+    """Примет ли YouTube сейчас `need` роликов на канал — по записям панели.
+
+      ok     можно пробовать
+      count  сколько панель залила на канал за последние 24 часа
+      cap    сколько канал принимает за 24 часа: выученное по отказу YouTube
+             или общий потолок панели (MAX_CH_PER_DAY), если отказов не было
+      learned  True, если cap выучен по отказу
+      why    'refused' — YouTube отказал, и счёт этого не объясняет: ждём;
+             'cap'     — залито столько, сколько YouTube на этот канал принимает;
+             'window'  — need не влезает в потолок панели
+      until  когда, по записям панели, можно пробовать снова
+      at, n  когда YouTube отказал и сколько было залито за сутки в тот момент
+    """
+    now = time.time() if now is None else now
+    st = st or yt_state_load()
+    win = sorted(t for t in st['times'].get(ch_id, [])
+                 if isinstance(t, (int, float)) and now - t < YT_WINDOW)
+    count = len(win)
+    cap, cap_at = _yt_cap(st, ch_id, now)
+    out = {'ok': True, 'count': count, 'cap': cap or MAX_CH_PER_DAY, 'learned': bool(cap),
+           'why': '', 'until': None, 'at': cap_at, 'n': cap}
+    c = st['closed'].get(ch_id)
+    try:
+        if isinstance(c, dict) and float(c.get('until') or 0) > now:
+            out.update(ok=False, why='refused', until=float(c['until']),
+                       at=c.get('at'), n=int(c.get('n') or 0))
+            return out
+    except Exception:
+        pass
+
+    def frees(k):
+        # когда из окна выйдут k самых старых заливок
+        return (win[min(k, count) - 1] + YT_WINDOW) if win else None
+    over = count + need - MAX_CH_PER_DAY
+    if over > 0:
+        out.update(ok=False, why='window', until=frees(over))
+        return out
+    if cap:
+        # Набор крупнее самого лимита целиком не влезет никогда: пускаем на
+        # пустой канал, он примет сколько может, остальное уйдёт на следующий.
+        over = count + min(need, cap) - cap
+        if over > 0:
+            out.update(ok=False, why='cap', until=frees(over))
+    return out
+
+
+def yt_project_gate(proj_id, st=None, now=None):
+    """Квота проекта по суткам Google: закрыта ли и сколько запросов ушло."""
+    now = time.time() if now is None else now
+    st = st or yt_state_load()
+    day, end = _pt_day(now)
+    out = {'ok': True, 'until': None, 'at': None, 'calls': 0, 'done': 0, 'day_end': end}
+    c = st['calls'].get(proj_id)
+    if isinstance(c, dict) and c.get('day') == day:
+        out['calls'] = int(c.get('n') or 0)
+        out['done'] = int(c.get('ok') or 0)
+    q = st['quota'].get(proj_id)
+    try:
+        if isinstance(q, dict) and float(q.get('until') or 0) > now:
+            out.update(ok=False, until=float(q['until']), at=q.get('at'))
+    except Exception:
+        pass
+    return out
+
+
+def yt_skip_reason(ch_id, ch_info, need=1, st=None, now=None):
+    """Почему канал сейчас трогать незачем. Пустая строка — можно лить.
+
+    Отвечает без единого запроса к YouTube: всё берётся из записей панели."""
+    now = time.time() if now is None else now
+    st = st or yt_state_load()
+    pid = (ch_info or {}).get('project_id')
+    if pid:
+        pg = yt_project_gate(pid, st, now)
+        if not pg['ok']:
+            return ('квота его проекта Google исчерпана, вернётся %s — пропускаю без запроса'
+                    % _when(pg['until'], now))
+    g = yt_channel_gate(ch_id, need, st, now)
+    if g['ok']:
+        return ''
+    if g['why'] == 'refused':
+        if g['n']:
+            return ('YouTube отказал %s, хотя по счёту место было (%d за сутки). Жду, пока '
+                    'окно очистится целиком: откроется %s — пропускаю без запроса'
+                    % (_when(g['at'] or now, now), g['n'], _when(g['until'], now)))
+        return ('YouTube отказал %s, хотя за сутки панель на него не лила. '
+                'Следующая проба %s — пропускаю без запроса'
+                % (_when(g['at'] or now, now), _when(g['until'], now)))
+    tail = (' Место освободится %s' % _when(g['until'], now)) if g['until'] else ''
+    if g['why'] == 'cap':
+        return ('за последние 24 часа залито %d из %d — столько YouTube принимает на этот '
+                'канал (отказал %s).%s — пропускаю без запроса'
+                % (g['count'], g['cap'], _when(g['at'] or now, now), tail))
+    if need > MAX_CH_PER_DAY:
+        return ('набор из %d роликов больше суточного потолка канала (%d) — пропускаю'
+                % (need, MAX_CH_PER_DAY))
+    return ('за последние 24 часа залито %d из %d, ещё %d не влезет.%s — пропускаю без запроса'
+            % (g['count'], MAX_CH_PER_DAY, need, tail))
+
+
+def yt_project_skip_line(user, ch_info, ordered, st=None, now=None):
+    """Квота проекта канала закрыта — снять все его каналы одной строкой.
+    Возвращает (строку для журнала, id каналов проекта) или ('', [])."""
+    pid = (ch_info or {}).get('project_id')
+    if not pid:
+        return '', []
+    now = time.time() if now is None else now
+    pg = yt_project_gate(pid, st, now)
+    if pg['ok']:
+        return '', []
+    same = [c for c, i in ordered if (i or {}).get('project_id') == pid]
+    try:
+        name = (load_projects(user).get(pid) or {}).get('name') or pid
+    except Exception:
+        name = pid
+    if len(name) > 28:
+        name = name[:26] + '…'
+    return ('  ⏸ Проект «%s»: квота Google исчерпана, вернётся %s — его каналы (%d) '
+            'пропускаю без запроса' % (name, _when(pg['until'], now), len(same))), same
+
+
+def yt_next_open(user, need=1, now=None):
+    """Когда откроется ближайший канал: (момент, имя).
+    (0, имя) — открытый канал есть уже сейчас; (None, '') — неизвестно."""
+    now = time.time() if now is None else now
+    st = yt_state_load()
+    best = (None, '')
+    for ch_id, info in (load_channels(user) or {}).items():
+        t = 0
+        pid = (info or {}).get('project_id')
+        if pid:
+            pg = yt_project_gate(pid, st, now)
+            if not pg['ok']:
+                t = max(t, pg['until'] or 0)
+        g = yt_channel_gate(ch_id, need, st, now)
+        if not g['ok']:
+            if not g['until']:
+                continue
+            t = max(t, g['until'])
+        if not t:
+            return 0, (info or {}).get('name', '')
+        if best[0] is None or t < best[0]:
+            best = (t, (info or {}).get('name', ''))
+    return best
+
+
+def yt_next_open_line(user, need=1):
+    """Строка для журнала, когда лить некуда: когда откроется ближайший канал."""
+    try:
+        t, name = yt_next_open(user, need)
+    except Exception:
+        return ''
+    if not t:
+        return ''
+    return '⏰ По записям панели ближайший канал откроется %s (%s)' % (_when(t), name)
+
+
+def is_soft_refusal_text(s):
+    """Это не поломка канала, а лимит YouTube или квота проекта?
+
+    Такие отказы раньше писались каналу в last_error: карточка краснела, а
+    кнопка «Переавторизовать все» вела байера переавторизовывать каналы,
+    у которых с авторизацией всё в порядке."""
+    s = s or ''
+    return any(k in s for k in (
+        'лимит загрузок', 'квота загрузок проекта', 'квота API проекта',
+        'Quota exceeded for quota metric', 'uploadLimitExceeded',
+        'exceeded the number of videos'))
+
 
 # ── Per-user API projects ─────────────────────────────────────────
 def get_projects_file(user):
@@ -2288,15 +2764,20 @@ def get_best_project_secret(user):
     projects = load_projects(user)
     if not projects:
         return CREDENTIALS_FILE if os.path.exists(CREDENTIALS_FILE) else None
-    counts = load_project_uploads(user).get('counts', {})
-    best_proj, best_count = None, 9999
+    # Считаем как Google: запросы за его сутки, включая отказанные. Проект с
+    # закрытой квотой берём, только если других нет: авторизации канала квота
+    # загрузок не нужна, а раньше при «все проекты по 100» панель отвечала
+    # «не найден файл проекта», что к делу не относилось.
+    st, now = yt_state_load(), time.time()
+    best_proj, best_key = None, None
     for pid, pinfo in projects.items():
         f = pinfo.get('file', '')
         if not f or not os.path.exists(f):
             continue
-        used = counts.get(pid, 0)
-        if used < 100 and used < best_count:
-            best_count, best_proj = used, pid
+        pg = yt_project_gate(pid, st, now)
+        key = (0 if pg['ok'] else 1, pg['calls'])
+        if best_key is None or key < best_key:
+            best_key, best_proj = key, pid
     if best_proj:
         return projects[best_proj]['file']
     return None
@@ -2305,6 +2786,7 @@ def increment_project_upload(user, proj_id):
     uploads = load_project_uploads(user)
     uploads['counts'][proj_id] = uploads['counts'].get(proj_id, 0) + 1
     save_project_uploads(user, uploads)
+    yt_note_project_ok(proj_id)
 
 def get_proj_id_for_secret(secret_file, user):
     projects = load_projects(user)
@@ -2320,13 +2802,16 @@ def get_best_channel(user='pavel'):
     channels = load_channels(user)
     if not channels:
         return None, None
-    today_data = load_uploads_today()
-    counts = today_data.get('counts', {})
+    # Берём канал, который YouTube сейчас примет (по записям панели), и из
+    # таких — наименее загруженный за последние 24 часа.
+    st, now = yt_state_load(), time.time()
     best = None
     best_count = 999
     for ch_id, ch_info in channels.items():
-        count = counts.get(ch_id, 0)
-        if count < MAX_CH_PER_DAY and count < best_count:
+        if yt_skip_reason(ch_id, ch_info, 1, st, now):
+            continue
+        count = yt_channel_gate(ch_id, 1, st, now)['count']
+        if count < best_count:
             best = ch_id
             best_count = count
     return best, channels.get(best)
@@ -3066,6 +3551,7 @@ def _finish_channel_auth(job_id, creds, user, proxy='', secret_file=None, login_
     return creds
 
 def upload_to_youtube(upload_job_id, files, title, description, privacy, channel_id='auto', user='pavel'):
+    ch_id, ch_info = None, None
     try:
         from googleapiclient.http import MediaFileUpload
         UPLOAD_JOBS[upload_job_id]['status'] = 'running'
@@ -3079,8 +3565,18 @@ def upload_to_youtube(upload_job_id, files, title, description, privacy, channel
             if not ch_info:
                 raise Exception(f'Канал {channel_id} не найден')
             log.append(f'📺 Выбран канал: {ch_info["name"]}')
+            _why = yt_skip_reason(ch_id, ch_info, len(files))
+            if _why:
+                log.append('⚠ По записям панели этот канал сейчас закрыт: %s. Пробую, раз он выбран вручную'
+                           % _why.replace(' — пропускаю без запроса', ''))
         else:
             ch_id, ch_info = get_best_channel(user)
+            # Каналы есть, но YouTube сейчас не примет ни в один. Раньше панель
+            # в этом случае молча брала «основной канал» из старого файла токена.
+            if not ch_id and load_channels(user):
+                raise Exception('Сейчас YouTube не принимает ни на один канал. '
+                                + (yt_next_open_line(user, len(files))
+                                   or 'Когда откроются — написано на карточках каналов.'))
         if not ch_id:
             # Fallback to old single token
             if os.path.exists(TOKEN_FILE):
@@ -3109,6 +3605,7 @@ def upload_to_youtube(upload_job_id, files, title, description, privacy, channel
             }
             media = MediaFileUpload(fpath, mimetype='video/mp4', resumable=True, chunksize=1024*1024*5)
             req = yt.videos().insert(part='snippet,status', body=body, media_body=media)
+            yt_note_call(ch_info.get('project_id'))
             response = None
             while response is None:
                 status, response = req.next_chunk(num_retries=5)
@@ -3132,8 +3629,12 @@ def upload_to_youtube(upload_job_id, files, title, description, privacy, channel
         UPLOAD_JOBS[upload_job_id]['status'] = 'done'
         log.append('🎉 Все видео загружены на YouTube!')
     except Exception as e:
+        if ch_id:
+            yt_note_error(ch_id, ch_info, e)      # лимит канала или квота проекта — запомнить
+        _msg = (friendly_upload_error(e)
+                if (google_refusal(e) or isinstance(e, ProxyDead)) else str(e))
         UPLOAD_JOBS[upload_job_id]['status'] = 'error'
-        UPLOAD_JOBS[upload_job_id]['log'].append(f'❌ Ошибка: {str(e)}')
+        UPLOAD_JOBS[upload_job_id]['log'].append(f'❌ Ошибка: {_msg}')
 
 def vary_text(base, idx, is_title=True):
     """Slightly vary the buyer's own title/description per video for YouTube
@@ -3299,6 +3800,9 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user,
             # cycle through channels, skip failed ones
             if len(failed_channels) >= len(ordered):
                 log.append('⚠ Все каналы недоступны, выполнено: ' + str(sets_done) + '/' + str(n_sets))
+                _hint = yt_next_open_line(user, len(pending) if pending else len(converted))
+                if _hint:
+                    log.append(_hint)
                 break
             if ch_index >= len(ordered):
                 ch_index = 0
@@ -3308,9 +3812,16 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user,
                 continue
             if pending is None:
                 pending = dict(converted)
-            _used_td = load_uploads_today().get('counts', {}).get(ch_id, 0)
-            if _used_td + len(pending) > MAX_CH_PER_DAY:
-                log.append(f'  ⏸ Канал {ch_info["name"]} — дневной лимит {MAX_CH_PER_DAY} видео ({_used_td} уже загружено) — пропускаем')
+            # Спрашиваем записи панели, а не YouTube: закрытый канал или проект
+            # пропускаем без запроса — запрос стоил бы проекту единицы квоты.
+            _pl, _same_p = yt_project_skip_line(user, ch_info, ordered)
+            if _pl:
+                log.append(_pl)
+                failed_channels.update(_same_p)
+                continue
+            _skip = yt_skip_reason(ch_id, ch_info, len(pending))
+            if _skip:
+                log.append('  ⏸ Канал %s — %s' % (ch_info['name'], _skip))
                 failed_channels.add(ch_id)
                 continue
             ch_proxy = ch_info.get('proxy', '')
@@ -3385,6 +3896,7 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user,
 
             set_links = []
             ch_error = None
+            ch_soft = False      # отказ по лимиту YouTube или квоте проекта, не поломка канала
 
             def _gen_ai_title(log_ref):
                 _t, _d = f'Lifestyle video', ''
@@ -3485,6 +3997,7 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user,
                                                     resumable=True, chunksize=1024*1024*5)
                             req = yt.videos().insert(part='snippet,status', body=body,
                                                      media_body=media)
+                            yt_note_call(ch_info.get('project_id'))
                             response = None
                             while response is None:
                                 status_obj, response = req.next_chunk(num_retries=5)
@@ -3554,21 +4067,41 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user,
                     ch_error = err_msg
                     job['done'] += 1
                     if _limit:
-                        log.append('  ⏸ Канал %s больше не принимает — остальные '
-                                   'форматы туда не шлю, беру следующий канал'
-                                   % ch_info['name'])
+                        # Запоминаем отказ: до конца окна в этот канал больше не
+                        # стучимся — ни сейчас, ни на следующих запусках.
+                        ch_soft = True
+                        _rec = yt_note_refusal(ch_id)
+                        _g = yt_channel_gate(ch_id, 1)
+                        _free = (', место освободится %s' % _when(_g['until'])) if _g.get('until') else ''
+                        if not _rec:
+                            _tail = 'остальные форматы туда не шлю'
+                        elif not _rec.get('n'):
+                            _tail = ('панель за сутки на него не лила — следующая проба %s'
+                                     % _when(_rec['until']))
+                        elif _rec.get('until'):
+                            _tail = ('по счёту место было (%d за сутки) — жду, пока окно '
+                                     'очистится целиком: откроется %s'
+                                     % (_rec['n'], _when(_rec['until'])))
+                        else:
+                            _tail = ('он принимает %d за 24 часа, столько через панель и залито%s'
+                                     % (_rec['n'], _free))
+                        log.append('  ⏸ YouTube закрыл канал %s: %s. Больше в него не '
+                                   'стучусь, беру следующий' % (ch_info['name'], _tail))
                         failed_channels.add(ch_id)
                         break
                     if _quota:
                         # Квота общая на проект Google Cloud: остальные каналы
                         # этого же проекта получат тот же отказ — не тратим на
                         # них время, а говорим прямо.
+                        ch_soft = True
                         _pid = ch_info.get('project_id')
+                        _q = yt_note_quota(_pid)
                         _same = ([c for c, i in ordered if i.get('project_id') == _pid]
                                  if _pid else [ch_id])
                         failed_channels.update(_same)
-                        log.append('  ⏸ Квота проекта исчерпана — все его каналы (%d) '
-                                   'сегодня пропускаю' % len(_same))
+                        log.append('  ⏸ Квота проекта исчерпана%s — все его каналы (%d) пропускаю'
+                                   % ((', вернётся ' + _when(_q['until'])) if _q.get('until') else '',
+                                      len(_same)))
                         break
                 if fpath == _uq:  # чистим временную уникальную копию
                     try: os.remove(_uq)
@@ -3592,14 +4125,17 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user,
             # Остаток есть — значит канал отвалился на середине. Он уже помечен
             # (лимит или ошибка), берём следующий и догружаем на нём.
             if ch_error:
-                channels = load_channels(user)
-                channels[ch_id]['last_error'] = ch_error
-                save_channels(user, channels)
+                # Лимит YouTube и квота проекта — не поломка канала. В last_error
+                # их не пишем: карточка краснела и звала переавторизоваться.
+                if not ch_soft:
+                    channels = load_channels(user)
+                    channels[ch_id]['last_error'] = ch_error
+                    save_channels(user, channels)
                 if set_links:
-                    log.append('  ⚠ Канал %s — залито %d, остальное догружу на следующем (%s)'
-                               % (ch_info['name'], len(set_links), ch_error))
-                else:
-                    log.append(f'  ⚠ Канал {ch_info["name"]} — ничего не залилось ({ch_error}), беру следующий')
+                    log.append('  ⚠ Канал %s — залито %d, остальное догружу на следующем'
+                               % (ch_info['name'], len(set_links)))
+                elif not ch_soft:
+                    log.append(f'  ⚠ Канал {ch_info["name"]} — ничего не залилось, беру следующий')
                 failed_channels.add(ch_id)
             continue
 
@@ -3607,11 +4143,15 @@ def auto_convert_and_upload(job_id, src_video, n_sets, category, privacy, user,
         # Считаем то, что реально залилось, а не число попыток: раньше при нуле
         # успешных заливок панель бодро писала «3 видео загружено».
         done_links = sum(len(x.get('links') or []) for x in job['sets'])
-        if done_links:
+        if done_links and sets_done >= n_sets:
             log.append('🎉 Готово! залито %d видео на %d аккаунтов'
                        % (done_links, len(job['sets'])))
+        elif done_links:
+            # Раньше и здесь стояло «Готово!», хотя набор остался неполным.
+            log.append('⚠ Залито %d видео, но наборов собрано %d из %d — открытых '
+                       'каналов не хватило' % (done_links, sets_done, n_sets))
         else:
-            log.append('❌ Не залито ни одного видео — смотри ошибки выше')
+            log.append('❌ Не залито ни одного видео — причины выше')
     except Exception as e:
         job['status'] = 'error'
         log.append(f'❌ Ошибка: {str(e)}')
@@ -3678,13 +4218,13 @@ def friendly_upload_error(err):
     if isinstance(err, ProxyDead):
         return s
     if 'exceeded the number of videos' in s or 'uploadLimitExceeded' in s:
-        return 'дневной лимит загрузок YouTube исчерпан (сбросится через ~24ч)'
+        return ('лимит загрузок канала на YouTube исчерпан — он считается за последние '
+                '24 часа, а не с полуночи')
     if 'invalid_grant' in s:
         return 'токен отозван — удали канал и добавь заново'
     if is_project_quota(s):
-        return ('дневная квота загрузок проекта Google Cloud исчерпана — на этом проекте '
-                'сегодня больше не залить, каналы тут ни при чём. Сбросится около 10:00 '
-                'по Киеву; чтобы лить сейчас, нужен ещё один проект и каналы на нём')
+        return ('дневная квота загрузок проекта Google Cloud исчерпана — каналы тут ни при '
+                'чём. Чтобы лить сейчас, нужен другой проект и каналы на нём')
     if 'Failed to parse' in s or 'InvalidURL' in s or 'Invalid URL' in s:
         return 'прокси в неправильном формате — вставь host:port:user:pass или socks5://user:pass@host:port'
     if ('ProxyError' in s or 'Cannot connect to proxy' in s or 'Tunnel connection failed' in s
@@ -3730,6 +4270,9 @@ def ready_upload_to_youtube(job_id, ready_files, n_sets, category, privacy, user
         while sets_done_r < n_sets:
             if len(failed_r) >= len(ordered_r):
                 log.append('⚠ Все каналы недоступны, выполнено: ' + str(sets_done_r) + '/' + str(n_sets))
+                _hint_r = yt_next_open_line(user, len(ready_files))
+                if _hint_r:
+                    log.append(_hint_r)
                 break
             if ch_index_r >= len(ordered_r):
                 ch_index_r = 0
@@ -3737,9 +4280,14 @@ def ready_upload_to_youtube(job_id, ready_files, n_sets, category, privacy, user
             ch_index_r += 1
             if ch_id in failed_r:
                 continue
-            _used_td_r = load_uploads_today().get('counts', {}).get(ch_id, 0)
-            if _used_td_r + len(ready_files) > MAX_CH_PER_DAY:
-                log.append(f'  ⏸ Канал {ch_info["name"]} — дневной лимит {MAX_CH_PER_DAY} видео ({_used_td_r} уже загружено) — пропускаем')
+            _pl_r, _same_r = yt_project_skip_line(user, ch_info, ordered_r)
+            if _pl_r:
+                log.append(_pl_r)
+                failed_r.update(_same_r)
+                continue
+            _skip_r = yt_skip_reason(ch_id, ch_info, len(ready_files))
+            if _skip_r:
+                log.append('  ⏸ Канал %s — %s' % (ch_info['name'], _skip_r))
                 failed_r.add(ch_id)
                 continue
             try:
@@ -3822,6 +4370,7 @@ def ready_upload_to_youtube(job_id, ready_files, n_sets, category, privacy, user
                     }
                     media = MediaFileUpload(fpath, mimetype='video/mp4', resumable=True, chunksize=1024*1024*5)
                     req = yt.videos().insert(part='snippet,status', body=body, media_body=media)
+                    yt_note_call(ch_info.get('project_id'))
                     response = None
                     while response is None:
                         status_obj, response = req.next_chunk(num_retries=5)
@@ -3845,6 +4394,7 @@ def ready_upload_to_youtube(job_id, ready_files, n_sets, category, privacy, user
                 job['sets'].append({'set_idx': sets_done_r+1, 'channel': ch_info['name'], 'links': set_links})
                 sets_done_r += 1
             except Exception as _ch_err_r:
+                yt_note_error(ch_id, ch_info, _ch_err_r)   # лимит канала / квота проекта — запомнить
                 log.append(f'  ❌ Канал {ch_info["name"]} — {friendly_upload_error(_ch_err_r)} — пропускаем')
                 failed_r.add(ch_id)
         job['status'] = 'done'
@@ -3875,6 +4425,9 @@ def mass_upload_to_youtube(job_id, files, n_sets, title, description, privacy, u
         while sets_done_m < n_sets:
             if len(failed_m) >= len(ordered_m):
                 log.append('⚠ Все каналы недоступны, выполнено: ' + str(sets_done_m) + '/' + str(n_sets))
+                _hint_m = yt_next_open_line(user, len(files))
+                if _hint_m:
+                    log.append(_hint_m)
                 break
             if ch_index_m >= len(ordered_m):
                 ch_index_m = 0
@@ -3882,9 +4435,14 @@ def mass_upload_to_youtube(job_id, files, n_sets, title, description, privacy, u
             ch_index_m += 1
             if ch_id in failed_m:
                 continue
-            _used_td_m = load_uploads_today().get('counts', {}).get(ch_id, 0)
-            if _used_td_m + len(files) > MAX_CH_PER_DAY:
-                log.append(f'  ⏸ Канал {ch_info["name"]} — дневной лимит {MAX_CH_PER_DAY} видео ({_used_td_m} уже загружено) — пропускаем')
+            _pl_m, _same_m = yt_project_skip_line(user, ch_info, ordered_m)
+            if _pl_m:
+                log.append(_pl_m)
+                failed_m.update(_same_m)
+                continue
+            _skip_m = yt_skip_reason(ch_id, ch_info, len(files))
+            if _skip_m:
+                log.append('  ⏸ Канал %s — %s' % (ch_info['name'], _skip_m))
                 failed_m.add(ch_id)
                 continue
             try:
@@ -3917,6 +4475,7 @@ def mass_upload_to_youtube(job_id, files, n_sets, title, description, privacy, u
                     }
                     media = MediaFileUpload(fpath, mimetype='video/mp4', resumable=True, chunksize=1024*1024*5)
                     req = yt.videos().insert(part='snippet,status', body=body, media_body=media)
+                    yt_note_call(ch_info.get('project_id'))
                     response = None
                     while response is None:
                         status_obj, response = req.next_chunk(num_retries=5)
@@ -3940,6 +4499,7 @@ def mass_upload_to_youtube(job_id, files, n_sets, title, description, privacy, u
                 job['sets'].append({'set_idx': sets_done_m+1, 'channel': ch_info['name'], 'links': set_links})
                 sets_done_m += 1
             except Exception as _ch_err_m:
+                yt_note_error(ch_id, ch_info, _ch_err_m)   # лимит канала / квота проекта — запомнить
                 log.append(f'  ❌ Канал {ch_info["name"]} — {friendly_upload_error(_ch_err_m)} — пропускаем')
                 failed_m.add(ch_id)
         job['status'] = 'done'
@@ -4740,7 +5300,7 @@ input[type=text]:focus,textarea:focus{border-color:var(--accent1);box-shadow:0 0
         </label>
       </div>
       <div id="projects-list" style="display:flex;flex-direction:column;gap:8px;"></div>
-      <div style="font-size:11px;color:var(--text3);margin-top:8px;">Каждый проект даёт 100 загрузок/день.</div>
+      <div style="font-size:11px;color:var(--text3);margin-top:8px;">Google даёт проекту 100 запросов на заливку в сутки и списывает их даже за отказанные ролики. Сутки у Google кончаются в полночь по Тихоокеанскому времени.</div>
     </div>
 
     <div class="up-section">
@@ -6176,6 +6736,41 @@ let currentFiles = [];
 let ytJobId = null, ytPollTimer = null;
 let privacy = 'unlisted';
 
+// Момент словами: «в 16:10», «завтра в 09:40», «вчера в 23:15», «27.11 в 09:40».
+function fmtWhen(ts){
+  if(!ts) return '';
+  const d = new Date(ts*1000), n = new Date();
+  const two = x => String(x).padStart(2,'0');
+  const hm = two(d.getHours()) + ':' + two(d.getMinutes());
+  const day = x => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const diff = Math.round((day(d) - day(n)) / 86400000);
+  if(diff === 0) return 'в ' + hm;
+  if(diff === 1) return 'завтра в ' + hm;
+  if(diff === -1) return 'вчера в ' + hm;
+  return two(d.getDate()) + '.' + two(d.getMonth()+1) + ' в ' + hm;
+}
+function escH(s){ return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;'); }
+
+// Снять паузу с канала или проекта: панель попробует его при следующей заливке.
+async function ytUnlock(chId, projId){
+  const what = projId ? 'этот проект' : 'этот канал';
+  const risk = projId ? 'Google ещё не вернул квоту' : 'YouTube ещё не открыл канал';
+  if(!confirm('Сбросить то, что панель запомнила про ' + what + '?\n\nПанель попробует его при следующей заливке. Если ' + risk + ', попытка получит отказ.')) return;
+  await fetch('/yt_unlock', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({channel_id: chId || '', project_id: projId || ''})});
+  loadProjects(); loadChannels();
+}
+
+async function renameProject(id){
+  const cur = ((window.__projCache || {})[id] || {}).name || '';
+  const name = (prompt('Новое название проекта:', cur.length > 30 ? '' : cur) || '').trim();
+  if(!name) return;
+  const d = await fetch('/rename_project', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({id, name})}).then(r=>r.json());
+  if(!d.ok){ alert('Не получилось: ' + (d.error || '')); return; }
+  loadProjects(); loadChannels();
+}
+
 async function loadProjects(){
   const resp = await fetch('/projects');
   const data = await resp.json();
@@ -6185,21 +6780,33 @@ async function loadProjects(){
     list.innerHTML = '<div style="font-size:12px;color:var(--text3);padding:4px 0;">Нет проектов — добавь client_secret.json</div>';
     return;
   }
+  window.__projCache = {};
   list.innerHTML = data.projects.map(p=>{
-    const pct = Math.round(p.uploads_today/100*100);
-    const color = pct>80?'#ef4444':pct>50?'#f59e0b':'#22c55e';
+    window.__projCache[p.id] = p;
+    // Считаем как Google: запросы на заливку за его сутки, включая отказанные.
+    // Раньше тут было «залито сегодня» по местному календарю — Вика видела 67
+    // из 100, а квота проекта к этому времени уже кончилась.
+    const cap = p.calls_cap || 100;
+    const calls = p.calls || 0;
+    const pct = Math.min(100, Math.round(calls/cap*100));
+    const color = p.quota_until ? '#ef4444' : pct>80?'#ef4444':pct>50?'#f59e0b':'#22c55e';
+    const quotaLine = p.quota_until
+      ? `<div style="font-size:11px;color:#dc2626;font-weight:700;margin-top:3px;">⏸ Google закрыл квоту ${fmtWhen(p.quota_at)} — вернётся ${fmtWhen(p.quota_until)} · <a href="#" onclick="ytUnlock('', '${p.id}');return false;" style="color:#dc2626;">снять паузу</a></div>`
+      : '';
     const seen = p.seen_count || 0;
     const seenColor = seen>=90?'#ef4444':seen>=70?'#f59e0b':'#6d28d9';
     const seenLabel = `<div style="font-size:11px;color:${seenColor};margin-top:3px;" title="Пожизненный лимит Google на непроверенный проект — не сбрасывается, оценка по каналам, авторизованным через эту панель">≈${seen}/100 юзеров авторизовано (пожизненный лимит Google)</div>`;
     return `<div style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--surface2);border-radius:10px;border:1.5px solid var(--border);">
       <div style="flex:1;min-width:0;">
-        <div style="font-size:13px;font-weight:700;color:var(--text);margin-bottom:4px;">🔑 ${p.name}</div>
+        <div title="${escH(p.name)}" style="font-size:13px;font-weight:700;color:var(--text);margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">🔑 ${escH(p.name)}</div>
         <div style="background:var(--border);border-radius:4px;height:6px;overflow:hidden;">
           <div style="width:${pct}%;height:100%;background:${color};border-radius:4px;transition:.3s;"></div>
         </div>
-        <div style="font-size:11px;color:var(--text3);margin-top:3px;">${p.uploads_today}/100 загружено сегодня · осталось <b style="color:${color};">${p.remaining}</b></div>
+        <div title="Google списывает с проекта каждый запрос на заливку — и принятый, и отказанный. Панель считает свои запросы; повторы внутри библиотеки ей не видны, поэтому число приблизительное." style="font-size:11px;color:var(--text3);margin-top:3px;">≈<b style="color:${color};">${calls}</b>/${cap} запросов на заливку за сутки Google · залито ${p.done||0} · сброс ${fmtWhen(p.day_end)}</div>
+        ${quotaLine}
         ${seenLabel}
       </div>
+      <button onclick="renameProject('${p.id}')" title="Переименовать проект" style="padding:5px 8px;font-size:11px;border:1.5px solid var(--border);border-radius:7px;background:transparent;color:var(--text3);cursor:pointer;flex-shrink:0;">✏️</button>
       <button onclick="deleteProject('${p.id}')" style="padding:5px 10px;font-size:11px;font-weight:700;border:1.5px solid #fca5a5;border-radius:7px;background:transparent;color:#ef4444;cursor:pointer;flex-shrink:0;">✕</button>
     </div>`;
   }).join('');
@@ -6209,7 +6816,10 @@ async function addProject(input){
   const file = input.files[0];
   if(!file) return;
   const text = await file.text();
-  const name = prompt('Название проекта (например: Проект 1):', file.name.replace('.json','')) || file.name;
+  // Раньше в поле подставлялось имя файла ключа, и проект так и назывался:
+  // «client_secret_6786…apps.googleusercontent.com (1)» на каждой карточке канала.
+  const nextNo = Object.keys(window.__projCache || {}).length + 1;
+  const name = (prompt('Название проекта:', 'Проект ' + nextNo) || '').trim() || ('Проект ' + nextNo);
   const r = await fetch('/add_project',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:text,name})});
   const d = await r.json();
   if(d.ok){ loadProjects(); }
@@ -6239,16 +6849,56 @@ async function loadChannels(){
   }
   const projects = (await fetch('/projects').then(r=>r.json())).projects || [];
   window.__chCache = window.__chCache || {};
+  // Одной строкой: сколько каналов YouTube примет прямо сейчас и когда откроется
+  // ближайший закрытый. По записям панели, без запросов к YouTube.
+  const openNow = data.channels.filter(c => c.available).length;
+  let nextTs = 0;
+  data.channels.forEach(c => {
+    if(c.available) return;
+    const t = Math.max((c.gate && c.gate.until) || 0, c.quota_until || 0);
+    if(t && (!nextTs || t < nextTs)) nextTs = t;
+  });
+  const sumHtml = `<div style="font-size:12px;color:var(--text3,#666);padding:2px 2px 4px;">Сейчас YouTube примет: <b style="color:${openNow ? '#16a34a' : '#dc2626'};">${openNow} из ${data.channels.length}</b> ${plural(data.channels.length,'канала','каналов','каналов')}`
+    + (openNow < data.channels.length && nextTs ? ` · ближайший закрытый откроется ${fmtWhen(nextTs)}` : '')
+    + ` <span title="Панель считает по своим записям: заливки за последние 24 часа и отказы YouTube. Если на канал лили не из этой панели, она об этом не знает." style="cursor:help;">ⓘ</span></div>`;
+  targets.forEach(l => l.innerHTML = sumHtml);
   data.channels.forEach(ch => {
     window.__chCache[ch.id] = ch;
-    const color = ch.available ? '#16a34a' : '#dc2626';
+    // Канал глазами YouTube: сколько залито за последние 24 часа и не закрыт ли он.
+    // Раньше тут стояло «0/15 сегодня» по календарю — и канал, который YouTube
+    // держит закрытым со вчерашнего вечера, выглядел свободным (Вика, 25.11).
+    const g = ch.gate || {ok: true, count: ch.uploads_today || 0, why: ''};
+    const cap = g.cap || ch.cap || 15;
+    const unpause = ` · <a href="#" onclick="ytUnlock('${ch.id}');return false;" title="Панель попробует этот канал при следующей заливке, не дожидаясь расчётного времени. Если YouTube его ещё не открыл, попытка получит отказ и спишет один запрос из квоты проекта." style="color:inherit;">снять паузу</a>`;
+    // Лимит канала, выученный по отказу YouTube, показываем вместо общих 15.
+    const capNote = g.learned ? ` — столько YouTube принимает на этот канал (отказал ${fmtWhen(g.at)})` : '';
+    const forget = g.learned ? ` · <a href="#" onclick="ytUnlock('${ch.id}');return false;" title="Забыть выученный лимит: панель снова будет считать канал на 15 в сутки и узнает лимит заново по первому отказу YouTube." style="color:inherit;">сбросить</a>` : '';
+    let color = '#16a34a', status = `${g.count}/${cap} за последние 24 часа`;
+    if(g.why === 'refused'){
+      color = '#dc2626';
+      status = (g.n
+        ? `⏸ YouTube отказал ${fmtWhen(g.at)}, хотя по счёту место было (${g.n} за сутки). Жду, пока окно очистится целиком: откроется ${fmtWhen(g.until)}`
+        : `⏸ YouTube отказал ${fmtWhen(g.at)}, хотя за сутки панель на канал не лила. Следующая проба ${fmtWhen(g.until)}`) + unpause;
+    } else if(g.why === 'cap' || g.why === 'window'){
+      color = '#dc2626';
+      status = `⏸ ${g.count}/${cap} за последние 24 часа` + (g.why === 'cap' ? capNote : '')
+             + (g.until ? `. Место освободится ${fmtWhen(g.until)}` : '') + forget;
+    } else {
+      if(g.learned) status += ` · YouTube принимает на этот канал ${cap} за сутки`;
+      if(ch.set_until) status += ` · набор из трёх влезет ${fmtWhen(ch.set_until)}`;
+      status += forget;
+    }
+    if(ch.quota_until){
+      const own = g.ok ? '' : `<br>${status}`;
+      color = g.ok ? '#b45309' : '#dc2626';
+      status = `⏸ Квота проекта исчерпана, вернётся ${fmtWhen(ch.quota_until)}` + own;
+    }
     const errLabel = ch.last_error ? `<span style="font-size:10px;background:#fee2e2;color:#dc2626;border-radius:4px;padding:1px 6px;margin-left:6px;">❌ ${String(ch.last_error).replace(/&/g,'&amp;').replace(/</g,'&lt;')}</span>` : '';
     const nameWarnLabel = ch.name_lookup_error ? `<span title="${ch.name_lookup_error.replace(/"/g,'&quot;')}" style="font-size:10px;background:#fef3c7;color:#92400e;border-radius:4px;padding:1px 6px;margin-left:6px;">⚠️ имя/канал не определён</span>` : '';
-    const status = ch.available ? `${ch.uploads_today}/15 сегодня` : '❌ Лимит исчерпан';
     const proxyLabel = ch.proxy ? `<span style="font-size:10px;background:#d1fae5;color:#065f46;border-radius:4px;padding:1px 6px;margin-left:6px;">🔒 прокси</span>` : '';
     const projName = ch.project_id ? (projects.find(p=>p.id===ch.project_id)||{name:'?'}).name : null;
     const projLabel = projName
-      ? `<span style="font-size:10px;background:#ede9fe;color:#6d28d9;border-radius:4px;padding:1px 6px;margin-left:6px;">🔑 ${projName}</span>`
+      ? `<span title="${escH(projName)}" style="font-size:10px;background:#ede9fe;color:#6d28d9;border-radius:4px;padding:1px 6px;margin-left:6px;display:inline-block;max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom;">🔑 ${escH(projName)}</span>`
       : '';
     let daysLabel = '';
     if(ch.days_left !== null && ch.days_left !== undefined){
@@ -6261,7 +6911,7 @@ async function loadChannels(){
     const needsReauth = (ch.days_left !== null && ch.days_left !== undefined && ch.days_left <= 2) || !!ch.last_error;
     const reauthBtn = `<button onclick="reauthChannel('${ch.id}')" style="padding:4px 10px;font-size:11px;border:1px solid ${needsReauth?'#f59e0b':'var(--border,#e5e5e5)'};border-radius:6px;background:${needsReauth?'#fffbeb':'transparent'};color:${needsReauth?'#b45309':'#666'};cursor:pointer;margin-right:6px;">🔄 Переавторизовать</button>`;
     const html = `<div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:var(--surface2,#f9f9f9);border-radius:8px;border:1px solid var(--border,#e5e5e5);">
-      <div>
+      <div style="flex:1;min-width:0;padding-right:10px;">
         <div style="font-size:13px;font-weight:600;">📺 ${ch.name}${proxyLabel}${projLabel}${errLabel}${nameWarnLabel}</div>
         ${ch.email ? `<div style="font-size:10px;color:#888;margin-top:1px;">${ch.email}</div>` : ''}
         <div style="font-size:11px;color:${color};margin-top:2px;">${status}</div>
@@ -11174,10 +11824,17 @@ class Handler(BaseHTTPRequestHandler):
             uploads = load_project_uploads(user)
             counts = uploads.get('counts', {})
             seen = load_oauth_seen(user)
+            _st, _now = yt_state_load(), time.time()
             result = []
             for pid, pinfo in projects.items():
+                _pg = yt_project_gate(pid, _st, _now)
                 result.append({'id': pid, 'name': pinfo.get('name',''), 'uploads_today': counts.get(pid,0), 'remaining': max(0, 100-counts.get(pid,0)),
-                                'seen_count': len(seen.get(pid, {}))})
+                                'seen_count': len(seen.get(pid, {})),
+                                # сутки Google: запросы на заливку (включая отказанные) и залитое
+                                'calls': _pg['calls'], 'done': _pg['done'],
+                                'calls_cap': PROJECT_CALLS_PER_DAY, 'day_end': _pg['day_end'],
+                                'quota_until': None if _pg['ok'] else _pg['until'],
+                                'quota_at': _pg['at']})
             self.json({'projects': result})
         elif path.startswith('/delete_project/'):
             pid = path.split('/')[-1]
@@ -11194,19 +11851,31 @@ class Handler(BaseHTTPRequestHandler):
             today_data = load_uploads_today()
             counts = today_data.get('counts', {})
             now = time.time()
+            _st = yt_state_load()
             result = []
             for ch_id, ch_info in channels.items():
                 auth_time = ch_info.get('auth_time')
                 days_left = round(7 - (now - auth_time) / 86400, 1) if auth_time else None
+                # Канал глазами YouTube: окно 24 часа и память отказов, а не
+                # календарный счётчик, который в полночь показывал «0/15».
+                _g = yt_channel_gate(ch_id, 1, _st, now)
+                _g3 = yt_channel_gate(ch_id, 3, _st, now)
+                _pid = ch_info.get('project_id', '')
+                _pg = yt_project_gate(_pid, _st, now) if _pid else None
+                _le = ch_info.get('last_error', '')
                 result.append({
                     'id': ch_id,
                     'name': ch_info['name'],
                     'email': ch_info.get('email', ''),
                     'uploads_today': counts.get(ch_id, 0),
-                    'available': counts.get(ch_id, 0) < MAX_CH_PER_DAY,
+                    'available': bool(_g['ok'] and (not _pg or _pg['ok'])),
+                    'gate': _g, 'cap': MAX_CH_PER_DAY,
+                    'set_until': _g3['until'] if (_g['ok'] and not _g3['ok']) else None,
+                    'quota_until': _pg['until'] if (_pg and not _pg['ok']) else None,
                     'proxy': ch_info.get('proxy', ''),
-                    'project_id': ch_info.get('project_id', ''),
-                    'last_error': ch_info.get('last_error', ''),
+                    'project_id': _pid,
+                    # лимит YouTube и квота проекта — не поломка канала, красной меткой не показываем
+                    'last_error': '' if is_soft_refusal_text(_le) else _le,
                     'days_left': days_left,
                     'name_lookup_error': ch_info.get('name_lookup_error', ''),
                 })
@@ -12269,7 +12938,12 @@ class Handler(BaseHTTPRequestHandler):
                 if not client_id:
                     self.json({'ok': False, 'error': 'Неверный файл — client_id не найден'}); return
                 proj_id = 'proj_' + hashlib.md5(client_id.encode()).hexdigest()[:8]
-                proj_name = data.get('name') or f'Проект {len(load_projects(user))+1}'
+                proj_name = (data.get('name') or '').strip()
+                # Имя файла ключа («client_secret_6786…apps.googleusercontent.com (1)»)
+                # именем проекта быть не должно: оно ломает карточки каналов.
+                if (not proj_name or proj_name.lower().startswith('client_secret')
+                        or 'googleusercontent' in proj_name):
+                    proj_name = f'Проект {len(load_projects(user))+1}'
                 secret_file = os.path.join(BASE_DIR, f'client_secret_{user}_{proj_id}.json')
                 with open(secret_file, 'w') as f:
                     json.dump(parsed, f)
@@ -12483,6 +13157,29 @@ class Handler(BaseHTTPRequestHandler):
             ), daemon=True)
             t.start()
             self.json({'job_id': job_id})
+        elif path == '/yt_unlock':
+            # Снять паузу с канала или проекта: панель попробует его при
+            # следующей заливке, не дожидаясь расчётного времени.
+            length = int(self.headers.get('Content-Length', 0))
+            params = json.loads(self.rfile.read(length)) if length else {}
+            _c, _p = params.get('channel_id') or '', params.get('project_id') or ''
+            if _c and _c in load_channels(user):
+                self.json({'ok': yt_unlock(ch_id=_c)})
+            elif _p and _p in load_projects(user):
+                self.json({'ok': yt_unlock(proj_id=_p)})
+            else:
+                self.json({'ok': False, 'error': 'Не найдено'})
+        elif path == '/rename_project':
+            length = int(self.headers.get('Content-Length', 0))
+            params = json.loads(self.rfile.read(length)) if length else {}
+            _pid, _nm = params.get('id') or '', (params.get('name') or '').strip()[:60]
+            projects = load_projects(user)
+            if _pid in projects and _nm:
+                projects[_pid]['name'] = _nm
+                save_projects(user, projects)
+                self.json({'ok': True})
+            else:
+                self.json({'ok': False, 'error': 'Проект не найден или имя пустое'})
         elif path == '/assign_project':
             length = int(self.headers.get('Content-Length',0))
             params = json.loads(self.rfile.read(length))
